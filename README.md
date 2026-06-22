@@ -37,3 +37,22 @@ Each node entry describes how the hub reaches a VPS dashboard or node agent over
 ```
 
 Future secure deployment should use a local secret bridge or per-node tokens outside this repo.
+
+## Media Push
+
+The hub uploads media to VPS nodes through the existing dashboard chunk API.
+
+- Public upload windows are preferred when a node supports `/api/public-upload/open`.
+- The temporary public token is held in memory only and is never written to logs or config.
+- Chunk uploads retry a small number of times before cleanup.
+- Failed pushes call `/api/upload-chunk/cancel` through the node `base_url`, then close the public window if one was opened.
+
+Useful environment variables:
+
+```text
+STREAM_HUB_NODE_UPLOAD_CHUNK_BYTES=8388608
+STREAM_HUB_NODE_PUBLIC_UPLOAD_CHUNK_BYTES=16777216
+STREAM_HUB_NODE_UPLOAD_TIMEOUT_SECONDS=300
+STREAM_HUB_NODE_PUBLIC_UPLOAD_TTL_SECONDS=900
+STREAM_HUB_NODE_UPLOAD_RETRIES=2
+```

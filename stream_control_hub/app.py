@@ -5,6 +5,8 @@ import os
 import shutil
 import subprocess
 import time
+import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,11 @@ SOURCE_REPO = os.environ.get(
 )
 SOURCE_BRANCH = os.environ.get("STREAM_HUB_SOURCE_BRANCH", "main")
 ALLOWED_MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
+NODE_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_CHUNK_BYTES", str(8 * 1024 ** 2)))
+NODE_PUBLIC_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_NODE_PUBLIC_UPLOAD_CHUNK_BYTES", str(16 * 1024 ** 2)))
+NODE_UPLOAD_TIMEOUT_SECONDS = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_TIMEOUT_SECONDS", "300"))
+NODE_PUBLIC_UPLOAD_TTL_SECONDS = int(os.environ.get("STREAM_HUB_NODE_PUBLIC_UPLOAD_TTL_SECONDS", "900"))
+NODE_UPLOAD_RETRIES = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_RETRIES", "2"))
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("STREAM_HUB_MAX_UPLOAD_BYTES", str(200 * 1024 ** 3)))
@@ -379,7 +386,7 @@ def node_by_id(node_id: str) -> dict[str, Any] | None:
 
 
 def request_node_json(node: dict[str, Any], path: str, *, timeout: int = 6) -> dict[str, Any]:
-    base_url = str(node.get("base_url") or "").rstrip("/")
+    base_url = node_base_url(node)
     if not base_url:
         return {"ok": False, "message": "missing node base_url"}
     try:
@@ -389,6 +396,267 @@ def request_node_json(node: dict[str, Any], path: str, *, timeout: int = 6) -> d
         return data
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
+
+
+def node_base_url(node: dict[str, Any]) -> str:
+    return str(node.get("base_url") or "").rstrip("/")
+
+
+def post_node_json(node: dict[str, Any], path: str, payload: dict[str, Any], *, timeout: int = 15) -> dict[str, Any]:
+    base_url = node_base_url(node)
+    if not base_url:
+        return {"ok": False, "message": "missing node base_url"}
+    try:
+        resp = requests.post(f"{base_url}{path}", json=payload, timeout=timeout)
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {"message": resp.text[:500]}
+        data.setdefault("ok", resp.ok)
+        data.setdefault("status_code", resp.status_code)
+        return data
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+def public_upload_summary(data: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in data.items() if key != "token"}
+
+
+def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
+    base_url = node_base_url(node)
+    if not base_url:
+        raise ValueError("missing node base_url")
+
+    status = request_node_json(node, "/api/public-upload", timeout=10)
+    route = {
+        "base_url": base_url,
+        "upload_base_url": base_url,
+        "route": "internal",
+        "route_label": "internal",
+        "token": "",
+        "headers": {},
+        "opened_public_window": False,
+        "chunk_bytes": NODE_UPLOAD_CHUNK_BYTES,
+        "public_status": public_upload_summary(status),
+        "warnings": [],
+        "last_heartbeat_at": 0.0,
+    }
+    if not status.get("ok"):
+        route["warnings"].append(status.get("message") or "public upload status unavailable")
+        return route
+
+    public_origin = str(status.get("public_origin") or "").rstrip("/")
+    restrict_public = bool(status.get("restrict_public_to_upload"))
+    supports_window = bool(status.get("supported"))
+
+    if supports_window:
+        opened = post_node_json(
+            node,
+            "/api/public-upload/open",
+            {
+                "ttl_seconds": NODE_PUBLIC_UPLOAD_TTL_SECONDS,
+                "mode": "auto",
+                "reason": "stream-control-hub-media-push",
+            },
+            timeout=20,
+        )
+        if opened.get("ok"):
+            token = str(opened.get("token") or "")
+            opened_origin = str(opened.get("public_origin") or public_origin).rstrip("/")
+            if opened_origin:
+                route.update({
+                    "upload_base_url": opened_origin,
+                    "route": "public-window",
+                    "route_label": "public window",
+                    "token": token,
+                    "headers": {"X-Public-Upload-Token": token} if token else {},
+                    "opened_public_window": True,
+                    "chunk_bytes": NODE_PUBLIC_UPLOAD_CHUNK_BYTES,
+                    "public_status": public_upload_summary(opened),
+                    "last_heartbeat_at": time.time(),
+                })
+                return route
+        route["warnings"].append(opened.get("message") or "failed to open public upload window")
+
+    if public_origin and not restrict_public:
+        route.update({
+            "upload_base_url": public_origin,
+            "route": "public-direct",
+            "route_label": "public direct",
+            "chunk_bytes": NODE_PUBLIC_UPLOAD_CHUNK_BYTES,
+        })
+    return route
+
+
+def route_summary(route: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "route": route.get("route"),
+        "route_label": route.get("route_label"),
+        "upload_base_url": route.get("upload_base_url"),
+        "opened_public_window": bool(route.get("opened_public_window")),
+        "chunk_bytes": route.get("chunk_bytes"),
+        "warnings": route.get("warnings") or [],
+    }
+
+
+def touch_node_public_upload(node: dict[str, Any], route: dict[str, Any]) -> None:
+    if not route.get("opened_public_window") or not route.get("token"):
+        return
+    now = time.time()
+    if now - float(route.get("last_heartbeat_at") or 0) < 30:
+        return
+    result = post_node_json(
+        node,
+        "/api/public-upload/heartbeat",
+        {
+            "ttl_seconds": NODE_PUBLIC_UPLOAD_TTL_SECONDS,
+            "reason": "stream-control-hub-media-push-heartbeat",
+            "token": route.get("token"),
+        },
+        timeout=15,
+    )
+    if not result.get("ok"):
+        raise RuntimeError(result.get("message") or "failed to refresh public upload window")
+    route["last_heartbeat_at"] = now
+
+
+def close_node_public_upload(node: dict[str, Any], route: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    if not route.get("opened_public_window"):
+        return {"ok": True, "skipped": True}
+    result = post_node_json(
+        node,
+        "/api/public-upload/close",
+        {"release_auto": True, "reason": reason},
+        timeout=20,
+    )
+    return public_upload_summary(result)
+
+
+def cancel_node_upload(node: dict[str, Any], upload_id: str) -> dict[str, Any]:
+    return post_node_json(node, "/api/upload-chunk/cancel", {"upload_id": upload_id}, timeout=30)
+
+
+def upload_chunk_to_node(
+    media_path: Path,
+    route: dict[str, Any],
+    *,
+    upload_id: str,
+    chunk_index: int,
+    total_chunks: int,
+    offset: int,
+    total_size: int,
+    chunk_size: int,
+) -> dict[str, Any]:
+    with media_path.open("rb") as stream:
+        stream.seek(offset)
+        chunk_bytes = stream.read(min(chunk_size, total_size - offset))
+
+    data = {
+        "upload_id": upload_id,
+        "filename": media_path.name,
+        "chunk_index": str(chunk_index),
+        "total_chunks": str(total_chunks),
+        "offset": str(offset),
+        "total_size": str(total_size),
+        "chunk_size": str(chunk_size),
+    }
+    files = {"chunk": (media_path.name, chunk_bytes, "application/octet-stream")}
+    try:
+        resp = requests.post(
+            f"{str(route['upload_base_url']).rstrip('/')}/api/upload-chunk",
+            data=data,
+            files=files,
+            headers=route.get("headers") or {},
+            timeout=NODE_UPLOAD_TIMEOUT_SECONDS,
+        )
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {"message": resp.text[:500]}
+        payload.setdefault("status_code", resp.status_code)
+        payload["ok"] = resp.ok and bool(payload.get("ok", False))
+        return payload
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+def push_media_to_node(node: dict[str, Any], media_path: Path) -> dict[str, Any]:
+    node_id = str(node.get("id") or "")
+    upload_id = f"hub_{uuid.uuid4().hex}"
+    total_size = media_path.stat().st_size
+    if total_size <= 0:
+        return {"node_id": node_id, "ok": False, "message": "media file is empty"}
+
+    started_at = time.time()
+    route: dict[str, Any] | None = None
+    last_payload: dict[str, Any] = {}
+    received_size = 0
+    try:
+        route = select_node_upload_route(node)
+        chunk_size = int(route.get("chunk_bytes") or NODE_UPLOAD_CHUNK_BYTES)
+        total_chunks = (total_size + chunk_size - 1) // chunk_size
+
+        for chunk_index in range(total_chunks):
+            offset = chunk_index * chunk_size
+            touch_node_public_upload(node, route)
+            payload: dict[str, Any] | None = None
+            for attempt in range(NODE_UPLOAD_RETRIES + 1):
+                payload = upload_chunk_to_node(
+                    media_path,
+                    route,
+                    upload_id=upload_id,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    offset=offset,
+                    total_size=total_size,
+                    chunk_size=chunk_size,
+                )
+                if payload.get("ok"):
+                    break
+                if attempt < NODE_UPLOAD_RETRIES:
+                    time.sleep(min(5, 0.8 * (attempt + 1)))
+            last_payload = payload or {}
+            if not last_payload.get("ok"):
+                raise RuntimeError(last_payload.get("message") or f"chunk {chunk_index + 1} upload failed")
+            received_size = max(received_size, int(last_payload.get("received_size") or 0))
+
+        if not last_payload.get("complete"):
+            raise RuntimeError("node did not report upload completion")
+
+        close_result = close_node_public_upload(node, route, reason="stream-control-hub-media-push-complete")
+        elapsed = max(0.001, time.time() - started_at)
+        return {
+            "node_id": node_id,
+            "ok": True,
+            "message": "media pushed to node",
+            "media": media_path.name,
+            "size": total_size,
+            "size_label": file_size_label(total_size),
+            "received_size": received_size,
+            "elapsed_seconds": round(elapsed, 2),
+            "average_rate_label": f"{file_size_label(int(total_size / elapsed))}/s",
+            "video_path": last_payload.get("video_path"),
+            "route": route_summary(route),
+            "close_public_window": close_result,
+        }
+    except Exception as exc:
+        cleanup = cancel_node_upload(node, upload_id)
+        close_result: dict[str, Any] = {"ok": True, "skipped": True}
+        if route:
+            with suppress(Exception):
+                close_result = close_node_public_upload(node, route, reason="stream-control-hub-media-push-failed")
+        return {
+            "node_id": node_id,
+            "ok": False,
+            "message": str(exc),
+            "media": media_path.name,
+            "received_size": received_size,
+            "last_response": public_upload_summary(last_payload),
+            "route": route_summary(route) if route else None,
+            "cleanup": public_upload_summary(cleanup),
+            "close_public_window": close_result,
+        }
 
 
 def media_allowed(filename: str) -> bool:
@@ -461,25 +729,28 @@ def api_media_push():
     node_ids = [str(item) for item in payload.get("node_ids") or []]
     media_name = secure_filename(str(payload.get("media_name") or ""))
     media_path = MEDIA_DIR / media_name
+    if not node_ids:
+        return jsonify({"ok": False, "message": "no nodes selected"}), 400
     if not media_path.exists():
         return jsonify({"ok": False, "message": "media not found"}), 404
+    if not media_path.is_file() or not media_allowed(media_path.name):
+        return jsonify({"ok": False, "message": "unsupported media file"}), 400
 
-    # First version is intentionally conservative: it only reports the plan.
-    # Node push transport will be wired to the chosen secure bridge or node agent.
-    plans = []
+    results = []
     for node_id in node_ids:
         node = node_by_id(node_id)
         if not node:
-            plans.append({"node_id": node_id, "ok": False, "message": "node not found"})
+            results.append({"node_id": node_id, "ok": False, "message": "node not found"})
             continue
-        plans.append({
-            "node_id": node_id,
-            "ok": False,
-            "message": "push transport not configured yet",
-            "target": str(node.get("base_url") or ""),
-            "media": media_name,
-        })
-    return jsonify({"ok": True, "plans": plans})
+        if not node.get("enabled", True):
+            results.append({"node_id": node_id, "ok": False, "message": "node disabled"})
+            continue
+        results.append(push_media_to_node(node, media_path))
+    return jsonify({
+        "ok": all(item.get("ok") for item in results) if results else False,
+        "media": media_name,
+        "results": results,
+    })
 
 
 def run_git(args: list[str], cwd: Path | None = None, timeout: int = 60) -> dict[str, Any]:
@@ -544,4 +815,3 @@ def api_nodes_upgrade():
 def main() -> None:
     ensure_dirs()
     APP.run(host=os.environ.get("STREAM_HUB_HOST", "127.0.0.1"), port=PORT, threaded=True)
-
