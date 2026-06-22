@@ -88,12 +88,12 @@ HTML = r"""
     }
     h1 { margin: 0; font-size: 30px; letter-spacing: -0.03em; }
     p { color: var(--muted); margin: 8px 0 0; line-height: 1.6; }
-    .grid { display: grid; grid-template-columns: minmax(620px, 1fr) minmax(390px, 420px); gap: 14px; margin-top: 14px; align-items: start; }
+    .grid { display: grid; grid-template-columns: minmax(620px, 1fr) minmax(390px, 420px); gap: 12px; margin-top: 12px; align-items: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
     .card {
       border: 1px solid var(--line);
       border-radius: 16px;
-      padding: 14px;
+      padding: 12px;
       background: rgba(19, 32, 28, 0.9);
       box-shadow: 0 18px 60px rgba(0,0,0,0.18);
     }
@@ -124,7 +124,47 @@ HTML = r"""
       border: 1px solid rgba(49, 89, 76, 0.8);
       background: rgba(25, 43, 37, 0.78);
     }
-    .monitor-card { min-height: 720px; }
+    .command-strip {
+      margin-top: 12px;
+      border-color: rgba(251, 191, 36, 0.45);
+      background:
+        radial-gradient(circle at 8% 0%, rgba(251, 191, 36, 0.14), transparent 24%),
+        rgba(25, 35, 27, 0.95);
+    }
+    .command-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+    .command-head h2 { margin: 0 0 4px; font-size: 18px; }
+    .command-head p { margin: 0; font-size: 13px; }
+    .command-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1.35fr 1.45fr 1.25fr auto;
+      gap: 10px;
+      align-items: end;
+    }
+    .command-field { display: grid; gap: 5px; min-width: 0; }
+    .command-field label { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .command-field input,
+    .command-field select { min-width: 0; padding: 8px 10px; }
+    .command-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .command-actions {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 7px;
+      min-width: 136px;
+    }
+    .command-actions button { padding: 8px 10px; }
+    .tune-output {
+      grid-column: 1 / -1;
+      min-height: 70px;
+      max-height: 140px;
+      margin-top: 2px;
+    }
+    .monitor-card { min-height: 620px; }
     .monitor-heading {
       display: flex;
       justify-content: space-between;
@@ -133,9 +173,9 @@ HTML = r"""
     }
     .monitor-heading p { margin: 0; font-size: 13px; }
     .node-monitor {
-      min-height: 640px;
+      min-height: 540px;
       border-radius: 16px;
-      padding: 16px;
+      padding: 12px;
       border: 1px solid rgba(54, 211, 153, 0.35);
       background:
         linear-gradient(rgba(54, 211, 153, 0.035) 1px, transparent 1px),
@@ -149,24 +189,57 @@ HTML = r"""
     .monitor-hero {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
+      gap: 10px;
       align-items: start;
-      margin-bottom: 14px;
-      padding-bottom: 14px;
+      margin-bottom: 10px;
+      padding-bottom: 10px;
       border-bottom: 1px solid rgba(49, 89, 76, 0.55);
     }
-    .monitor-hero h3 { margin: 0; font-size: 28px; letter-spacing: -0.03em; }
+    .monitor-hero h3 { margin: 0; font-size: 24px; letter-spacing: -0.03em; }
     .monitor-hero small { color: var(--muted); display: block; margin-top: 4px; }
-    .monitor-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
-    .monitor-panel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .health-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+    .health-donut {
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid rgba(49, 89, 76, 0.75);
+      border-radius: 12px;
+      background: rgba(8, 17, 14, 0.38);
+      min-width: 0;
+    }
+    .donut {
+      width: 54px;
+      height: 54px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at center, #07110e 0 54%, transparent 55%),
+        conic-gradient(var(--donut-color, var(--accent)) calc(var(--value, 0) * 1%), rgba(255,255,255,0.08) 0);
+      box-shadow: inset 0 0 14px rgba(0,0,0,0.24);
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .donut-info small { color: var(--muted); display: block; font-size: 12px; }
+    .donut-info strong { display: block; font-size: 16px; line-height: 1.2; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .network-panel {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .network-live { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .monitor-panel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .monitor-panel {
       border: 1px solid rgba(49, 89, 76, 0.75);
-      border-radius: 14px;
-      padding: 12px;
+      border-radius: 12px;
+      padding: 9px;
       background: rgba(9, 17, 14, 0.58);
     }
-    .monitor-panel h4 { margin: 0 0 8px; font-size: 15px; color: #d6fff0; }
-    .node-table-card { min-height: 720px; }
+    .monitor-panel h4 { margin: 0 0 6px; font-size: 14px; color: #d6fff0; }
+    .node-table-card { min-height: 620px; }
     .node-table-toolbar {
       display: flex;
       justify-content: space-between;
@@ -177,8 +250,8 @@ HTML = r"""
     .node-table-toolbar p { margin: 0; font-size: 13px; }
     .node-table {
       display: grid;
-      gap: 8px;
-      max-height: 650px;
+      gap: 7px;
+      max-height: 560px;
       overflow: auto;
       padding-right: 3px;
     }
@@ -200,8 +273,8 @@ HTML = r"""
       border-bottom: 1px solid rgba(49, 89, 76, 0.55);
     }
     .node-row {
-      min-height: 58px;
-      padding: 9px 10px;
+      min-height: 50px;
+      padding: 7px 9px;
       border: 1px solid rgba(49, 89, 76, 0.75);
       border-radius: 12px;
       background: rgba(25, 43, 37, 0.72);
@@ -248,15 +321,15 @@ HTML = r"""
     }
     .node-title strong { display: block; font-size: 18px; }
     .node-title small { color: var(--muted); display: block; margin-top: 3px; }
-    .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
     .metric {
       border: 1px solid rgba(49, 89, 76, 0.75);
-      border-radius: 12px;
-      padding: 10px;
+      border-radius: 10px;
+      padding: 8px;
       background: rgba(8, 17, 14, 0.35);
     }
     .metric small, .mini-table small { color: var(--muted); display: block; font-size: 12px; }
-    .metric strong { display: block; font-size: 22px; margin-top: 3px; }
+    .metric strong { display: block; font-size: 20px; margin-top: 2px; }
     .bar {
       height: 8px;
       border-radius: 999px;
@@ -273,9 +346,9 @@ HTML = r"""
     .mini-table { display: grid; gap: 8px; }
     .mini-row {
       display: grid;
-      grid-template-columns: 130px minmax(0, 1fr);
+      grid-template-columns: 112px minmax(0, 1fr);
       gap: 8px;
-      padding: 8px 0;
+      padding: 5px 0;
       border-bottom: 1px solid rgba(49, 89, 76, 0.4);
     }
     .mini-row:last-child { border-bottom: none; }
@@ -309,7 +382,7 @@ HTML = r"""
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     @media (max-width: 1080px) {
-      .grid, .split, .hero, .node-detail, .bottom-section, .monitor-metrics, .monitor-panel-grid { grid-template-columns: 1fr; }
+      .grid, .split, .hero, .node-detail, .bottom-section, .health-strip, .network-panel, .network-live, .monitor-panel-grid, .command-grid { grid-template-columns: 1fr; }
       .bottom-section { grid-column: auto; }
       .monitor-card, .node-table-card { min-height: auto; }
       .node-monitor { min-height: 420px; }
@@ -331,6 +404,79 @@ HTML = r"""
         <button class="primary" id="refreshBtn">刷新状态</button>
         <button id="policyBtn">Upload Policy</button>
         <button id="auditBtn">Push Audit</button>
+      </div>
+    </section>
+
+    <section class="card command-strip">
+      <div class="command-head">
+        <div>
+          <h2>开播指挥条 / Smart Start</h2>
+          <p>和右侧 VPS 节点表联动：右侧选中哪台，这里就控制哪台。先核对目标节点，再填直播码、选视频、调优、开播。</p>
+        </div>
+        <span class="pill warn">核对节点后再开播</span>
+      </div>
+      <div class="command-grid">
+        <div class="command-field">
+          <label>当前控制节点</label>
+          <input id="streamNodeInput" type="text" readonly value="选择右侧 VPS 节点">
+          <small id="streamNodeHint" class="mono">等待选择节点</small>
+        </div>
+        <div class="command-field">
+          <label>服务器视频</label>
+          <select id="streamVideoSelect">
+            <option value="">先选择节点...</option>
+          </select>
+        </div>
+        <div class="command-field">
+          <label>YouTube Stream Key</label>
+          <input id="streamKeyInput" type="password" autocomplete="off" placeholder="粘贴直播码，只会转发到当前节点">
+        </div>
+        <div class="command-field">
+          <label>输出 / 自适应</label>
+          <div class="command-pair">
+            <select id="streamOutputModeInput">
+              <option value="direct">直接推 YouTube</option>
+              <option value="local_relay">本地中继</option>
+            </select>
+            <select id="adaptiveModeInput">
+              <option value="auto">自动调优</option>
+              <option value="off">固定参数</option>
+            </select>
+          </div>
+        </div>
+        <div class="command-actions">
+          <button id="previewTuneBtn">预览调优</button>
+          <button class="primary" id="smartStartBtn">Smart Start</button>
+        </div>
+        <div class="command-field">
+          <label>RTMP 地址</label>
+          <input id="streamUrlInput" type="text" value="rtmp://a.rtmp.youtube.com/live2">
+        </div>
+        <div class="command-field">
+          <label>分辨率 / FPS</label>
+          <div class="command-pair">
+            <input id="resolutionInput" type="text" value="1280x720" placeholder="分辨率">
+            <input id="fpsInput" type="number" value="30" min="15" max="60" placeholder="FPS">
+          </div>
+        </div>
+        <div class="command-field">
+          <label>码率</label>
+          <div class="command-pair">
+            <input id="videoBitrateInput" type="number" value="4500" min="800" placeholder="视频 kbps">
+            <input id="audioBitrateInput" type="number" value="192" min="64" placeholder="音频 kbps">
+          </div>
+        </div>
+        <div class="command-field">
+          <label>编码 / 关键帧</label>
+          <div class="command-pair">
+            <input id="presetInput" type="text" value="veryfast" placeholder="preset">
+            <input id="keyframeInput" type="number" value="2" min="1" max="4" placeholder="关键帧秒">
+          </div>
+        </div>
+        <div class="command-actions">
+          <button id="applyTuneBtn">应用推荐</button>
+        </div>
+        <pre id="tuneBox" class="tune-output">选择右侧节点和服务器视频后，可以预览推荐参数；Smart Start 会停止重复推流并启动一个干净 FFmpeg。</pre>
       </div>
     </section>
 
@@ -375,56 +521,6 @@ HTML = r"""
       </div>
 
       <div class="card">
-        <h2>开播控制 / 智能调优</h2>
-        <p>选择右侧节点后，在这里填推流码、选择该节点服务器视频，并用节点本机环境生成推荐参数。</p>
-        <div class="split">
-          <div>
-            <label>目标节点</label>
-            <input id="streamNodeInput" type="text" readonly value="选择右侧 VPS 节点">
-            <label style="display:block; margin-top: 10px;">服务器视频</label>
-            <select id="streamVideoSelect">
-              <option value="">先选择节点...</option>
-            </select>
-            <label style="display:block; margin-top: 10px;">YouTube Stream Key</label>
-            <input id="streamKeyInput" type="password" autocomplete="off" placeholder="粘贴直播码，只会转发到选中节点">
-            <label style="display:block; margin-top: 10px;">RTMP 地址</label>
-            <input id="streamUrlInput" type="text" value="rtmp://a.rtmp.youtube.com/live2">
-          </div>
-          <div>
-            <label>输出模式</label>
-            <select id="streamOutputModeInput">
-              <option value="direct">直接推 YouTube</option>
-              <option value="local_relay">本地中继</option>
-            </select>
-            <label style="display:block; margin-top: 10px;">自适应</label>
-            <select id="adaptiveModeInput">
-              <option value="auto">自动调优</option>
-              <option value="off">固定参数</option>
-            </select>
-            <label style="display:block; margin-top: 10px;">编码参数</label>
-            <div class="split">
-              <input id="resolutionInput" type="text" value="1280x720" placeholder="分辨率">
-              <input id="fpsInput" type="number" value="30" min="15" max="60" placeholder="FPS">
-            </div>
-            <div class="split" style="margin-top: 8px;">
-              <input id="videoBitrateInput" type="number" value="4500" min="800" placeholder="视频 kbps">
-              <input id="audioBitrateInput" type="number" value="192" min="64" placeholder="音频 kbps">
-            </div>
-            <div class="split" style="margin-top: 8px;">
-              <input id="presetInput" type="text" value="veryfast" placeholder="preset">
-              <input id="keyframeInput" type="number" value="2" min="1" max="4" placeholder="关键帧秒">
-            </div>
-          </div>
-        </div>
-        <div class="actions" style="margin-top: 12px;">
-          <button id="previewTuneBtn">预览智能调优</button>
-          <button class="primary" id="smartStartBtn">Smart Start 开播</button>
-          <button id="applyTuneBtn">应用推荐参数</button>
-        </div>
-        <pre id="tuneBox" style="margin-top: 12px;">选择节点和服务器视频后，可以预览推荐参数；Smart Start 会停止重复推流并启动一个干净 FFmpeg。</pre>
-      </div>
-
-      <div class="card">
         <h2>策略 / 审计 / 操作日志</h2>
         <pre id="updateBox">点击 Upload Policy 或 Push Audit 查看系统规则与最近推送记录。</pre>
         <div style="height: 10px;"></div>
@@ -462,6 +558,7 @@ HTML = r"""
       uploadBtn: document.getElementById("uploadBtn"),
       pushSelectedBtn: document.getElementById("pushSelectedBtn"),
       streamNodeInput: document.getElementById("streamNodeInput"),
+      streamNodeHint: document.getElementById("streamNodeHint"),
       streamVideoSelect: document.getElementById("streamVideoSelect"),
       streamKeyInput: document.getElementById("streamKeyInput"),
       streamUrlInput: document.getElementById("streamUrlInput"),
@@ -548,6 +645,19 @@ HTML = r"""
       `;
     }
 
+    function donut(label, value, percent, color = "var(--accent)") {
+      const safePercent = pct(percent);
+      return `
+        <div class="health-donut">
+          <div class="donut" style="--value:${safePercent}; --donut-color:${color};">${Math.round(safePercent)}%</div>
+          <div class="donut-info">
+            <small>${escapeHtml(label)}</small>
+            <strong>${escapeHtml(value)}</strong>
+          </div>
+        </div>
+      `;
+    }
+
     function miniRow(label, value) {
       return `<div class="mini-row"><small>${escapeHtml(label)}</small><span>${escapeHtml(value)}</span></div>`;
     }
@@ -586,6 +696,8 @@ HTML = r"""
       const publicUpload = h.public_upload || {};
       const videos = h.videos || [];
       const loadText = Array.isArray(h.load_avg) ? h.load_avg.join(" / ") : (h.load_avg || "--");
+      const loadOne = Array.isArray(h.load_avg) ? Number(h.load_avg[0] || 0) : Number(String(h.load_avg || "0").split("/")[0] || 0);
+      const loadPercent = h.cpu_count ? Math.min(100, (loadOne / Math.max(1, Number(h.cpu_count))) * 100) : 0;
       const bitrate = stream.current_bitrate_label || (stream.current_bitrate_kbps ? `${stream.current_bitrate_kbps} Kbps` : "未知");
       const processText = stream.processes?.length ? `${stream.processes.length} 个进程` : "未检测到";
       const videoList = videos.length
@@ -609,32 +721,29 @@ HTML = r"""
           ${nodeStatusPill(node)}
         </div>
 
-        <div class="monitor-metrics">
-          ${metric("当前推流码率", bitrate)}
-          ${metric("CPU", `${Number(h.cpu_percent || 0).toFixed(1)}%`, h.cpu_percent)}
-          ${metric("实时上传", fmtRate(net.current_upload_bps || 0))}
-          ${metric("实时下载", fmtRate(net.current_download_bps || 0))}
+        <div class="health-strip">
+          ${donut("CPU", `${Number(h.cpu_percent || 0).toFixed(1)}%`, h.cpu_percent)}
+          ${donut("内存", `${Number(h.memory?.percent || 0).toFixed(1)}%`, h.memory?.percent)}
+          ${donut("硬盘", `${Number(h.disk?.percent || 0).toFixed(1)}%`, h.disk?.percent)}
+          ${donut("负载", loadText, loadPercent, "#fbbf24")}
+          ${donut("推流", stream.running ? "运行中" : "未推流", stream.running ? 100 : 0, stream.running ? "var(--accent)" : "var(--danger)")}
         </div>
 
-        <div class="monitor-panel-grid">
+        <div class="network-panel">
           <div class="monitor-panel">
-            <h4>机器健康</h4>
-            <div class="metric-grid">
-              ${metric("内存", `${Number(h.memory?.percent || 0).toFixed(1)}%`, h.memory?.percent)}
-              ${metric("硬盘", `${Number(h.disk?.percent || 0).toFixed(1)}%`, h.disk?.percent)}
-              ${metric("逻辑核心", h.cpu_count || "--")}
-              ${metric("负载", loadText)}
+            <h4>网络实时</h4>
+            <div class="network-live">
+              ${metric("实时上传", fmtRate(net.current_upload_bps || 0))}
+              ${metric("实时下载", fmtRate(net.current_download_bps || 0))}
             </div>
             <div class="mini-table" style="margin-top: 10px;">
-              ${miniRow("系统在线", h.uptime || "--")}
-              ${miniRow("面板在线", h.app_uptime || "--")}
-              ${miniRow("内存用量", `${fmtBytes(h.memory?.used || 0)} / ${fmtBytes(h.memory?.total || 0)}`)}
-              ${miniRow("硬盘用量", `${fmtBytes(h.disk?.used || 0)} / ${fmtBytes(h.disk?.total || 0)}`)}
+              ${miniRow("速率标签", net.rate_label || "--")}
+              ${miniRow("上传策略", "公网优先 / 慢速回落内网 / 分块重试")}
             </div>
           </div>
 
           <div class="monitor-panel">
-            <h4>网络吞吐</h4>
+            <h4>网络累计</h4>
             <div class="metric-grid">
               ${metric("累计发送", fmtBytes(net.bytes_sent || 0))}
               ${metric("累计接收", fmtBytes(net.bytes_recv || 0))}
@@ -644,8 +753,19 @@ HTML = r"""
             <div class="mini-table" style="margin-top: 10px;">
               ${miniRow("总额度", fmtBytes(quota.limit || 0))}
               ${miniRow("已用总量", fmtBytes(quota.total_used || 0))}
-              ${miniRow("速率标签", net.rate_label || "--")}
-              ${miniRow("上传策略", "公网优先 / 慢速回落内网 / 分块重试")}
+            </div>
+          </div>
+        </div>
+
+        <div class="monitor-panel-grid">
+          <div class="monitor-panel">
+            <h4>机器详情</h4>
+            <div class="mini-table">
+              ${miniRow("逻辑核心", h.cpu_count || "--")}
+              ${miniRow("系统在线", h.uptime || "--")}
+              ${miniRow("面板在线", h.app_uptime || "--")}
+              ${miniRow("内存用量", `${fmtBytes(h.memory?.used || 0)} / ${fmtBytes(h.memory?.total || 0)}`)}
+              ${miniRow("硬盘用量", `${fmtBytes(h.disk?.used || 0)} / ${fmtBytes(h.disk?.total || 0)}`)}
             </div>
           </div>
 
@@ -776,6 +896,9 @@ HTML = r"""
       const h = node?.health || {};
       const videos = h.videos || [];
       refs.streamNodeInput.value = node ? `${node.name || node.id} (${node.id})` : "选择右侧 VPS 节点";
+      refs.streamNodeHint.textContent = node
+        ? `${h.ok ? "在线" : "离线"} / ${h.agent?.mode || "旧客户端"} / ${h.stream?.running ? "推流中" : "未推流"}`
+        : "等待选择节点";
       refs.streamVideoSelect.innerHTML = videos.length ? videos.map((item) => `
         <option value="${escapeHtml(item.video_path || item.path || item.name)}">${escapeHtml(item.name || item.video_path || item.path)} (${escapeHtml(fmtBytes(item.size || 0))})</option>
       `).join("") : `<option value="">该节点暂无服务器视频，请先推送视频</option>`;
