@@ -88,7 +88,9 @@ HTML = r"""
     }
     h1 { margin: 0; font-size: 30px; letter-spacing: -0.03em; }
     p { color: var(--muted); margin: 8px 0 0; line-height: 1.6; }
-    .grid { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 14px; margin-top: 14px; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(360px, 0.7fr); gap: 14px; margin-top: 14px; }
+    .node-section { grid-column: 1 / -1; }
+    .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
     .card {
       border: 1px solid var(--line);
       border-radius: 16px;
@@ -111,7 +113,7 @@ HTML = r"""
     button.danger { background: #6f1d2d; color: #ffe4ea; }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
     input[type=file] { width: 100%; }
-    .node-list, .media-list, .log { display: grid; gap: 8px; }
+    .node-list, .media-list, .log { display: grid; gap: 10px; }
     .node, .media {
       display: grid;
       grid-template-columns: auto 1fr auto;
@@ -122,6 +124,57 @@ HTML = r"""
       border: 1px solid rgba(49, 89, 76, 0.8);
       background: rgba(25, 43, 37, 0.78);
     }
+    .node-detail {
+      display: grid;
+      grid-template-columns: 1.05fr 1.15fr 0.9fr;
+      gap: 12px;
+      padding: 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(49, 89, 76, 0.85);
+      background: rgba(25, 43, 37, 0.78);
+    }
+    .node-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+    .node-title strong { display: block; font-size: 18px; }
+    .node-title small { color: var(--muted); display: block; margin-top: 3px; }
+    .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .metric {
+      border: 1px solid rgba(49, 89, 76, 0.75);
+      border-radius: 12px;
+      padding: 10px;
+      background: rgba(8, 17, 14, 0.35);
+    }
+    .metric small, .mini-table small { color: var(--muted); display: block; font-size: 12px; }
+    .metric strong { display: block; font-size: 22px; margin-top: 3px; }
+    .bar {
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .bar > span {
+      display: block;
+      height: 100%;
+      width: var(--value, 0%);
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    }
+    .mini-table { display: grid; gap: 8px; }
+    .mini-row {
+      display: grid;
+      grid-template-columns: 130px minmax(0, 1fr);
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(49, 89, 76, 0.4);
+    }
+    .mini-row:last-child { border-bottom: none; }
+    .mono { font-family: "Cascadia Mono", "Consolas", monospace; word-break: break-word; }
+    .compact-card { padding: 10px; }
     .node strong, .media strong { display: block; }
     .node small, .media small { color: var(--muted); }
     .pill {
@@ -150,7 +203,8 @@ HTML = r"""
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     @media (max-width: 980px) {
-      .grid, .split, .hero { grid-template-columns: 1fr; }
+      .grid, .split, .hero, .node-detail, .bottom-section { grid-template-columns: 1fr; }
+      .node-section, .bottom-section { grid-column: auto; }
     }
   </style>
 </head>
@@ -163,44 +217,52 @@ HTML = r"""
       </div>
       <div class="actions">
         <button class="primary" id="refreshBtn">刷新状态</button>
-        <button id="checkUpdatesBtn">检查 GitHub 更新</button>
         <button id="policyBtn">Upload Policy</button>
         <button id="auditBtn">Push Audit</button>
       </div>
     </section>
 
     <section class="grid">
-      <div class="card">
-        <h2>VPS 节点</h2>
+      <div class="card node-section">
+        <h2>VPS 节点健康与推流状态</h2>
         <div class="node-list" id="nodeList">加载中...</div>
       </div>
 
       <div class="card">
-        <h2>GitHub 更新</h2>
-        <div class="actions">
-          <button class="primary" id="upgradeSelectedBtn">更新选中节点</button>
-        </div>
-        <pre id="updateBox">等待检查...</pre>
-      </div>
-
-      <div class="card">
-        <h2>本地资源库</h2>
+        <h2>本地资源与推送</h2>
         <div class="split">
           <div>
             <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
             <div class="actions" style="margin-top: 8px;">
-              <button class="primary" id="uploadBtn">上传到本地总控台</button>
-              <button id="pushSelectedBtn">推送选中资源到节点</button>
+              <button class="primary" id="uploadBtn">上传到总控台</button>
+              <button id="pushSelectedBtn">推送到选中 VPS</button>
             </div>
           </div>
-          <pre id="uploadBox">先上传到本地，再推送给 VPS。</pre>
+          <pre id="uploadBox">先把视频上传到总控台，再选择 VPS 推送。</pre>
         </div>
         <div class="media-list" id="mediaList" style="margin-top: 12px;">加载中...</div>
       </div>
 
       <div class="card">
-        <h2>操作日志</h2>
+        <h2>策略 / 审计 / 操作日志</h2>
+        <pre id="updateBox">点击 Upload Policy 或 Push Audit 查看系统规则与最近推送记录。</pre>
+        <div style="height: 10px;"></div>
         <pre id="logBox">就绪。</pre>
+      </div>
+
+      <div class="bottom-section">
+        <div class="card compact-card">
+          <h2>GitHub 更新</h2>
+          <p>低频维护功能放在底部，不占用节点监控主视野。</p>
+          <div class="actions">
+            <button id="checkUpdatesBtn">检查 GitHub 更新</button>
+            <button class="primary" id="upgradeSelectedBtn">更新选中节点</button>
+          </div>
+        </div>
+        <div class="card compact-card">
+          <h2>当前策略</h2>
+          <p>上传链路固定为 safe-stable-fast：公网 probe、速度阈值、失败切内网、审计脱敏。</p>
+        </div>
       </div>
     </section>
   </div>
@@ -243,18 +305,116 @@ HTML = r"""
       return `<span class="pill">online</span>`;
     }
 
-    function renderNodes() {
-      refs.nodeList.innerHTML = nodes.length ? nodes.map((node) => `
-        <label class="node">
+    function fmtBytes(bytes) {
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let value = Number(bytes || 0);
+      let index = 0;
+      while (value >= 1024 && index < units.length - 1) {
+        value /= 1024;
+        index += 1;
+      }
+      return index ? `${value.toFixed(1)} ${units[index]}` : `${Math.round(value)} B`;
+    }
+
+    function fmtRate(bytesPerSecond) {
+      return `${fmtBytes(bytesPerSecond)}/s`;
+    }
+
+    function pct(value) {
+      return Math.max(0, Math.min(100, Number(value || 0)));
+    }
+
+    function metric(label, value, percent) {
+      const hasPercent = percent !== undefined && percent !== null;
+      return `
+        <div class="metric">
+          <small>${label}</small>
+          <strong>${value}</strong>
+          ${hasPercent ? `<div class="bar" style="--value:${pct(percent)}%"><span></span></div>` : ""}
+        </div>
+      `;
+    }
+
+    function miniRow(label, value) {
+      return `<div class="mini-row"><small>${label}</small><span>${value}</span></div>`;
+    }
+
+    function renderNodeDetail(node) {
+      const h = node.health || {};
+      const stream = h.stream || {};
+      const adaptive = stream.adaptive || {};
+      const autoRestart = stream.auto_restart || {};
+      const relay = stream.relay || {};
+      const tuning = stream.tuning || {};
+      const config = h.stream_config || {};
+      const net = h.net || {};
+      const quota = h.quota || {};
+      const videos = h.videos || [];
+      const processText = stream.processes?.length ? `${stream.processes.length} 个进程` : "未检测到";
+      const videoList = videos.length
+        ? videos.slice(0, 4).map((item) => `${item.name} (${fmtBytes(item.size)})`).join("<br>")
+        : "服务器暂无视频";
+
+      return `
+        <label class="node-detail">
           <input data-node-check type="checkbox" value="${node.id}" ${node.enabled ? "" : "disabled"}>
-          <span>
-            <strong>${node.name || node.id}</strong>
-            <small>${node.base_url || ""}</small><br>
-            <small>推流：${node.health?.stream?.current_bitrate_label || "未知"} | FFmpeg：${node.health?.stream?.running ? "运行中" : "未运行"}</small>
-          </span>
-          ${nodeStatusPill(node)}
+          <div>
+            <div class="node-title">
+              <span>
+                <strong>${node.name || node.id}</strong>
+                <small>${h.hostname || node.id} · ${h.platform || "未知系统"}</small>
+                <small class="mono">${node.base_url || ""}</small>
+              </span>
+              ${nodeStatusPill(node)}
+            </div>
+            <div class="metric-grid">
+              ${metric("CPU", `${Number(h.cpu_percent || 0).toFixed(1)}%`, h.cpu_percent)}
+              ${metric("内存", `${Number(h.memory?.percent || 0).toFixed(1)}%`, h.memory?.percent)}
+              ${metric("硬盘", `${Number(h.disk?.percent || 0).toFixed(1)}%`, h.disk?.percent)}
+              ${metric("负载", h.load_avg || "--")}
+            </div>
+            <div class="mini-table" style="margin-top: 10px;">
+              ${miniRow("在线时长", h.uptime || "--")}
+              ${miniRow("面板在线", h.app_uptime || "--")}
+            </div>
+          </div>
+
+          <div>
+            <div class="metric-grid">
+              ${metric("实时上传", fmtRate(net.current_upload_bps || 0))}
+              ${metric("实时下载", fmtRate(net.current_download_bps || 0))}
+              ${metric("累计发送", fmtBytes(net.bytes_sent || 0))}
+              ${metric("累计接收", fmtBytes(net.bytes_recv || 0))}
+            </div>
+            <div class="mini-table" style="margin-top: 10px;">
+              ${miniRow("总流量", `${fmtBytes(quota.total_used || 0)} / ${fmtBytes(quota.limit || 0)}`)}
+              ${miniRow("剩余额度", fmtBytes(quota.remaining || 0))}
+              ${miniRow("流量占用", `${Number(quota.total_percent || 0).toFixed(2)}%`)}
+            </div>
+          </div>
+
+          <div>
+            <div class="metric-grid">
+              ${metric("推流码率", stream.current_bitrate_label || "未知")}
+              ${metric("FFmpeg", stream.running ? "运行中" : "未运行")}
+              ${metric("进程", processText)}
+              ${metric("视频数", `${videos.length}`)}
+            </div>
+            <div class="mini-table" style="margin-top: 10px;">
+              ${miniRow("直播码", config.has_stream_key ? "已保存" : "未保存")}
+              ${miniRow("自动重启", autoRestart.enabled ? `开启 · ${autoRestart.last_error || "正常"}` : "关闭")}
+              ${miniRow("智能调参", adaptive.enabled ? `${adaptive.status || "idle"} · ${adaptive.last_error || "正常"}` : "关闭")}
+              ${miniRow("本地中继", relay.enabled ? `${relay.mode || "relay"} · ${relay.reachable ? "可达" : "不可达"}` : relay.message || "关闭")}
+              ${miniRow("FIFO 缓冲", tuning.fifo_enabled ? `${tuning.fifo_timeshift_seconds || 0}s / queue ${tuning.fifo_queue_size || 0}` : "关闭")}
+              ${miniRow("服务器视频", `<span class="mono">${videoList}</span>`)}
+            </div>
+          </div>
         </label>
-      `).join("") : "还没有配置节点。";
+      `;
+    }
+
+    function renderNodes() {
+      refs.nodeList.innerHTML = nodes.length ? nodes.map(renderNodeDetail).join("") : "还没有配置节点。";
     }
 
     function renderMedia() {
