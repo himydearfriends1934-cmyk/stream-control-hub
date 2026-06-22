@@ -488,7 +488,7 @@ def policy_brief() -> dict[str, Any]:
     policy = upload_policy()
     return {
         "name": policy["name"],
-        "safety": "memory-token/auto-close/cancel-partial/disk-guard",
+        "safety": "memory-only-secret/auto-close/cancel-partial/disk-guard",
         "stability": "probe/retry/public-to-internal-fallback",
         "speed": "public-first/probe-measured/chunked",
     }
