@@ -89,6 +89,7 @@ HTML = r"""
     h1 { margin: 0; font-size: 30px; letter-spacing: -0.03em; }
     p { color: var(--muted); margin: 8px 0 0; line-height: 1.6; }
     .grid { display: grid; grid-template-columns: minmax(620px, 1fr) minmax(390px, 420px); gap: 12px; margin-top: 12px; align-items: start; }
+    .side-stack { display: grid; gap: 12px; align-content: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
     .card {
       border: 1px solid var(--line);
@@ -239,7 +240,7 @@ HTML = r"""
       background: rgba(9, 17, 14, 0.58);
     }
     .monitor-panel h4 { margin: 0 0 6px; font-size: 14px; color: #d6fff0; }
-    .node-table-card { min-height: 620px; }
+    .node-table-card { min-height: 0; }
     .node-table-toolbar {
       display: flex;
       justify-content: space-between;
@@ -251,7 +252,7 @@ HTML = r"""
     .node-table {
       display: grid;
       gap: 7px;
-      max-height: 560px;
+      max-height: 430px;
       overflow: auto;
       padding-right: 3px;
     }
@@ -356,6 +357,11 @@ HTML = r"""
     .compact-card { padding: 10px; }
     .node strong, .media strong { display: block; }
     .node small, .media small { color: var(--muted); }
+    .resource-card { display: grid; gap: 10px; }
+    .resource-card .split { grid-template-columns: 1fr; }
+    .resource-card .actions { display: grid; grid-template-columns: 1fr; }
+    .resource-card pre { min-height: 96px; max-height: 190px; overflow: auto; }
+    .resource-card .media-list { max-height: 260px; overflow: auto; padding-right: 3px; }
     .pill {
       display: inline-flex;
       padding: 5px 8px;
@@ -494,30 +500,32 @@ HTML = r"""
         </div>
       </div>
 
-      <div class="card node-table-card">
-        <div class="node-table-toolbar">
-          <div>
-            <h2>VPS 节点表</h2>
-            <p>一屏预留约 10 台：在线、推流、重启推流、重启 VPS。</p>
-          </div>
-          <span class="pill warn">protected</span>
-        </div>
-        <div class="node-table" id="nodeList">加载中...</div>
-      </div>
-
-      <div class="card">
-        <h2>本地资源与推送</h2>
-        <div class="split">
-          <div>
-            <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
-            <div class="actions" style="margin-top: 8px;">
-              <button class="primary" id="uploadBtn">上传到总控台</button>
-              <button id="pushSelectedBtn">推送到选中 VPS</button>
+      <div class="side-stack">
+        <div class="card node-table-card">
+          <div class="node-table-toolbar">
+            <div>
+              <h2>VPS 节点表</h2>
+              <p>一屏预留约 10 台：在线、推流、重启推流、重启 VPS。</p>
             </div>
+            <span class="pill warn">protected</span>
           </div>
-          <pre id="uploadBox">先把视频上传到总控台，再选择 VPS 推送。</pre>
+          <div class="node-table" id="nodeList">加载中...</div>
         </div>
-        <div class="media-list" id="mediaList" style="margin-top: 12px;">加载中...</div>
+
+        <div class="card resource-card">
+          <h2>本地资源与推送</h2>
+          <div class="split">
+            <div>
+              <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
+              <div class="actions" style="margin-top: 8px;">
+                <button class="primary" id="uploadBtn">上传到总控台</button>
+                <button id="pushSelectedBtn">推送到选中 VPS</button>
+              </div>
+            </div>
+            <pre id="uploadBox">先把视频上传到总控台，再选择 VPS 推送。</pre>
+          </div>
+          <div class="media-list" id="mediaList">加载中...</div>
+        </div>
       </div>
 
       <div class="card">
