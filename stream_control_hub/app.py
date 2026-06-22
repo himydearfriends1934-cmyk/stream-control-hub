@@ -88,8 +88,7 @@ HTML = r"""
     }
     h1 { margin: 0; font-size: 30px; letter-spacing: -0.03em; }
     p { color: var(--muted); margin: 8px 0 0; line-height: 1.6; }
-    .grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(360px, 0.7fr); gap: 14px; margin-top: 14px; }
-    .node-section { grid-column: 1 / -1; }
+    .grid { display: grid; grid-template-columns: minmax(620px, 1fr) minmax(390px, 420px); gap: 14px; margin-top: 14px; align-items: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
     .card {
       border: 1px solid var(--line);
@@ -111,9 +110,10 @@ HTML = r"""
     button { cursor: pointer; font-weight: 800; }
     button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #04100c; border: none; }
     button.danger { background: #6f1d2d; color: #ffe4ea; }
+    button.tiny { padding: 7px 8px; font-size: 12px; border-radius: 8px; white-space: nowrap; }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
     input[type=file] { width: 100%; }
-    .node-list, .media-list, .log { display: grid; gap: 10px; }
+    .media-list, .log { display: grid; gap: 10px; }
     .node, .media {
       display: grid;
       grid-template-columns: auto 1fr auto;
@@ -123,6 +123,112 @@ HTML = r"""
       border-radius: 12px;
       border: 1px solid rgba(49, 89, 76, 0.8);
       background: rgba(25, 43, 37, 0.78);
+    }
+    .monitor-card { min-height: 720px; }
+    .monitor-heading {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .monitor-heading p { margin: 0; font-size: 13px; }
+    .node-monitor {
+      min-height: 640px;
+      border-radius: 16px;
+      padding: 16px;
+      border: 1px solid rgba(54, 211, 153, 0.35);
+      background:
+        linear-gradient(rgba(54, 211, 153, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(54, 211, 153, 0.035) 1px, transparent 1px),
+        radial-gradient(circle at 10% 0%, rgba(54, 211, 153, 0.18), transparent 26%),
+        radial-gradient(circle at 100% 12%, rgba(84, 198, 235, 0.12), transparent 24%),
+        #07110e;
+      background-size: 24px 24px, 24px 24px, auto, auto, auto;
+      box-shadow: inset 0 0 42px rgba(54, 211, 153, 0.06);
+    }
+    .monitor-hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      margin-bottom: 14px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid rgba(49, 89, 76, 0.55);
+    }
+    .monitor-hero h3 { margin: 0; font-size: 28px; letter-spacing: -0.03em; }
+    .monitor-hero small { color: var(--muted); display: block; margin-top: 4px; }
+    .monitor-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .monitor-panel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .monitor-panel {
+      border: 1px solid rgba(49, 89, 76, 0.75);
+      border-radius: 14px;
+      padding: 12px;
+      background: rgba(9, 17, 14, 0.58);
+    }
+    .monitor-panel h4 { margin: 0 0 8px; font-size: 15px; color: #d6fff0; }
+    .node-table-card { min-height: 720px; }
+    .node-table-toolbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .node-table-toolbar p { margin: 0; font-size: 13px; }
+    .node-table {
+      display: grid;
+      gap: 8px;
+      max-height: 650px;
+      overflow: auto;
+      padding-right: 3px;
+    }
+    .node-table-head,
+    .node-row {
+      display: grid;
+      grid-template-columns: 26px minmax(0, 1fr) 58px 72px 136px;
+      gap: 8px;
+      align-items: center;
+    }
+    .node-table-head {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 7px 10px;
+      color: var(--muted);
+      font-size: 12px;
+      background: rgba(19, 32, 28, 0.96);
+      border-bottom: 1px solid rgba(49, 89, 76, 0.55);
+    }
+    .node-row {
+      min-height: 58px;
+      padding: 9px 10px;
+      border: 1px solid rgba(49, 89, 76, 0.75);
+      border-radius: 12px;
+      background: rgba(25, 43, 37, 0.72);
+      cursor: pointer;
+      transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease;
+    }
+    .node-row:hover,
+    .node-row.selected {
+      border-color: rgba(54, 211, 153, 0.85);
+      background: rgba(20, 55, 43, 0.86);
+    }
+    .node-row.selected { box-shadow: 0 0 0 1px rgba(54, 211, 153, 0.22); }
+    .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-name small { color: var(--muted); display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 800; }
+    .dot { width: 9px; height: 9px; border-radius: 999px; background: #fbbf24; box-shadow: 0 0 16px rgba(251, 191, 36, 0.35); }
+    .dot.ok { background: var(--accent); box-shadow: 0 0 16px rgba(54, 211, 153, 0.45); }
+    .dot.bad { background: var(--danger); box-shadow: 0 0 16px rgba(251, 113, 133, 0.4); }
+    .row-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .empty-state {
+      min-height: 220px;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      text-align: center;
+      border: 1px dashed rgba(49, 89, 76, 0.8);
+      border-radius: 14px;
     }
     .node-detail {
       display: grid;
@@ -202,9 +308,15 @@ HTML = r"""
       color: #c9f7e7;
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    @media (max-width: 980px) {
-      .grid, .split, .hero, .node-detail, .bottom-section { grid-template-columns: 1fr; }
-      .node-section, .bottom-section { grid-column: auto; }
+    @media (max-width: 1080px) {
+      .grid, .split, .hero, .node-detail, .bottom-section, .monitor-metrics, .monitor-panel-grid { grid-template-columns: 1fr; }
+      .bottom-section { grid-column: auto; }
+      .monitor-card, .node-table-card { min-height: auto; }
+      .node-monitor { min-height: 420px; }
+      .node-table { max-height: none; }
+      .node-table-head { display: none; }
+      .node-row { grid-template-columns: 24px minmax(0, 1fr); }
+      .node-state, .row-actions { grid-column: 2; }
     }
   </style>
 </head>
@@ -223,9 +335,28 @@ HTML = r"""
     </section>
 
     <section class="grid">
-      <div class="card node-section">
-        <h2>VPS 节点健康与推流状态</h2>
-        <div class="node-list" id="nodeList">加载中...</div>
+      <div class="card monitor-card">
+        <div class="monitor-heading">
+          <div>
+            <h2>节点监控屏</h2>
+            <p>点击右侧 VPS 节点，左侧集中显示健康状态、网络吞吐、推流码率和节点配置。</p>
+          </div>
+          <span class="pill">live view</span>
+        </div>
+        <div class="node-monitor" id="nodeMonitor">
+          <div class="empty-state">正在读取节点状态...</div>
+        </div>
+      </div>
+
+      <div class="card node-table-card">
+        <div class="node-table-toolbar">
+          <div>
+            <h2>VPS 节点表</h2>
+            <p>一屏预留约 10 台：在线、推流、重启推流、重启 VPS。</p>
+          </div>
+          <span class="pill warn">protected</span>
+        </div>
+        <div class="node-table" id="nodeList">加载中...</div>
       </div>
 
       <div class="card">
@@ -270,6 +401,7 @@ HTML = r"""
   <script>
     const refs = {
       nodeList: document.getElementById("nodeList"),
+      nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
       refreshBtn: document.getElementById("refreshBtn"),
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
@@ -285,6 +417,7 @@ HTML = r"""
     };
     let nodes = [];
     let media = [];
+    let selectedNodeId = "";
 
     function selectedNodeIds() {
       return [...document.querySelectorAll("[data-node-check]:checked")].map((el) => el.value);
@@ -300,9 +433,22 @@ HTML = r"""
     }
 
     function nodeStatusPill(node) {
-      if (!node.enabled) return `<span class="pill warn">disabled</span>`;
+      if (node.enabled === false) return `<span class="pill warn">disabled</span>`;
       if (!node.health?.ok) return `<span class="pill bad">offline</span>`;
       return `<span class="pill">online</span>`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function stateDot(ok, warn = false) {
+      return `<span class="dot ${ok ? "ok" : warn ? "" : "bad"}"></span>`;
     }
 
     function fmtBytes(bytes) {
@@ -328,18 +474,37 @@ HTML = r"""
       const hasPercent = percent !== undefined && percent !== null;
       return `
         <div class="metric">
-          <small>${label}</small>
-          <strong>${value}</strong>
+          <small>${escapeHtml(label)}</small>
+          <strong>${escapeHtml(value)}</strong>
           ${hasPercent ? `<div class="bar" style="--value:${pct(percent)}%"><span></span></div>` : ""}
         </div>
       `;
     }
 
     function miniRow(label, value) {
-      return `<div class="mini-row"><small>${label}</small><span>${value}</span></div>`;
+      return `<div class="mini-row"><small>${escapeHtml(label)}</small><span>${escapeHtml(value)}</span></div>`;
     }
 
-    function renderNodeDetail(node) {
+    function miniRowHtml(label, html) {
+      return `<div class="mini-row"><small>${escapeHtml(label)}</small><span>${html}</span></div>`;
+    }
+
+    function nodeOnline(node) {
+      return Boolean(node.enabled !== false && node.health?.ok);
+    }
+
+    function nodeStreaming(node) {
+      return Boolean(node.health?.stream?.running);
+    }
+
+    function selectedNode() {
+      return nodes.find((node) => String(node.id) === String(selectedNodeId)) || nodes[0] || null;
+    }
+
+    function renderMonitor(node) {
+      if (!node) {
+        return `<div class="empty-state">还没有配置节点。把 VPS 节点加入 config/nodes.json 后会显示在这里。</div>`;
+      }
       const h = node.health || {};
       const stream = h.stream || {};
       const adaptive = stream.adaptive || {};
@@ -350,80 +515,153 @@ HTML = r"""
       const net = h.net || {};
       const quota = h.quota || {};
       const videos = h.videos || [];
+      const loadText = Array.isArray(h.load_avg) ? h.load_avg.join(" / ") : (h.load_avg || "--");
+      const bitrate = stream.current_bitrate_label || (stream.current_bitrate_kbps ? `${stream.current_bitrate_kbps} Kbps` : "未知");
       const processText = stream.processes?.length ? `${stream.processes.length} 个进程` : "未检测到";
       const videoList = videos.length
-        ? videos.slice(0, 4).map((item) => `${item.name} (${fmtBytes(item.size)})`).join("<br>")
+        ? videos.slice(0, 6).map((item) => `${escapeHtml(item.name)} (${escapeHtml(fmtBytes(item.size))})`).join("<br>")
         : "服务器暂无视频";
+      const processList = stream.processes?.length
+        ? stream.processes.slice(0, 4).map((item) => {
+            const pid = item.pid || item.PID || "-";
+            const cpu = item.cpu_percent !== undefined ? ` CPU ${Number(item.cpu_percent || 0).toFixed(1)}%` : "";
+            return `${escapeHtml(pid)}${escapeHtml(cpu)}`;
+          }).join("<br>")
+        : "未检测到 FFmpeg 进程";
 
       return `
-        <label class="node-detail">
-          <input data-node-check type="checkbox" value="${node.id}" ${node.enabled ? "" : "disabled"}>
+        <div class="monitor-hero">
           <div>
-            <div class="node-title">
-              <span>
-                <strong>${node.name || node.id}</strong>
-                <small>${h.hostname || node.id} · ${h.platform || "未知系统"}</small>
-                <small class="mono">${node.base_url || ""}</small>
-              </span>
-              ${nodeStatusPill(node)}
-            </div>
+            <h3>${escapeHtml(node.name || node.id)}</h3>
+            <small>${escapeHtml(h.hostname || node.id)} · ${escapeHtml(h.platform || "未知系统")}</small>
+            <small class="mono">${escapeHtml(node.base_url || "")}</small>
+          </div>
+          ${nodeStatusPill(node)}
+        </div>
+
+        <div class="monitor-metrics">
+          ${metric("当前推流码率", bitrate)}
+          ${metric("CPU", `${Number(h.cpu_percent || 0).toFixed(1)}%`, h.cpu_percent)}
+          ${metric("实时上传", fmtRate(net.current_upload_bps || 0))}
+          ${metric("实时下载", fmtRate(net.current_download_bps || 0))}
+        </div>
+
+        <div class="monitor-panel-grid">
+          <div class="monitor-panel">
+            <h4>机器健康</h4>
             <div class="metric-grid">
-              ${metric("CPU", `${Number(h.cpu_percent || 0).toFixed(1)}%`, h.cpu_percent)}
               ${metric("内存", `${Number(h.memory?.percent || 0).toFixed(1)}%`, h.memory?.percent)}
               ${metric("硬盘", `${Number(h.disk?.percent || 0).toFixed(1)}%`, h.disk?.percent)}
-              ${metric("负载", h.load_avg || "--")}
+              ${metric("逻辑核心", h.cpu_count || "--")}
+              ${metric("负载", loadText)}
             </div>
             <div class="mini-table" style="margin-top: 10px;">
-              ${miniRow("在线时长", h.uptime || "--")}
+              ${miniRow("系统在线", h.uptime || "--")}
               ${miniRow("面板在线", h.app_uptime || "--")}
+              ${miniRow("内存用量", `${fmtBytes(h.memory?.used || 0)} / ${fmtBytes(h.memory?.total || 0)}`)}
+              ${miniRow("硬盘用量", `${fmtBytes(h.disk?.used || 0)} / ${fmtBytes(h.disk?.total || 0)}`)}
             </div>
           </div>
 
-          <div>
+          <div class="monitor-panel">
+            <h4>网络吞吐</h4>
             <div class="metric-grid">
-              ${metric("实时上传", fmtRate(net.current_upload_bps || 0))}
-              ${metric("实时下载", fmtRate(net.current_download_bps || 0))}
               ${metric("累计发送", fmtBytes(net.bytes_sent || 0))}
               ${metric("累计接收", fmtBytes(net.bytes_recv || 0))}
+              ${metric("流量占用", `${Number(quota.total_percent || 0).toFixed(2)}%`, quota.total_percent)}
+              ${metric("剩余额度", fmtBytes(quota.remaining || 0))}
             </div>
             <div class="mini-table" style="margin-top: 10px;">
-              ${miniRow("总流量", `${fmtBytes(quota.total_used || 0)} / ${fmtBytes(quota.limit || 0)}`)}
-              ${miniRow("剩余额度", fmtBytes(quota.remaining || 0))}
-              ${miniRow("流量占用", `${Number(quota.total_percent || 0).toFixed(2)}%`)}
+              ${miniRow("总额度", fmtBytes(quota.limit || 0))}
+              ${miniRow("已用总量", fmtBytes(quota.total_used || 0))}
+              ${miniRow("速率标签", net.rate_label || "--")}
+              ${miniRow("上传策略", "公网优先 / 慢速回落内网 / 分块重试")}
             </div>
           </div>
 
-          <div>
+          <div class="monitor-panel">
+            <h4>推流引擎</h4>
             <div class="metric-grid">
-              ${metric("推流码率", stream.current_bitrate_label || "未知")}
               ${metric("FFmpeg", stream.running ? "运行中" : "未运行")}
               ${metric("进程", processText)}
               ${metric("视频数", `${videos.length}`)}
+              ${metric("直播码", config.has_stream_key ? "已保存" : "未保存")}
             </div>
             <div class="mini-table" style="margin-top: 10px;">
-              ${miniRow("直播码", config.has_stream_key ? "已保存" : "未保存")}
               ${miniRow("自动重启", autoRestart.enabled ? `开启 · ${autoRestart.last_error || "正常"}` : "关闭")}
               ${miniRow("智能调参", adaptive.enabled ? `${adaptive.status || "idle"} · ${adaptive.last_error || "正常"}` : "关闭")}
               ${miniRow("本地中继", relay.enabled ? `${relay.mode || "relay"} · ${relay.reachable ? "可达" : "不可达"}` : relay.message || "关闭")}
               ${miniRow("FIFO 缓冲", tuning.fifo_enabled ? `${tuning.fifo_timeshift_seconds || 0}s / queue ${tuning.fifo_queue_size || 0}` : "关闭")}
-              ${miniRow("服务器视频", `<span class="mono">${videoList}</span>`)}
+              ${miniRowHtml("FFmpeg PID", `<span class="mono">${processList}</span>`)}
             </div>
           </div>
-        </label>
+
+          <div class="monitor-panel">
+            <h4>节点资源</h4>
+            <div class="mini-table" style="margin-top: 10px;">
+              ${miniRow("节点 ID", node.id || "--")}
+              ${miniRow("启用状态", node.enabled === false ? "已禁用" : "已启用")}
+              ${miniRow("健康采集", h.ok ? "正常" : (h.message || "不可达"))}
+              ${miniRowHtml("服务器视频", `<span class="mono">${videoList}</span>`)}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderNodeRow(node, checkedIds) {
+      const h = node.health || {};
+      const online = nodeOnline(node);
+      const streaming = nodeStreaming(node);
+      const selected = String(node.id) === String(selectedNodeId);
+      const checked = checkedIds.has(String(node.id));
+      return `
+        <div class="node-row ${selected ? "selected" : ""}" data-node-row data-node-id="${escapeHtml(node.id)}">
+          <input data-node-check type="checkbox" value="${escapeHtml(node.id)}" ${checked ? "checked" : ""} ${node.enabled === false ? "disabled" : ""} title="选中后可推送资源或升级">
+          <span class="node-name">
+            <strong>${escapeHtml(node.name || node.id)}</strong>
+            <small>${escapeHtml(h.hostname || node.id)} · ${escapeHtml(h.platform || "未知")}</small>
+          </span>
+          <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
+          <span class="node-state">${stateDot(streaming, online)}${streaming ? "推流中" : "未推流"}</span>
+          <span class="row-actions">
+            <button class="tiny" data-node-action="restart-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启推流</button>
+            <button class="tiny danger" data-node-action="reboot-vps" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启 VPS</button>
+          </span>
+        </div>
       `;
     }
 
     function renderNodes() {
-      refs.nodeList.innerHTML = nodes.length ? nodes.map(renderNodeDetail).join("") : "还没有配置节点。";
+      const checkedIds = new Set(selectedNodeIds().map(String));
+      if (!nodes.length) {
+        refs.nodeMonitor.innerHTML = renderMonitor(null);
+        refs.nodeList.innerHTML = `<div class="empty-state">还没有配置节点。</div>`;
+        return;
+      }
+      if (!nodes.some((node) => String(node.id) === String(selectedNodeId))) {
+        selectedNodeId = String(nodes[0].id || "");
+      }
+      refs.nodeMonitor.innerHTML = renderMonitor(selectedNode());
+      refs.nodeList.innerHTML = `
+        <div class="node-table-head">
+          <span></span>
+          <span>节点</span>
+          <span>在线</span>
+          <span>推流</span>
+          <span>操作</span>
+        </div>
+        ${nodes.map((node) => renderNodeRow(node, checkedIds)).join("")}
+      `;
     }
 
     function renderMedia() {
       refs.mediaList.innerHTML = media.length ? media.map((item) => `
         <label class="media">
-          <input data-media-check type="radio" name="media" value="${item.name}">
+          <input data-media-check type="radio" name="media" value="${escapeHtml(item.name)}">
           <span>
-            <strong>${item.name}</strong>
-            <small>${item.size_label} | ${item.modified_label}</small>
+            <strong>${escapeHtml(item.name)}</strong>
+            <small>${escapeHtml(item.size_label)} | ${escapeHtml(item.modified_label)}</small>
           </span>
           <span class="pill">local</span>
         </label>
@@ -508,6 +746,44 @@ HTML = r"""
       }
     }
 
+    async function postNodeAction(path, payload) {
+      const resp = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      return data;
+    }
+
+    async function handleNodeAction(action, nodeId) {
+      const node = nodes.find((item) => String(item.id) === String(nodeId));
+      const nodeName = node?.name || nodeId;
+      if (action === "restart-stream") {
+        if (!confirm(`确认请求重启 ${nodeName} 的推流？\n\n保护规则：不会清空直播码；如果节点没有安全重启接口，总控台会拒绝执行。`)) {
+          return;
+        }
+        log(`请求重启推流：${nodeName}`);
+        const data = await postNodeAction("/api/nodes/restart-stream", { node_id: nodeId });
+        log(data.ok ? `推流重启已执行：${nodeName}` : `推流重启被保护规则拦截：${data.message || nodeName}`);
+        await refreshAll();
+        return;
+      }
+      if (action === "reboot-vps") {
+        const confirmText = `REBOOT ${nodeId}`;
+        const typed = prompt(`重启 VPS 是危险操作。\n请输入 ${confirmText} 才会继续：`);
+        if (typed !== confirmText) {
+          log(`已取消重启 VPS：${nodeName}`);
+          return;
+        }
+        log(`请求重启 VPS：${nodeName}`);
+        const data = await postNodeAction("/api/nodes/reboot", { node_id: nodeId, confirm_text: typed });
+        log(data.ok ? `VPS 重启已提交：${nodeName}` : `VPS 重启被保护规则拦截：${data.message || nodeName}`);
+        await refreshAll();
+      }
+    }
+
     async function upgradeSelectedNodes() {
       const node_ids = selectedNodeIds();
       if (!node_ids.length) {
@@ -527,6 +803,22 @@ HTML = r"""
       }
     }
 
+    refs.nodeList.addEventListener("click", (event) => {
+      const actionButton = event.target.closest("[data-node-action]");
+      if (actionButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        handleNodeAction(actionButton.dataset.nodeAction, actionButton.dataset.nodeId);
+        return;
+      }
+      if (event.target.closest("[data-node-check]")) {
+        return;
+      }
+      const row = event.target.closest("[data-node-row]");
+      if (!row) return;
+      selectedNodeId = row.dataset.nodeId;
+      renderNodes();
+    });
     refs.refreshBtn.addEventListener("click", refreshAll);
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
@@ -1210,6 +1502,88 @@ def api_media_push():
         "media": media_name,
         "results": results,
     })
+
+
+@APP.post("/api/nodes/restart-stream")
+def api_nodes_restart_stream():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "")
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    if not node.get("enabled", True):
+        return jsonify({"ok": False, "message": "node disabled"}), 409
+
+    status = request_node_json(node, "/api/status", timeout=10)
+    if not status.get("ok"):
+        return jsonify({
+            "ok": False,
+            "node_id": node_id,
+            "message": status.get("message") or "node health check failed",
+            "status": status,
+        }), 502
+
+    stream_config = status.get("stream_config") or {}
+    if not stream_config.get("has_stream_key"):
+        return jsonify({
+            "ok": False,
+            "node_id": node_id,
+            "message": "node has no saved stream key; blocked to avoid starting a broken stream",
+        }), 409
+
+    restart_api = str(node.get("restart_stream_api") or "").strip()
+    if restart_api:
+        result = post_node_json(node, restart_api, {}, timeout=30)
+        return jsonify({
+            "ok": bool(result.get("ok")),
+            "node_id": node_id,
+            "message": result.get("message") or ("restart request accepted" if result.get("ok") else "restart request failed"),
+            "result": result,
+        }), 200 if result.get("ok") else 502
+
+    return jsonify({
+        "ok": False,
+        "node_id": node_id,
+        "message": (
+            "node does not expose a safe restart-stream API yet; blocked to protect current stream config. "
+            "Configure restart_stream_api on this node when the node agent supports cached restart."
+        ),
+    }), 501
+
+
+@APP.post("/api/nodes/reboot")
+def api_nodes_reboot():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "")
+    confirm_text = str(payload.get("confirm_text") or "")
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    expected = f"REBOOT {node_id}"
+    if confirm_text != expected:
+        return jsonify({"ok": False, "message": f"confirmation required: {expected}"}), 400
+    if not bool(node.get("allow_vps_reboot") or node.get("reboot_enabled")):
+        return jsonify({
+            "ok": False,
+            "node_id": node_id,
+            "message": "VPS reboot is disabled for this node; set allow_vps_reboot only after secure transport is configured",
+        }), 403
+
+    reboot_api = str(node.get("reboot_api") or "").strip()
+    if reboot_api:
+        result = post_node_json(node, reboot_api, {"confirm_text": confirm_text}, timeout=15)
+        return jsonify({
+            "ok": bool(result.get("ok")),
+            "node_id": node_id,
+            "message": result.get("message") or ("reboot request accepted" if result.get("ok") else "reboot request failed"),
+            "result": result,
+        }), 200 if result.get("ok") else 502
+
+    return jsonify({
+        "ok": False,
+        "node_id": node_id,
+        "message": "secure reboot transport is not configured; blocked by protection policy",
+    }), 501
 
 
 def run_git(args: list[str], cwd: Path | None = None, timeout: int = 60) -> dict[str, Any]:
