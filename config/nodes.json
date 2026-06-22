@@ -12,5 +12,12 @@
     "base_url": "http://165.99.42.174",
     "role": "stream-node",
     "enabled": true
+  },
+  {
+    "id": "hkold-lightcone",
+    "name": "HKOLD_LIGHTCONE",
+    "base_url": "http://100.106.138.106:8787",
+    "role": "stream-node",
+    "enabled": true
   }
 ]
