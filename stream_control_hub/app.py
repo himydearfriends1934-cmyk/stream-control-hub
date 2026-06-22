@@ -514,6 +514,9 @@ HTML = r"""
       const config = h.stream_config || {};
       const net = h.net || {};
       const quota = h.quota || {};
+      const agent = h.agent || {};
+      const transfer = h.transfer || {};
+      const publicUpload = h.public_upload || {};
       const videos = h.videos || [];
       const loadText = Array.isArray(h.load_avg) ? h.load_avg.join(" / ") : (h.load_avg || "--");
       const bitrate = stream.current_bitrate_label || (stream.current_bitrate_kbps ? `${stream.current_bitrate_kbps} Kbps` : "未知");
@@ -576,6 +579,39 @@ HTML = r"""
               ${miniRow("已用总量", fmtBytes(quota.total_used || 0))}
               ${miniRow("速率标签", net.rate_label || "--")}
               ${miniRow("上传策略", "公网优先 / 慢速回落内网 / 分块重试")}
+            </div>
+          </div>
+
+          <div class="monitor-panel">
+            <h4>客户端 Agent</h4>
+            <div class="metric-grid">
+              ${metric("运行模式", agent.mode || "dashboard-compatible")}
+              ${metric("Headless", agent.headless ? "开启" : "兼容面板")}
+              ${metric("Agent 版本", agent.version || "--")}
+              ${metric("公网窗口", publicUpload.enabled ? "开启" : "关闭")}
+            </div>
+            <div class="mini-table" style="margin-top: 10px;">
+              ${miniRow("Agent 名称", agent.name || h.hostname || node.id || "--")}
+              ${miniRow("控制端", agent.control_hub || "--")}
+              ${miniRow("窗口来源", publicUpload.public_origin || "--")}
+              ${miniRow("窗口原因", publicUpload.last_reason || "--")}
+            </div>
+          </div>
+
+          <div class="monitor-panel">
+            <h4>传输监控</h4>
+            <div class="metric-grid">
+              ${metric("活跃上传", `${transfer.active_upload_count || 0}`)}
+              ${metric("已收总量", fmtBytes(transfer.bytes_received_total || 0))}
+              ${metric("已收分块", `${transfer.chunks_received_total || 0}`)}
+              ${metric("完成上传", `${transfer.completed_uploads_total || 0}`)}
+            </div>
+            <div class="mini-table" style="margin-top: 10px;">
+              ${miniRow("最后事件", transfer.last_event || "--")}
+              ${miniRow("最后路由", transfer.last_route || "--")}
+              ${miniRow("最近错误", transfer.last_error || "无")}
+              ${miniRow("最后更新时间", transfer.last_event_at_label || "--")}
+              ${miniRow("最近测速", transfer.last_probe?.elapsed_ms ? `${transfer.last_probe.elapsed_ms} ms / ${fmtBytes(transfer.last_probe.size || 0)}` : "--")}
             </div>
           </div>
 
