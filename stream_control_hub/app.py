@@ -33,6 +33,9 @@ NODE_PUBLIC_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_NODE_PUBLIC_UPLO
 NODE_UPLOAD_TIMEOUT_SECONDS = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_TIMEOUT_SECONDS", "300"))
 NODE_PUBLIC_UPLOAD_TTL_SECONDS = int(os.environ.get("STREAM_HUB_NODE_PUBLIC_UPLOAD_TTL_SECONDS", "900"))
 NODE_UPLOAD_RETRIES = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_RETRIES", "2"))
+NODE_UPLOAD_PROBE_BYTES = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_PROBE_BYTES", str(256 * 1024)))
+NODE_UPLOAD_PROBE_TIMEOUT_SECONDS = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_PROBE_TIMEOUT_SECONDS", "12"))
+MIN_FREE_AFTER_UPLOAD_BYTES = int(os.environ.get("STREAM_HUB_MIN_FREE_AFTER_UPLOAD_BYTES", str(2 * 1024 ** 3)))
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("STREAM_HUB_MAX_UPLOAD_BYTES", str(200 * 1024 ** 3)))
@@ -391,8 +394,12 @@ def request_node_json(node: dict[str, Any], path: str, *, timeout: int = 6) -> d
         return {"ok": False, "message": "missing node base_url"}
     try:
         resp = requests.get(f"{base_url}{path}", timeout=timeout)
-        data = resp.json()
-        data.setdefault("ok", resp.ok)
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {"message": resp.text[:500]}
+        data["ok"] = resp.ok and bool(data.get("ok", False))
+        data.setdefault("status_code", resp.status_code)
         return data
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
@@ -412,7 +419,7 @@ def post_node_json(node: dict[str, Any], path: str, payload: dict[str, Any], *, 
             data = resp.json()
         except ValueError:
             data = {"message": resp.text[:500]}
-        data.setdefault("ok", resp.ok)
+        data["ok"] = resp.ok and bool(data.get("ok", False))
         data.setdefault("status_code", resp.status_code)
         return data
     except Exception as exc:
@@ -423,13 +430,37 @@ def public_upload_summary(data: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if key != "token"}
 
 
-def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
-    base_url = node_base_url(node)
-    if not base_url:
-        raise ValueError("missing node base_url")
+def probe_upload_route(route: dict[str, Any]) -> dict[str, Any]:
+    payload = b"0" * max(1, NODE_UPLOAD_PROBE_BYTES)
+    started_at = time.time()
+    try:
+        resp = requests.post(
+            f"{str(route['upload_base_url']).rstrip('/')}/api/upload-probe",
+            data=payload,
+            headers={**(route.get("headers") or {}), "Content-Type": "application/octet-stream"},
+            timeout=NODE_UPLOAD_PROBE_TIMEOUT_SECONDS,
+        )
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {"message": resp.text[:500]}
+        elapsed = max(0.001, time.time() - started_at)
+        ok = resp.ok and bool(data.get("ok", False))
+        return {
+            "ok": ok,
+            "status_code": resp.status_code,
+            "elapsed_seconds": round(elapsed, 3),
+            "bytes_per_second": int(len(payload) / elapsed),
+            "rate_label": f"{file_size_label(int(len(payload) / elapsed))}/s",
+            "message": data.get("message") or ("probe ok" if ok else "probe failed"),
+        }
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
 
-    status = request_node_json(node, "/api/public-upload", timeout=10)
-    route = {
+
+def make_internal_upload_route(node: dict[str, Any], warnings: list[str] | None = None) -> dict[str, Any]:
+    base_url = node_base_url(node)
+    return {
         "base_url": base_url,
         "upload_base_url": base_url,
         "route": "internal",
@@ -438,10 +469,22 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
         "headers": {},
         "opened_public_window": False,
         "chunk_bytes": NODE_UPLOAD_CHUNK_BYTES,
-        "public_status": public_upload_summary(status),
-        "warnings": [],
+        "public_status": {},
+        "warnings": list(warnings or []),
         "last_heartbeat_at": 0.0,
+        "probe": {"ok": True, "skipped": True, "message": "internal fallback"},
+        "fallback_from": "",
     }
+
+
+def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
+    base_url = node_base_url(node)
+    if not base_url:
+        raise ValueError("missing node base_url")
+
+    status = request_node_json(node, "/api/public-upload", timeout=10)
+    route = make_internal_upload_route(node)
+    route["public_status"] = public_upload_summary(status)
     if not status.get("ok"):
         route["warnings"].append(status.get("message") or "public upload status unavailable")
         return route
@@ -476,7 +519,13 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
                     "public_status": public_upload_summary(opened),
                     "last_heartbeat_at": time.time(),
                 })
-                return route
+                probe = probe_upload_route(route)
+                route["probe"] = probe
+                if probe.get("ok"):
+                    return route
+                route["warnings"].append(probe.get("message") or "public upload probe failed")
+                close_node_public_upload(node, route, reason="stream-control-hub-public-probe-failed")
+                return make_internal_upload_route(node, route["warnings"])
         route["warnings"].append(opened.get("message") or "failed to open public upload window")
 
     if public_origin and not restrict_public:
@@ -486,6 +535,11 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
             "route_label": "public direct",
             "chunk_bytes": NODE_PUBLIC_UPLOAD_CHUNK_BYTES,
         })
+        probe = probe_upload_route(route)
+        route["probe"] = probe
+        if not probe.get("ok"):
+            route["warnings"].append(probe.get("message") or "public direct probe failed")
+            return make_internal_upload_route(node, route["warnings"])
     return route
 
 
@@ -497,6 +551,8 @@ def route_summary(route: dict[str, Any]) -> dict[str, Any]:
         "opened_public_window": bool(route.get("opened_public_window")),
         "chunk_bytes": route.get("chunk_bytes"),
         "warnings": route.get("warnings") or [],
+        "probe": route.get("probe") or {},
+        "fallback_from": route.get("fallback_from") or "",
     }
 
 
@@ -535,6 +591,40 @@ def close_node_public_upload(node: dict[str, Any], route: dict[str, Any], *, rea
 
 def cancel_node_upload(node: dict[str, Any], upload_id: str) -> dict[str, Any]:
     return post_node_json(node, "/api/upload-chunk/cancel", {"upload_id": upload_id}, timeout=30)
+
+
+def should_fallback_to_internal(route: dict[str, Any]) -> bool:
+    return route.get("route") in {"public-window", "public-direct"} and route.get("upload_base_url") != route.get("base_url")
+
+
+def upload_chunk_with_retries(
+    media_path: Path,
+    route: dict[str, Any],
+    *,
+    upload_id: str,
+    chunk_index: int,
+    total_chunks: int,
+    offset: int,
+    total_size: int,
+    chunk_size: int,
+) -> dict[str, Any]:
+    payload: dict[str, Any] | None = None
+    for attempt in range(NODE_UPLOAD_RETRIES + 1):
+        payload = upload_chunk_to_node(
+            media_path,
+            route,
+            upload_id=upload_id,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            offset=offset,
+            total_size=total_size,
+            chunk_size=chunk_size,
+        )
+        if payload.get("ok"):
+            break
+        if attempt < NODE_UPLOAD_RETRIES:
+            time.sleep(min(5, 0.8 * (attempt + 1)))
+    return payload or {}
 
 
 def upload_chunk_to_node(
@@ -600,25 +690,42 @@ def push_media_to_node(node: dict[str, Any], media_path: Path) -> dict[str, Any]
         for chunk_index in range(total_chunks):
             offset = chunk_index * chunk_size
             touch_node_public_upload(node, route)
-            payload: dict[str, Any] | None = None
-            for attempt in range(NODE_UPLOAD_RETRIES + 1):
-                payload = upload_chunk_to_node(
-                    media_path,
-                    route,
-                    upload_id=upload_id,
-                    chunk_index=chunk_index,
-                    total_chunks=total_chunks,
-                    offset=offset,
-                    total_size=total_size,
-                    chunk_size=chunk_size,
-                )
-                if payload.get("ok"):
-                    break
-                if attempt < NODE_UPLOAD_RETRIES:
-                    time.sleep(min(5, 0.8 * (attempt + 1)))
-            last_payload = payload or {}
+            last_payload = upload_chunk_with_retries(
+                media_path,
+                route,
+                upload_id=upload_id,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+                offset=offset,
+                total_size=total_size,
+                chunk_size=chunk_size,
+            )
             if not last_payload.get("ok"):
-                raise RuntimeError(last_payload.get("message") or f"chunk {chunk_index + 1} upload failed")
+                if should_fallback_to_internal(route):
+                    fallback_message = last_payload.get("message") or f"chunk {chunk_index + 1} upload failed"
+                    close_node_public_upload(node, route, reason="stream-control-hub-public-transfer-failed")
+                    route = make_internal_upload_route(
+                        node,
+                        [
+                            *(route.get("warnings") or []),
+                            f"public route failed at chunk {chunk_index + 1}: {fallback_message}",
+                        ],
+                    )
+                    route["fallback_from"] = "public"
+                    # Keep the original chunk size and total_chunks so the node-side offset check stays consistent.
+                    route["chunk_bytes"] = chunk_size
+                    last_payload = upload_chunk_with_retries(
+                        media_path,
+                        route,
+                        upload_id=upload_id,
+                        chunk_index=chunk_index,
+                        total_chunks=total_chunks,
+                        offset=offset,
+                        total_size=total_size,
+                        chunk_size=chunk_size,
+                    )
+                if not last_payload.get("ok"):
+                    raise RuntimeError(last_payload.get("message") or f"chunk {chunk_index + 1} upload failed")
             received_size = max(received_size, int(last_payload.get("received_size") or 0))
 
         if not last_payload.get("complete"):
@@ -673,6 +780,17 @@ def file_size_label(size: int) -> str:
     return f"{value:.1f} {units[index]}" if index else f"{int(value)} B"
 
 
+def ensure_media_disk_space(incoming_size: int) -> None:
+    if incoming_size <= 0:
+        return
+    usage = shutil.disk_usage(MEDIA_DIR)
+    required_free = incoming_size + max(MIN_FREE_AFTER_UPLOAD_BYTES, int(incoming_size * 0.1))
+    if usage.free < required_free:
+        raise RuntimeError(
+            f"not enough disk space: need {file_size_label(required_free)}, free {file_size_label(usage.free)}"
+        )
+
+
 def list_media() -> list[dict[str, Any]]:
     ensure_dirs()
     items = []
@@ -713,6 +831,12 @@ def api_media_upload():
         return jsonify({"ok": False, "message": "missing file"}), 400
     if not media_allowed(upload.filename):
         return jsonify({"ok": False, "message": "unsupported media extension"}), 400
+    incoming_size = int(request.content_length or 0)
+    if incoming_size > 0:
+        try:
+            ensure_media_disk_space(incoming_size)
+        except RuntimeError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 507
     name = secure_filename(upload.filename)
     target = MEDIA_DIR / name
     counter = 1
