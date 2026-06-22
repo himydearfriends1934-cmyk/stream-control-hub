@@ -217,7 +217,7 @@ HTML = r"""
       place-items: center;
       background:
         radial-gradient(circle at center, #07110e 0 54%, transparent 55%),
-        conic-gradient(var(--donut-color, var(--accent)) calc(var(--value, 0) * 1%), rgba(255,255,255,0.08) 0);
+        conic-gradient(var(--donut-color, var(--accent)) var(--value, 0%), rgba(255,255,255,0.08) 0);
       box-shadow: inset 0 0 14px rgba(0,0,0,0.24);
       font-size: 12px;
       font-weight: 900;
@@ -649,7 +649,7 @@ HTML = r"""
       const safePercent = pct(percent);
       return `
         <div class="health-donut">
-          <div class="donut" style="--value:${safePercent}; --donut-color:${color};">${Math.round(safePercent)}%</div>
+          <div class="donut" style="--value:${safePercent}%; --donut-color:${color};">${Math.round(safePercent)}%</div>
           <div class="donut-info">
             <small>${escapeHtml(label)}</small>
             <strong>${escapeHtml(value)}</strong>
