@@ -398,7 +398,7 @@ def request_node_json(node: dict[str, Any], path: str, *, timeout: int = 6) -> d
             data = resp.json()
         except ValueError:
             data = {"message": resp.text[:500]}
-        data["ok"] = resp.ok and bool(data.get("ok", False))
+        data["ok"] = resp.ok and bool(data.get("ok", True))
         data.setdefault("status_code", resp.status_code)
         return data
     except Exception as exc:
