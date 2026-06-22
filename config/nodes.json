@@ -1,19 +1,5 @@
 [
   {
-    "id": "racknerd",
-    "name": "RACKNERD Istanbul",
-    "base_url": "http://100.112.98.95:8787",
-    "role": "stream-node",
-    "enabled": true
-  },
-  {
-    "id": "lightcone-new",
-    "name": "LIGHTCONE-NEW",
-    "base_url": "http://165.99.42.174",
-    "role": "stream-node",
-    "enabled": true
-  },
-  {
     "id": "hkold-lightcone",
     "name": "HKOLD_LIGHTCONE",
     "base_url": "http://100.106.138.106:8787",
