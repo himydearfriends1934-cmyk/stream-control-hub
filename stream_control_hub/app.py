@@ -375,6 +375,56 @@ HTML = r"""
       </div>
 
       <div class="card">
+        <h2>开播控制 / 智能调优</h2>
+        <p>选择右侧节点后，在这里填推流码、选择该节点服务器视频，并用节点本机环境生成推荐参数。</p>
+        <div class="split">
+          <div>
+            <label>目标节点</label>
+            <input id="streamNodeInput" type="text" readonly value="选择右侧 VPS 节点">
+            <label style="display:block; margin-top: 10px;">服务器视频</label>
+            <select id="streamVideoSelect">
+              <option value="">先选择节点...</option>
+            </select>
+            <label style="display:block; margin-top: 10px;">YouTube Stream Key</label>
+            <input id="streamKeyInput" type="password" autocomplete="off" placeholder="粘贴直播码，只会转发到选中节点">
+            <label style="display:block; margin-top: 10px;">RTMP 地址</label>
+            <input id="streamUrlInput" type="text" value="rtmp://a.rtmp.youtube.com/live2">
+          </div>
+          <div>
+            <label>输出模式</label>
+            <select id="streamOutputModeInput">
+              <option value="direct">直接推 YouTube</option>
+              <option value="local_relay">本地中继</option>
+            </select>
+            <label style="display:block; margin-top: 10px;">自适应</label>
+            <select id="adaptiveModeInput">
+              <option value="auto">自动调优</option>
+              <option value="off">固定参数</option>
+            </select>
+            <label style="display:block; margin-top: 10px;">编码参数</label>
+            <div class="split">
+              <input id="resolutionInput" type="text" value="1280x720" placeholder="分辨率">
+              <input id="fpsInput" type="number" value="30" min="15" max="60" placeholder="FPS">
+            </div>
+            <div class="split" style="margin-top: 8px;">
+              <input id="videoBitrateInput" type="number" value="4500" min="800" placeholder="视频 kbps">
+              <input id="audioBitrateInput" type="number" value="192" min="64" placeholder="音频 kbps">
+            </div>
+            <div class="split" style="margin-top: 8px;">
+              <input id="presetInput" type="text" value="veryfast" placeholder="preset">
+              <input id="keyframeInput" type="number" value="2" min="1" max="4" placeholder="关键帧秒">
+            </div>
+          </div>
+        </div>
+        <div class="actions" style="margin-top: 12px;">
+          <button id="previewTuneBtn">预览智能调优</button>
+          <button class="primary" id="smartStartBtn">Smart Start 开播</button>
+          <button id="applyTuneBtn">应用推荐参数</button>
+        </div>
+        <pre id="tuneBox" style="margin-top: 12px;">选择节点和服务器视频后，可以预览推荐参数；Smart Start 会停止重复推流并启动一个干净 FFmpeg。</pre>
+      </div>
+
+      <div class="card">
         <h2>策略 / 审计 / 操作日志</h2>
         <pre id="updateBox">点击 Upload Policy 或 Push Audit 查看系统规则与最近推送记录。</pre>
         <div style="height: 10px;"></div>
@@ -411,6 +461,22 @@ HTML = r"""
       mediaInput: document.getElementById("mediaInput"),
       uploadBtn: document.getElementById("uploadBtn"),
       pushSelectedBtn: document.getElementById("pushSelectedBtn"),
+      streamNodeInput: document.getElementById("streamNodeInput"),
+      streamVideoSelect: document.getElementById("streamVideoSelect"),
+      streamKeyInput: document.getElementById("streamKeyInput"),
+      streamUrlInput: document.getElementById("streamUrlInput"),
+      streamOutputModeInput: document.getElementById("streamOutputModeInput"),
+      adaptiveModeInput: document.getElementById("adaptiveModeInput"),
+      resolutionInput: document.getElementById("resolutionInput"),
+      fpsInput: document.getElementById("fpsInput"),
+      videoBitrateInput: document.getElementById("videoBitrateInput"),
+      audioBitrateInput: document.getElementById("audioBitrateInput"),
+      presetInput: document.getElementById("presetInput"),
+      keyframeInput: document.getElementById("keyframeInput"),
+      previewTuneBtn: document.getElementById("previewTuneBtn"),
+      smartStartBtn: document.getElementById("smartStartBtn"),
+      applyTuneBtn: document.getElementById("applyTuneBtn"),
+      tuneBox: document.getElementById("tuneBox"),
       updateBox: document.getElementById("updateBox"),
       uploadBox: document.getElementById("uploadBox"),
       logBox: document.getElementById("logBox"),
@@ -418,6 +484,7 @@ HTML = r"""
     let nodes = [];
     let media = [];
     let selectedNodeId = "";
+    let lastTuneRecommendation = null;
 
     function selectedNodeIds() {
       return [...document.querySelectorAll("[data-node-check]:checked")].map((el) => el.value);
@@ -704,6 +771,88 @@ HTML = r"""
       `).join("") : "本地资源库还没有视频。";
     }
 
+    function renderStreamControls() {
+      const node = selectedNode();
+      const h = node?.health || {};
+      const videos = h.videos || [];
+      refs.streamNodeInput.value = node ? `${node.name || node.id} (${node.id})` : "选择右侧 VPS 节点";
+      refs.streamVideoSelect.innerHTML = videos.length ? videos.map((item) => `
+        <option value="${escapeHtml(item.video_path || item.path || item.name)}">${escapeHtml(item.name || item.video_path || item.path)} (${escapeHtml(fmtBytes(item.size || 0))})</option>
+      `).join("") : `<option value="">该节点暂无服务器视频，请先推送视频</option>`;
+      const config = h.stream_config || {};
+      if (config.stream_url && !refs.streamUrlInput.dataset.userEdited) refs.streamUrlInput.value = config.stream_url;
+      if (config.stream_output_mode) refs.streamOutputModeInput.value = config.stream_output_mode;
+      if (config.adaptive_mode) refs.adaptiveModeInput.value = config.adaptive_mode;
+      if (config.resolution) refs.resolutionInput.value = config.resolution;
+      if (config.fps) refs.fpsInput.value = config.fps;
+      if (config.video_bitrate) refs.videoBitrateInput.value = config.video_bitrate;
+      if (config.audio_bitrate) refs.audioBitrateInput.value = config.audio_bitrate;
+      if (config.preset && config.preset !== "copy") refs.presetInput.value = config.preset;
+      if (config.keyframe_seconds) refs.keyframeInput.value = config.keyframe_seconds;
+    }
+
+    function streamPayload({ includeKey = true } = {}) {
+      const payload = {
+        node_id: selectedNodeId,
+        stream_url: refs.streamUrlInput.value.trim(),
+        stream_key: includeKey ? refs.streamKeyInput.value.trim() : "",
+        video_path: refs.streamVideoSelect.value,
+        copy_mode: refs.tuneBox.dataset.copyMode === "1",
+        adaptive_mode: refs.adaptiveModeInput.value || "auto",
+        stream_output_mode: refs.streamOutputModeInput.value || "direct",
+        preset: refs.presetInput.value.trim() || "veryfast",
+        video_bitrate: Number(refs.videoBitrateInput.value || 4500),
+        audio_bitrate: Number(refs.audioBitrateInput.value || 192),
+        fps: Number(refs.fpsInput.value || 30),
+        resolution: refs.resolutionInput.value.trim() || "1280x720",
+        keyframe_seconds: Number(refs.keyframeInput.value || 2),
+      };
+      if (payload.copy_mode) payload.preset = "copy";
+      return payload;
+    }
+
+    function applyTuneRecommendation(data) {
+      const recommendation = data?.recommendation || {};
+      lastTuneRecommendation = data;
+      if (typeof recommendation.copy_mode === "boolean") {
+        // Copy mode is safe to pass through the backend even though this UI keeps controls simple.
+        refs.tuneBox.dataset.copyMode = recommendation.copy_mode ? "1" : "0";
+      }
+      if (recommendation.preset && recommendation.preset !== "copy") refs.presetInput.value = recommendation.preset;
+      if (recommendation.video_bitrate) refs.videoBitrateInput.value = recommendation.video_bitrate;
+      if (recommendation.audio_bitrate) refs.audioBitrateInput.value = recommendation.audio_bitrate;
+      if (recommendation.fps) refs.fpsInput.value = recommendation.fps;
+      if (recommendation.resolution) refs.resolutionInput.value = recommendation.resolution;
+      if (recommendation.keyframe_seconds) refs.keyframeInput.value = recommendation.keyframe_seconds;
+    }
+
+    function renderTuneRecommendation(data) {
+      const recommendation = data?.recommendation || {};
+      const bounds = data?.quality_bounds || {};
+      const maxQuality = bounds.max_quality || recommendation || {};
+      const minQuality = bounds.min_quality || {};
+      const analysis = data?.analysis || {};
+      const source = analysis.source || {};
+      const reasons = [...(analysis.reasons || []), ...(analysis.warnings || [])];
+      const fmtTarget = (target) => (
+        target && Object.keys(target).length
+          ? `${target.resolution || "--"} / ${target.fps || "--"}fps / ${target.video_bitrate || "--"}k / ${target.preset || "--"} / 关键帧 ${target.keyframe_seconds || "--"} 秒`
+          : "--"
+      );
+      refs.tuneBox.textContent = [
+        `智能评分：${analysis.score || "--"}/100`,
+        `策略：${recommendation.strategy === "copy" ? "Copy passthrough" : "Transcode"}`,
+        `最高稳定质量：${fmtTarget(maxQuality)}`,
+        `最低保底质量：${fmtTarget(minQuality)}`,
+        `当前启动建议：${fmtTarget(recommendation)}`,
+        `环境：CPU ${analysis.cpu_percent?.toFixed ? analysis.cpu_percent.toFixed(0) : "--"}% / ${analysis.cpu_count || "--"} 核，内存可用 ${analysis.memory_available_mb || "--"} MB`,
+        `运行：speed ${analysis.ffmpeg_speed ? analysis.ffmpeg_speed.toFixed(2) + "x" : "未知"}，当前码率 ${analysis.current_stream_bitrate_kbps ? analysis.current_stream_bitrate_kbps.toFixed(0) + " kbps" : "未知"}，网络预算 ${analysis.network_budget_kbps ? analysis.network_budget_kbps + " kbps" : "待开播后校正"}`,
+        `源视频：${source.width || "--"}x${source.height || "--"} / ${source.fps ? source.fps.toFixed(0) + "fps" : "未知"}`,
+        "",
+        ...(reasons.length ? reasons : ["当前环境没有明显风险，推荐值偏保守。"]),
+      ].join("\n");
+    }
+
     async function refreshAll() {
       refs.refreshBtn.disabled = true;
       try {
@@ -715,6 +864,7 @@ HTML = r"""
         media = await mediaResp.json();
         renderNodes();
         renderMedia();
+        renderStreamControls();
         log("状态已刷新");
       } finally {
         refs.refreshBtn.disabled = false;
@@ -779,6 +929,74 @@ HTML = r"""
         refs.uploadBox.textContent = JSON.stringify(await resp.json(), null, 2);
       } finally {
         refs.pushSelectedBtn.disabled = false;
+      }
+    }
+
+    async function previewTune() {
+      const payload = streamPayload({ includeKey: false });
+      if (!payload.node_id || !payload.video_path) {
+        refs.tuneBox.textContent = "请先选择右侧节点，并选择该节点服务器视频。";
+        return;
+      }
+      refs.previewTuneBtn.disabled = true;
+      refs.tuneBox.textContent = "正在让节点分析 CPU / 内存 / 网络 / 视频源...";
+      try {
+        const data = await postNodeAction("/api/nodes/stream/recommend", payload);
+        lastTuneRecommendation = data;
+        if (data.ok) {
+          renderTuneRecommendation(data);
+        } else {
+          refs.tuneBox.textContent = data.message || "智能调优失败";
+        }
+      } finally {
+        refs.previewTuneBtn.disabled = false;
+      }
+    }
+
+    function applyLastTune() {
+      if (!lastTuneRecommendation?.ok) {
+        refs.tuneBox.textContent = "还没有可应用的推荐参数，请先点“预览智能调优”。";
+        return;
+      }
+      applyTuneRecommendation(lastTuneRecommendation);
+      renderTuneRecommendation(lastTuneRecommendation);
+      log("已应用智能调优推荐参数到开播表单");
+    }
+
+    async function smartStart() {
+      const payload = streamPayload({ includeKey: true });
+      const relayMode = payload.stream_output_mode === "local_relay";
+      if (!payload.node_id || !payload.video_path || (!relayMode && !payload.stream_key)) {
+        refs.tuneBox.textContent = relayMode
+          ? "请先选择节点和服务器视频，并确认本地中继可用。"
+          : "请先选择节点、服务器视频，并粘贴 YouTube 直播码。";
+        return;
+      }
+      refs.smartStartBtn.disabled = true;
+      refs.tuneBox.textContent = "正在启动 Smart Start：会在选中节点停止重复推流，并启动一个干净 FFmpeg。";
+      try {
+        if (!lastTuneRecommendation?.ok) {
+          const tune = await postNodeAction("/api/nodes/stream/recommend", { ...payload, stream_key: "" });
+          if (tune.ok) {
+            applyTuneRecommendation(tune);
+            renderTuneRecommendation(tune);
+          }
+        }
+        const startPayload = streamPayload({ includeKey: true });
+        if (lastTuneRecommendation?.recommendation) {
+          Object.assign(startPayload, lastTuneRecommendation.recommendation);
+        }
+        const data = await postNodeAction("/api/nodes/stream/start", startPayload);
+        refs.tuneBox.textContent = JSON.stringify({
+          ok: data.ok,
+          node_id: data.node_id,
+          message: data.message,
+          started_pid: data.result?.started_pid,
+          duplicate_processes: data.result?.duplicate_processes,
+        }, null, 2);
+        await refreshAll();
+      } finally {
+        refs.smartStartBtn.disabled = false;
       }
     }
 
@@ -854,6 +1072,7 @@ HTML = r"""
       if (!row) return;
       selectedNodeId = row.dataset.nodeId;
       renderNodes();
+      renderStreamControls();
     });
     refs.refreshBtn.addEventListener("click", refreshAll);
     refs.uploadBtn.addEventListener("click", uploadMedia);
@@ -861,6 +1080,13 @@ HTML = r"""
     refs.policyBtn.addEventListener("click", showPolicy);
     refs.auditBtn.addEventListener("click", showAudit);
     refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
+    refs.previewTuneBtn.addEventListener("click", previewTune);
+    refs.applyTuneBtn.addEventListener("click", applyLastTune);
+    refs.smartStartBtn.addEventListener("click", smartStart);
+    refs.streamUrlInput.addEventListener("input", () => { refs.streamUrlInput.dataset.userEdited = "1"; });
+    [refs.presetInput, refs.videoBitrateInput, refs.audioBitrateInput, refs.fpsInput, refs.resolutionInput, refs.keyframeInput].forEach((el) => {
+      el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
+    });
     refs.upgradeSelectedBtn.addEventListener("click", upgradeSelectedNodes);
     refreshAll();
   </script>
@@ -1538,6 +1764,71 @@ def api_media_push():
         "media": media_name,
         "results": results,
     })
+
+
+def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "stream_url": str(payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2").strip().rstrip("/"),
+        "stream_key": str(payload.get("stream_key") or "").strip(),
+        "video_path": str(payload.get("video_path") or "").strip(),
+        "copy_mode": bool(payload.get("copy_mode")),
+        "adaptive_mode": str(payload.get("adaptive_mode") or "auto").strip().lower() or "auto",
+        "stream_output_mode": str(payload.get("stream_output_mode") or "direct").strip().lower() or "direct",
+        "preset": str(payload.get("preset") or "veryfast").strip() or "veryfast",
+        "video_bitrate": int(payload.get("video_bitrate") or 4500),
+        "audio_bitrate": int(payload.get("audio_bitrate") or 192),
+        "fps": int(payload.get("fps") or 30),
+        "resolution": str(payload.get("resolution") or "1280x720").strip() or "1280x720",
+        "keyframe_seconds": int(payload.get("keyframe_seconds") or 2),
+    }
+
+
+def redacted_stream_result(data: dict[str, Any]) -> dict[str, Any]:
+    result = dict(data or {})
+    result.pop("command", None)
+    if isinstance(result.get("result"), dict):
+        nested = dict(result["result"])
+        nested.pop("command", None)
+        result["result"] = nested
+    return result
+
+
+@APP.post("/api/nodes/stream/recommend")
+def api_nodes_stream_recommend():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "")
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    if not node.get("enabled", True):
+        return jsonify({"ok": False, "message": "node disabled"}), 409
+    node_payload = stream_payload_for_node(payload)
+    node_payload["stream_key"] = ""
+    result = post_node_json(node, "/api/stream/recommend", node_payload, timeout=45)
+    status_code = 200 if result.get("ok") else 502
+    return jsonify({"node_id": node_id, **redacted_stream_result(result)}), status_code
+
+
+@APP.post("/api/nodes/stream/start")
+def api_nodes_stream_start():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "")
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    if not node.get("enabled", True):
+        return jsonify({"ok": False, "message": "node disabled"}), 409
+    node_payload = stream_payload_for_node(payload)
+    if not node_payload["video_path"]:
+        return jsonify({"ok": False, "message": "missing node video_path"}), 400
+    if node_payload["stream_output_mode"] != "local_relay" and not node_payload["stream_key"]:
+        return jsonify({"ok": False, "message": "missing stream key"}), 400
+    result = post_node_json(node, "/api/start-stream", node_payload, timeout=60)
+    status_code = 200 if result.get("ok") else 502
+    return jsonify({
+        "node_id": node_id,
+        **redacted_stream_result(result),
+    }), status_code
 
 
 @APP.post("/api/nodes/restart-stream")
