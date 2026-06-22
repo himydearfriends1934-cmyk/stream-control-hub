@@ -46,10 +46,21 @@ The hub uploads media to VPS nodes through the existing dashboard chunk API.
 - The temporary public token is held in memory only and is never written to logs or config.
 - Chunk uploads retry a small number of times before cleanup.
 - Failed pushes call `/api/upload-chunk/cancel` through the node `base_url`, then close the public window if one was opened.
+- Public routes must pass `/api/upload-probe` and the minimum speed threshold before large chunks are sent.
+- If a public route fails during transfer, the hub closes the public window and continues over the node `base_url` with the same upload id and chunk size.
+- Each push writes a token-free audit event with policy, route, probe, speed, fallback, and cleanup details.
+
+Policy endpoints:
+
+```text
+GET /api/policy
+GET /api/push-audit?limit=50
+```
 
 Useful environment variables:
 
 ```text
+STREAM_HUB_UPLOAD_POLICY_NAME=safe-stable-fast-v1
 STREAM_HUB_NODE_UPLOAD_CHUNK_BYTES=8388608
 STREAM_HUB_NODE_PUBLIC_UPLOAD_CHUNK_BYTES=16777216
 STREAM_HUB_NODE_UPLOAD_TIMEOUT_SECONDS=300
@@ -57,5 +68,7 @@ STREAM_HUB_NODE_PUBLIC_UPLOAD_TTL_SECONDS=900
 STREAM_HUB_NODE_UPLOAD_RETRIES=2
 STREAM_HUB_NODE_UPLOAD_PROBE_BYTES=262144
 STREAM_HUB_NODE_UPLOAD_PROBE_TIMEOUT_SECONDS=12
+STREAM_HUB_MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND=32768
 STREAM_HUB_MIN_FREE_AFTER_UPLOAD_BYTES=2147483648
+STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYTES=5242880
 ```

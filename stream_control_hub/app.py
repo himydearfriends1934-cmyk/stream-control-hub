@@ -35,7 +35,11 @@ NODE_PUBLIC_UPLOAD_TTL_SECONDS = int(os.environ.get("STREAM_HUB_NODE_PUBLIC_UPLO
 NODE_UPLOAD_RETRIES = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_RETRIES", "2"))
 NODE_UPLOAD_PROBE_BYTES = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_PROBE_BYTES", str(256 * 1024)))
 NODE_UPLOAD_PROBE_TIMEOUT_SECONDS = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_PROBE_TIMEOUT_SECONDS", "12"))
+MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND = int(os.environ.get("STREAM_HUB_MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND", str(32 * 1024)))
 MIN_FREE_AFTER_UPLOAD_BYTES = int(os.environ.get("STREAM_HUB_MIN_FREE_AFTER_UPLOAD_BYTES", str(2 * 1024 ** 3)))
+UPLOAD_POLICY_NAME = os.environ.get("STREAM_HUB_UPLOAD_POLICY_NAME", "safe-stable-fast-v1")
+PUSH_AUDIT_LOG = DATA_DIR / "push_audit.jsonl"
+PUSH_AUDIT_LOG_MAX_BYTES = int(os.environ.get("STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYTES", str(5 * 1024 ** 2)))
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("STREAM_HUB_MAX_UPLOAD_BYTES", str(200 * 1024 ** 3)))
@@ -160,6 +164,8 @@ HTML = r"""
       <div class="actions">
         <button class="primary" id="refreshBtn">刷新状态</button>
         <button id="checkUpdatesBtn">检查 GitHub 更新</button>
+        <button id="policyBtn">Upload Policy</button>
+        <button id="auditBtn">Push Audit</button>
       </div>
     </section>
 
@@ -205,6 +211,8 @@ HTML = r"""
       mediaList: document.getElementById("mediaList"),
       refreshBtn: document.getElementById("refreshBtn"),
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
+      policyBtn: document.getElementById("policyBtn"),
+      auditBtn: document.getElementById("auditBtn"),
       upgradeSelectedBtn: document.getElementById("upgradeSelectedBtn"),
       mediaInput: document.getElementById("mediaInput"),
       uploadBtn: document.getElementById("uploadBtn"),
@@ -306,6 +314,20 @@ HTML = r"""
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
     }
 
+    async function showPolicy() {
+      refs.updateBox.textContent = "Loading upload policy...";
+      const resp = await fetch("/api/policy");
+      const data = await resp.json();
+      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function showAudit() {
+      refs.updateBox.textContent = "Loading push audit...";
+      const resp = await fetch("/api/push-audit?limit=20");
+      const data = await resp.json();
+      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+    }
+
     async function pushSelectedMedia() {
       const node_ids = selectedNodeIds();
       const media_name = selectedMediaName();
@@ -348,6 +370,8 @@ HTML = r"""
     refs.refreshBtn.addEventListener("click", refreshAll);
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
+    refs.policyBtn.addEventListener("click", showPolicy);
+    refs.auditBtn.addEventListener("click", showAudit);
     refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
     refs.upgradeSelectedBtn.addEventListener("click", upgradeSelectedNodes);
     refreshAll();
@@ -430,6 +454,75 @@ def public_upload_summary(data: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if key != "token"}
 
 
+def upload_policy() -> dict[str, Any]:
+    return {
+        "name": UPLOAD_POLICY_NAME,
+        "safety": {
+            "token_storage": "memory-only",
+            "public_window_ttl_seconds": NODE_PUBLIC_UPLOAD_TTL_SECONDS,
+            "close_public_window_on_success": True,
+            "close_public_window_on_failure": True,
+            "cancel_partial_upload_on_failure": True,
+            "min_free_after_upload_bytes": MIN_FREE_AFTER_UPLOAD_BYTES,
+            "max_hub_upload_bytes": APP.config["MAX_CONTENT_LENGTH"],
+        },
+        "stability": {
+            "chunk_retries": NODE_UPLOAD_RETRIES,
+            "chunk_timeout_seconds": NODE_UPLOAD_TIMEOUT_SECONDS,
+            "probe_before_public_upload": True,
+            "probe_timeout_seconds": NODE_UPLOAD_PROBE_TIMEOUT_SECONDS,
+            "public_to_internal_fallback": True,
+            "preserve_chunk_size_on_fallback": True,
+        },
+        "speed": {
+            "route_preference": "public-window, public-direct, internal",
+            "internal_chunk_bytes": NODE_UPLOAD_CHUNK_BYTES,
+            "public_chunk_bytes": NODE_PUBLIC_UPLOAD_CHUNK_BYTES,
+            "probe_bytes": NODE_UPLOAD_PROBE_BYTES,
+            "min_public_upload_bytes_per_second": MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND,
+        },
+    }
+
+
+def policy_brief() -> dict[str, Any]:
+    policy = upload_policy()
+    return {
+        "name": policy["name"],
+        "safety": "memory-token/auto-close/cancel-partial/disk-guard",
+        "stability": "probe/retry/public-to-internal-fallback",
+        "speed": "public-first/probe-measured/chunked",
+    }
+
+
+def rotate_push_audit_log() -> None:
+    if PUSH_AUDIT_LOG.exists() and PUSH_AUDIT_LOG.stat().st_size > PUSH_AUDIT_LOG_MAX_BYTES:
+        PUSH_AUDIT_LOG.replace(PUSH_AUDIT_LOG.with_suffix(".jsonl.1"))
+
+
+def append_push_audit(event: dict[str, Any]) -> None:
+    ensure_dirs()
+    rotate_push_audit_log()
+    safe_event = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "policy": policy_brief(),
+        **event,
+    }
+    with PUSH_AUDIT_LOG.open("a", encoding="utf-8") as audit_file:
+        audit_file.write(json.dumps(safe_event, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def recent_push_audit(limit: int = 50) -> list[dict[str, Any]]:
+    ensure_dirs()
+    if not PUSH_AUDIT_LOG.exists():
+        return []
+    lines = PUSH_AUDIT_LOG.read_text(encoding="utf-8").splitlines()[-max(1, min(limit, 200)):]
+    events = []
+    for line in lines:
+        with suppress(Exception):
+            events.append(json.loads(line))
+    return events
+
+
 def probe_upload_route(route: dict[str, Any]) -> dict[str, Any]:
     payload = b"0" * max(1, NODE_UPLOAD_PROBE_BYTES)
     started_at = time.time()
@@ -446,12 +539,19 @@ def probe_upload_route(route: dict[str, Any]) -> dict[str, Any]:
             data = {"message": resp.text[:500]}
         elapsed = max(0.001, time.time() - started_at)
         ok = resp.ok and bool(data.get("ok", False))
+        bytes_per_second = int(len(payload) / elapsed)
+        if ok and bytes_per_second < MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND:
+            ok = False
+            data["message"] = (
+                f"public probe too slow: {file_size_label(bytes_per_second)}/s "
+                f"< {file_size_label(MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND)}/s"
+            )
         return {
             "ok": ok,
             "status_code": resp.status_code,
             "elapsed_seconds": round(elapsed, 3),
-            "bytes_per_second": int(len(payload) / elapsed),
-            "rate_label": f"{file_size_label(int(len(payload) / elapsed))}/s",
+            "bytes_per_second": bytes_per_second,
+            "rate_label": f"{file_size_label(bytes_per_second)}/s",
             "message": data.get("message") or ("probe ok" if ok else "probe failed"),
         }
     except Exception as exc:
@@ -471,6 +571,7 @@ def make_internal_upload_route(node: dict[str, Any], warnings: list[str] | None 
         "chunk_bytes": NODE_UPLOAD_CHUNK_BYTES,
         "public_status": {},
         "warnings": list(warnings or []),
+        "decision_log": [],
         "last_heartbeat_at": 0.0,
         "probe": {"ok": True, "skipped": True, "message": "internal fallback"},
         "fallback_from": "",
@@ -487,11 +588,15 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
     route["public_status"] = public_upload_summary(status)
     if not status.get("ok"):
         route["warnings"].append(status.get("message") or "public upload status unavailable")
+        route["decision_log"].append("public upload status unavailable; using internal route")
         return route
 
     public_origin = str(status.get("public_origin") or "").rstrip("/")
     restrict_public = bool(status.get("restrict_public_to_upload"))
     supports_window = bool(status.get("supported"))
+    route["decision_log"].append(
+        f"public status ok; supported={supports_window}; restricted={restrict_public}; origin={public_origin or '-'}"
+    )
 
     if supports_window:
         opened = post_node_json(
@@ -508,6 +613,7 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
             token = str(opened.get("token") or "")
             opened_origin = str(opened.get("public_origin") or public_origin).rstrip("/")
             if opened_origin:
+                route["decision_log"].append("public window opened; probing public route")
                 route.update({
                     "upload_base_url": opened_origin,
                     "route": "public-window",
@@ -522,13 +628,21 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
                 probe = probe_upload_route(route)
                 route["probe"] = probe
                 if probe.get("ok"):
+                    route["decision_log"].append(
+                        f"public probe ok at {probe.get('rate_label')}; using public window route"
+                    )
                     return route
                 route["warnings"].append(probe.get("message") or "public upload probe failed")
+                route["decision_log"].append("public probe failed; closing public window and using internal route")
                 close_node_public_upload(node, route, reason="stream-control-hub-public-probe-failed")
-                return make_internal_upload_route(node, route["warnings"])
+                fallback_route = make_internal_upload_route(node, route["warnings"])
+                fallback_route["decision_log"] = [*route.get("decision_log", []), "internal fallback selected after failed public probe"]
+                return fallback_route
         route["warnings"].append(opened.get("message") or "failed to open public upload window")
+        route["decision_log"].append("failed to open public window; considering direct public or internal route")
 
     if public_origin and not restrict_public:
+        route["decision_log"].append("public origin is unrestricted; probing direct public route")
         route.update({
             "upload_base_url": public_origin,
             "route": "public-direct",
@@ -539,7 +653,13 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
         route["probe"] = probe
         if not probe.get("ok"):
             route["warnings"].append(probe.get("message") or "public direct probe failed")
-            return make_internal_upload_route(node, route["warnings"])
+            route["decision_log"].append("direct public probe failed; using internal route")
+            fallback_route = make_internal_upload_route(node, route["warnings"])
+            fallback_route["decision_log"] = [*route.get("decision_log", []), "internal fallback selected after failed direct probe"]
+            return fallback_route
+        route["decision_log"].append(f"direct public probe ok at {probe.get('rate_label')}; using direct public route")
+    else:
+        route["decision_log"].append("no usable public route selected; using internal route")
     return route
 
 
@@ -551,6 +671,7 @@ def route_summary(route: dict[str, Any]) -> dict[str, Any]:
         "opened_public_window": bool(route.get("opened_public_window")),
         "chunk_bytes": route.get("chunk_bytes"),
         "warnings": route.get("warnings") or [],
+        "decision_log": route.get("decision_log") or [],
         "probe": route.get("probe") or {},
         "fallback_from": route.get("fallback_from") or "",
     }
@@ -712,6 +833,9 @@ def push_media_to_node(node: dict[str, Any], media_path: Path) -> dict[str, Any]
                         ],
                     )
                     route["fallback_from"] = "public"
+                    route["decision_log"].append(
+                        f"public transfer failed at chunk {chunk_index + 1}; switched to internal route"
+                    )
                     # Keep the original chunk size and total_chunks so the node-side offset check stays consistent.
                     route["chunk_bytes"] = chunk_size
                     last_payload = upload_chunk_with_retries(
@@ -733,19 +857,35 @@ def push_media_to_node(node: dict[str, Any], media_path: Path) -> dict[str, Any]
 
         close_result = close_node_public_upload(node, route, reason="stream-control-hub-media-push-complete")
         elapsed = max(0.001, time.time() - started_at)
+        audit_event = {
+            "node_id": node_id,
+            "ok": True,
+            "media": media_path.name,
+            "size": total_size,
+            "received_size": received_size,
+            "elapsed_seconds": round(elapsed, 2),
+            "average_bytes_per_second": int(total_size / elapsed),
+            "route": route_summary(route),
+            "video_path": last_payload.get("video_path"),
+            "close_public_window": close_result,
+        }
+        append_push_audit(audit_event)
         return {
             "node_id": node_id,
             "ok": True,
             "message": "media pushed to node",
+            "policy": policy_brief(),
             "media": media_path.name,
             "size": total_size,
             "size_label": file_size_label(total_size),
             "received_size": received_size,
             "elapsed_seconds": round(elapsed, 2),
+            "average_bytes_per_second": int(total_size / elapsed),
             "average_rate_label": f"{file_size_label(int(total_size / elapsed))}/s",
             "video_path": last_payload.get("video_path"),
             "route": route_summary(route),
             "close_public_window": close_result,
+            "audit_recorded": True,
         }
     except Exception as exc:
         cleanup = cancel_node_upload(node, upload_id)
@@ -753,7 +893,7 @@ def push_media_to_node(node: dict[str, Any], media_path: Path) -> dict[str, Any]
         if route:
             with suppress(Exception):
                 close_result = close_node_public_upload(node, route, reason="stream-control-hub-media-push-failed")
-        return {
+        failure_event = {
             "node_id": node_id,
             "ok": False,
             "message": str(exc),
@@ -763,6 +903,21 @@ def push_media_to_node(node: dict[str, Any], media_path: Path) -> dict[str, Any]
             "route": route_summary(route) if route else None,
             "cleanup": public_upload_summary(cleanup),
             "close_public_window": close_result,
+        }
+        with suppress(Exception):
+            append_push_audit(failure_event)
+        return {
+            "node_id": node_id,
+            "ok": False,
+            "message": str(exc),
+            "policy": policy_brief(),
+            "media": media_path.name,
+            "received_size": received_size,
+            "last_response": public_upload_summary(last_payload),
+            "route": route_summary(route) if route else None,
+            "cleanup": public_upload_summary(cleanup),
+            "close_public_window": close_result,
+            "audit_recorded": True,
         }
 
 
@@ -821,6 +976,26 @@ def api_nodes():
 @APP.get("/api/media")
 def api_media():
     return jsonify(list_media())
+
+
+@APP.get("/api/policy")
+def api_policy():
+    return jsonify({
+        "ok": True,
+        "policy": upload_policy(),
+    })
+
+
+@APP.get("/api/push-audit")
+def api_push_audit():
+    try:
+        limit = int(request.args.get("limit") or 50)
+    except ValueError:
+        limit = 50
+    return jsonify({
+        "ok": True,
+        "events": recent_push_audit(limit),
+    })
 
 
 @APP.post("/api/media/upload")
