@@ -8,6 +8,20 @@ The same codebase now contains:
 - a node Agent API for VPS status, uploads, and FFmpeg control
 - the optional node Dashboard UI for direct single-node operation
 
+## Installation Entrypoints
+
+Use these as the GitHub landing-page install entrypoints.
+
+| Target | Platform | Entry |
+| --- | --- | --- |
+| Hub UI/control plane | Windows | [Quick Start: Windows Hub](#quick-start-windows-hub) |
+| Hub UI/control plane | Linux VPS | [One-Line Linux Hub](#one-line-linux-hub) |
+| Headless Agent node | Windows | [Quick Start: Windows Headless Agent](#quick-start-windows-headless-agent) |
+| Headless Agent node | Linux VPS | [One-Line Linux Headless Agent](#one-line-linux-headless-agent) |
+
+If you are testing the current PR branch before merge, replace `main` in the
+Linux one-liners with `codex/unify-agent-dashboard`.
+
 ## Goals
 
 - Upload media once to the local hub, then push it to selected VPS nodes.
@@ -18,9 +32,11 @@ The same codebase now contains:
 - Keep FFmpeg streaming processes independent from panel upgrades.
 - Never store server secrets in the repository.
 
-## Quick Start: Hub
+## Quick Start: Windows Hub
 
 ```powershell
+git clone https://github.com/himydearfriends1934-cmyk/stream-control-hub.git
+cd stream-control-hub
 python -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
 copy config\nodes.example.json config\nodes.json
@@ -29,9 +45,11 @@ copy config\nodes.example.json config\nodes.json
 
 Open `http://127.0.0.1:8788`.
 
-## Quick Start: Node Agent
+## Quick Start: Windows Headless Agent
 
 ```powershell
+git clone https://github.com/himydearfriends1934-cmyk/stream-control-hub.git
+cd stream-control-hub
 python -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
 $env:STREAM_CONTROL_ROLE="agent"
@@ -45,25 +63,25 @@ Open `http://127.0.0.1:8787`.
 In headless mode, `/` returns the agent contract as JSON. Set
 `STREAM_NODE_AGENT_MODE=0` to serve the single-node Dashboard UI.
 
-Linux deployments can adapt `deploy/stream-control-node-agent.service`.
-
-## One-Line Deployment
+## One-Line Linux Hub
 
 Use fixed systemd services, fixed install directories, and TailScale/private IPs.
 Do not paste secrets into commands. SSH credentials stay behind
 NewsBoardSecureAgent.
 
-Hub VPS:
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/deploy/install-hub.sh | sudo bash -s -- --bind 0.0.0.0 --port 8788
 ```
 
-Headless Agent VPS:
+This creates the fixed `stream-control-hub.service` systemd service.
+
+## One-Line Linux Headless Agent
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/deploy/install-agent.sh | sudo bash -s -- --hub-url http://<hub-tailscale-ip>:8788 --node-name <agent-name> --bind 0.0.0.0 --port 8787
 ```
+
+This creates the fixed `stream-control-node-agent.service` systemd service.
 
 After the Agent is running, open the Hub and enter the Agent TailScale IP in the
 `Connect Agent` field. The Hub persists it in `config/nodes.json`, checks
