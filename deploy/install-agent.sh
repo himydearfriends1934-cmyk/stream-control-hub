@@ -11,6 +11,7 @@ BIND_HOST="0.0.0.0"
 HUB_URL=""
 NODE_NAME="$(hostname)"
 STREAM_DIR="/srv/stream-videos"
+CONFIRM_DELETE_OLD=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -23,6 +24,7 @@ while [ "$#" -gt 0 ]; do
     --hub-url) HUB_URL="$2"; shift 2 ;;
     --node-name) NODE_NAME="$2"; shift 2 ;;
     --stream-dir) STREAM_DIR="$2"; shift 2 ;;
+    --confirm-delete-old) CONFIRM_DELETE_OLD=1; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -42,11 +44,160 @@ RELEASE_ROOT="/opt/stream-control-hub-agent-releases"
 BACKUP_DIR="/opt/stream-control-hub-agent-backups"
 TS="$(date +%Y%m%d%H%M%S)"
 NEW_RELEASE="${RELEASE_ROOT}/${TS}"
+OLD_PATHS=()
+OLD_SERVICES=()
+OLD_PORTS=()
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run as root or with sudo." >&2
   exit 1
 fi
+
+has_item() {
+  local needle="$1"
+  local item
+  shift || true
+  for item in "$@"; do
+    if [ "$item" = "$needle" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+record_path() {
+  local path="$1"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    if ! has_item "$path" "${OLD_PATHS[@]}"; then
+      OLD_PATHS+=("$path")
+    fi
+  fi
+}
+
+record_service() {
+  local unit="$1"
+  if systemctl cat "$unit" >/dev/null 2>&1 || [ -e "/etc/systemd/system/$unit" ] || [ -e "/lib/systemd/system/$unit" ]; then
+    if ! has_item "$unit" "${OLD_SERVICES[@]}"; then
+      OLD_SERVICES+=("$unit")
+    fi
+  fi
+}
+
+scan_old_installation() {
+  local path unit port_line
+  record_service "${SERVICE_NAME}.service"
+  record_service "stream-control-node-agent.service"
+  record_service "stream-control-hub.service"
+  record_service "stream-dashboard.service"
+  record_service "istanbul-stream-dashboard.service"
+
+  shopt -s nullglob
+  for unit in /etc/systemd/system/stream-control*.service /etc/systemd/system/*stream-dashboard*.service; do
+    record_service "$(basename "$unit")"
+  done
+  for path in \
+    "$SERVICE_FILE" "$ENV_DIR" "$APP_DIR" "$DATA_DIR" "$STREAM_DIR" "$LOG_DIR" "$RELEASE_ROOT" "$BACKUP_DIR" \
+    /opt/stream-control-hub /opt/stream-control-hub-* /opt/stream-control-node-agent \
+    /opt/stream-dashboard /opt/istanbul-stream-dashboard \
+    /var/lib/stream-control-hub /var/lib/stream-control-node-agent \
+    /var/lib/stream-dashboard /var/lib/istanbul-stream-dashboard \
+    /var/log/stream-control-hub /var/log/stream-control-node-agent \
+    /var/log/stream-dashboard /var/log/istanbul-stream-dashboard \
+    /etc/stream-control-hub /etc/stream-dashboard /etc/istanbul-stream-dashboard; do
+    record_path "$path"
+  done
+  shopt -u nullglob
+
+  if command -v ss >/dev/null 2>&1; then
+    while IFS= read -r port_line; do
+      [ -n "$port_line" ] && OLD_PORTS+=("$port_line")
+    done < <(ss -H -ltnp "sport = :${PORT}" 2>/dev/null || true)
+  fi
+}
+
+print_items() {
+  local title="$1"
+  local count
+  local item
+  shift || true
+  count="$#"
+  [ "$count" -gt 0 ] || return 0
+  echo "${title} (${count}):"
+  for item in "$@"; do
+    echo "  - ${item}"
+  done
+}
+
+confirm_old_cleanup() {
+  local total reply
+  total=$(( ${#OLD_PATHS[@]} + ${#OLD_SERVICES[@]} + ${#OLD_PORTS[@]} ))
+  [ "$total" -gt 0 ] || return 0
+
+  echo "Existing or conflicting Stream Control installation content was found."
+  echo "Summary: paths=${#OLD_PATHS[@]}, services=${#OLD_SERVICES[@]}, port_conflicts=${#OLD_PORTS[@]}"
+  print_items "Services to stop, disable, and remove" "${OLD_SERVICES[@]}"
+  print_items "Project paths to permanently delete" "${OLD_PATHS[@]}"
+  print_items "Processes currently listening on port ${PORT}" "${OLD_PORTS[@]}"
+  echo
+  echo "This is a clean install guard. The installer will continue only after the old project is removed."
+
+  if [ "$CONFIRM_DELETE_OLD" = "1" ]; then
+    echo "--confirm-delete-old was provided; deleting old project content without prompting."
+    return 0
+  fi
+
+  if [ ! -r /dev/tty ]; then
+    echo "No interactive terminal is available for confirmation." >&2
+    echo "Re-run from a terminal and type DELETE, or pass --confirm-delete-old for unattended cleanup." >&2
+    exit 3
+  fi
+
+  read -r -p "Type DELETE to permanently remove the old project and continue: " reply < /dev/tty
+  if [ "$reply" != "DELETE" ]; then
+    echo "Install cancelled. No old project content was deleted."
+    exit 4
+  fi
+}
+
+delete_old_installation() {
+  local unit path
+  [ $(( ${#OLD_PATHS[@]} + ${#OLD_SERVICES[@]} )) -gt 0 ] || return 0
+
+  for unit in "${OLD_SERVICES[@]}"; do
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+  done
+
+  for unit in "${OLD_SERVICES[@]}"; do
+    rm -f "/etc/systemd/system/$unit" "/lib/systemd/system/$unit"
+  done
+  systemctl daemon-reload || true
+
+  for path in "${OLD_PATHS[@]}"; do
+    rm -rf --one-file-system -- "$path"
+  done
+
+  echo "Old project content deleted. Starting fresh Headless Agent installation."
+}
+
+ensure_port_available() {
+  local port_line
+  if ! command -v ss >/dev/null 2>&1; then
+    return 0
+  fi
+  port_line="$(ss -H -ltnp "sport = :${PORT}" 2>/dev/null | head -n 1 || true)"
+  if [ -n "$port_line" ]; then
+    echo "Port ${PORT} is still in use after cleanup:" >&2
+    echo "  ${port_line}" >&2
+    echo "Stop the conflicting service or choose another --port before installing." >&2
+    exit 5
+  fi
+}
+
+scan_old_installation
+confirm_old_cleanup
+delete_old_installation
+ensure_port_available
 
 apt-get update
 apt-get install -y git python3 python3-venv python3-pip ffmpeg curl

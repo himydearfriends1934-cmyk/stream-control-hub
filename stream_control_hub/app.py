@@ -2008,6 +2008,8 @@ def api_deploy_oneliners():
         "notes": [
             "Run the Hub one-liner on the Hub VPS.",
             "Run the Headless Agent one-liner on each Agent VPS.",
+            "If old project content is detected, the installer prints a cleanup report and waits for DELETE confirmation.",
+            "Use --confirm-delete-old only for unattended clean installs where old project data should be removed.",
             "Use TailScale/private IPs for hub_url and agent connection.",
             "Secrets and SSH access must stay behind NewsBoardSecureAgent.",
         ],

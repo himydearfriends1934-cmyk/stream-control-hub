@@ -22,6 +22,22 @@ Use these as the GitHub landing-page install entrypoints.
 If you are testing the current PR branch before merge, replace `main` in the
 Linux one-liners with `codex/unify-agent-dashboard`.
 
+## Linux Clean-Install Guard
+
+The Linux installers scan the server before installing. If they find an old
+Hub, old Headless Agent, old stream dashboard, matching systemd units, fixed
+project directories, data directories, log directories, env files, release
+folders, backup folders, or a port conflict, they print a summary first.
+
+When old project content is found, the installer stops and asks for
+confirmation. Type `DELETE` in the terminal to stop and disable old services,
+remove old systemd unit files, delete old project paths, reload systemd, verify
+the install port is clear, and then continue with the new install.
+
+For unattended automation, pass `--confirm-delete-old`. This is intentionally
+explicit because it deletes old project data, logs, backups, and uploaded media
+that live under the detected project paths.
+
 ## Goals
 
 - Upload media once to the local hub, then push it to selected VPS nodes.
@@ -74,6 +90,14 @@ curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-con
 ```
 
 This creates the fixed `stream-control-hub.service` systemd service.
+If old project content is detected, the script shows the cleanup report and asks
+you to type `DELETE` before it removes the old install.
+
+Unattended clean install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/deploy/install-hub.sh | sudo bash -s -- --bind 0.0.0.0 --port 8788 --confirm-delete-old
+```
 
 ## One-Line Linux Headless Agent
 
@@ -82,6 +106,14 @@ curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-con
 ```
 
 This creates the fixed `stream-control-node-agent.service` systemd service.
+If old project content is detected, the script shows the cleanup report and asks
+you to type `DELETE` before it removes the old install.
+
+Unattended clean install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/deploy/install-agent.sh | sudo bash -s -- --hub-url http://<hub-tailscale-ip>:8788 --node-name <agent-name> --bind 0.0.0.0 --port 8787 --confirm-delete-old
+```
 
 After the Agent is running, open the Hub and enter the Agent TailScale IP in the
 `Connect Agent` field. The Hub persists it in `config/nodes.json`, checks
