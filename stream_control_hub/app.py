@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import ipaddress
+import re
 import shutil
 import subprocess
 import time
@@ -14,6 +16,8 @@ import requests
 from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
 
+from .deployment import agent_one_liner, build_deployment_plan, hub_one_liner
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "config"
@@ -24,7 +28,7 @@ NODES_FILE = Path(os.environ.get("STREAM_HUB_NODES_FILE", str(CONFIG_DIR / "node
 PORT = int(os.environ.get("STREAM_HUB_PORT", "8788"))
 SOURCE_REPO = os.environ.get(
     "STREAM_HUB_SOURCE_REPO",
-    "https://github.com/himydearfriends1934-cmyk/istanbul-stream-dashboard.git",
+    "https://github.com/himydearfriends1934-cmyk/stream-control-hub.git",
 )
 SOURCE_BRANCH = os.environ.get("STREAM_HUB_SOURCE_BRANCH", "main")
 ALLOWED_MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
@@ -510,6 +514,11 @@ HTML = r"""
             <span class="pill warn">protected</span>
           </div>
           <div class="node-table" id="nodeList">加载中...</div>
+          <div class="actions" style="margin-top: 10px;">
+            <input id="agentHostInput" type="text" placeholder="Agent TailScale IP, e.g. 100.x.y.z">
+            <input id="agentPortInput" type="number" min="1" max="65535" value="8787" style="max-width: 120px;">
+            <button id="connectAgentBtn">Connect Agent</button>
+          </div>
         </div>
 
         <div class="card resource-card">
@@ -541,6 +550,7 @@ HTML = r"""
           <p>低频维护功能放在底部，不占用节点监控主视野。</p>
           <div class="actions">
             <button id="checkUpdatesBtn">检查 GitHub 更新</button>
+            <button id="deployPlanBtn">Deploy Plan</button>
             <button class="primary" id="upgradeSelectedBtn">更新选中节点</button>
           </div>
         </div>
@@ -555,10 +565,14 @@ HTML = r"""
   <script>
     const refs = {
       nodeList: document.getElementById("nodeList"),
+      agentHostInput: document.getElementById("agentHostInput"),
+      agentPortInput: document.getElementById("agentPortInput"),
+      connectAgentBtn: document.getElementById("connectAgentBtn"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
       refreshBtn: document.getElementById("refreshBtn"),
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
+      deployPlanBtn: document.getElementById("deployPlanBtn"),
       policyBtn: document.getElementById("policyBtn"),
       auditBtn: document.getElementById("auditBtn"),
       upgradeSelectedBtn: document.getElementById("upgradeSelectedBtn"),
@@ -1002,6 +1016,32 @@ HTML = r"""
       }
     }
 
+    async function connectAgent() {
+      const tailscale_ip = refs.agentHostInput.value.trim();
+      const port = Number(refs.agentPortInput.value || 8787);
+      if (!tailscale_ip) {
+        refs.updateBox.textContent = "Enter an Agent TailScale IP first.";
+        return;
+      }
+      refs.connectAgentBtn.disabled = true;
+      refs.updateBox.textContent = `Connecting Agent at ${tailscale_ip}:${port}...`;
+      try {
+        const resp = await fetch("/api/nodes/connect-agent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tailscale_ip, port }),
+        });
+        const data = await resp.json();
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        if (data.ok) {
+          selectedNodeId = data.node.id;
+          await refreshAll();
+        }
+      } finally {
+        refs.connectAgentBtn.disabled = false;
+      }
+    }
+
     async function uploadMedia() {
       const file = refs.mediaInput.files[0];
       if (!file) {
@@ -1169,6 +1209,25 @@ HTML = r"""
       }
     }
 
+    async function showDeployPlan() {
+      const node_ids = selectedNodeIds();
+      if (!node_ids.length) {
+        refs.updateBox.textContent = "Select at least one node.";
+        return;
+      }
+      refs.deployPlanBtn.disabled = true;
+      try {
+        const resp = await fetch("/api/nodes/deploy/plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ node_ids, include_script: true }),
+        });
+        refs.updateBox.textContent = JSON.stringify(await resp.json(), null, 2);
+      } finally {
+        refs.deployPlanBtn.disabled = false;
+      }
+    }
+
     async function upgradeSelectedNodes() {
       const node_ids = selectedNodeIds();
       if (!node_ids.length) {
@@ -1206,8 +1265,10 @@ HTML = r"""
       renderStreamControls();
     });
     refs.refreshBtn.addEventListener("click", refreshAll);
+    refs.connectAgentBtn.addEventListener("click", connectAgent);
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
+    refs.deployPlanBtn.addEventListener("click", showDeployPlan);
     refs.policyBtn.addEventListener("click", showPolicy);
     refs.auditBtn.addEventListener("click", showAudit);
     refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
@@ -1248,6 +1309,69 @@ def load_nodes() -> list[dict[str, Any]]:
     except Exception:
         return []
     return [node for node in data if isinstance(node, dict)]
+
+
+def save_nodes(nodes: list[dict[str, Any]]) -> None:
+    ensure_dirs()
+    NODES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = NODES_FILE.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(nodes, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(NODES_FILE)
+
+
+def normalize_agent_host(value: str) -> str:
+    host = str(value or "").strip()
+    if host.startswith("http://") or host.startswith("https://"):
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0].strip()
+    if host.startswith("[") and "]" in host:
+        host = host[1:].split("]", 1)[0]
+    elif ":" in host and host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    if not host:
+        raise ValueError("missing agent host")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if not re.fullmatch(r"[A-Za-z0-9.-]+", host):
+            raise ValueError("agent host must be an IP address or DNS name")
+    return host
+
+
+def stable_agent_node_id(host: str) -> str:
+    return "agent-" + re.sub(r"[^A-Za-z0-9]+", "-", host).strip("-").lower()
+
+
+def node_from_agent_host(host: str, *, port: int, name: str = "") -> dict[str, Any]:
+    node_id = stable_agent_node_id(host)
+    return {
+        "id": node_id,
+        "name": name.strip() or node_id,
+        "base_url": f"http://{host}:{port}",
+        "agent_port": port,
+        "agent_bind_host": "0.0.0.0",
+        "role": "stream-node",
+        "enabled": True,
+    }
+
+
+def upsert_node(node: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = load_nodes()
+    node_id = str(node.get("id") or "")
+    replaced = False
+    result = []
+    for existing in nodes:
+        if str(existing.get("id") or "") == node_id:
+            merged = dict(existing)
+            merged.update(node)
+            result.append(merged)
+            replaced = True
+        else:
+            result.append(existing)
+    if not replaced:
+        result.append(node)
+    save_nodes(result)
+    return result
 
 
 def node_by_id(node_id: str) -> dict[str, Any] | None:
@@ -1818,6 +1942,36 @@ def api_nodes():
     return jsonify(result)
 
 
+@APP.post("/api/nodes/connect-agent")
+def api_nodes_connect_agent():
+    payload = request.get_json(silent=True) or {}
+    try:
+        host = normalize_agent_host(str(payload.get("tailscale_ip") or payload.get("host") or ""))
+        port = int(payload.get("port") or 8787)
+        if port < 1 or port > 65535:
+            raise ValueError("agent port out of range")
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+
+    node = node_from_agent_host(host, port=port, name=str(payload.get("name") or ""))
+    health = request_node_json(node, "/api/status", timeout=8)
+    if not health.get("ok"):
+        return jsonify({
+            "ok": False,
+            "message": "agent did not respond on the fixed TailScale endpoint",
+            "node": node,
+            "health": health,
+        }), 502
+
+    upsert_node(node)
+    return jsonify({
+        "ok": True,
+        "message": "agent connected and persisted",
+        "node": node,
+        "health": health,
+    })
+
+
 @APP.get("/api/media")
 def api_media():
     return jsonify(list_media())
@@ -1828,6 +1982,37 @@ def api_policy():
     return jsonify({
         "ok": True,
         "policy": upload_policy(),
+    })
+
+
+@APP.get("/api/deploy/oneliners")
+def api_deploy_oneliners():
+    hub_url = deployment_default_control_hub_url() or "http://<hub-tailscale-ip>:8788"
+    return jsonify({
+        "ok": True,
+        "branch": SOURCE_BRANCH,
+        "hub": hub_one_liner(
+            source_repo=SOURCE_REPO,
+            source_branch=SOURCE_BRANCH,
+            port=PORT,
+            bind_host=os.environ.get("STREAM_HUB_HOST", "0.0.0.0"),
+        ),
+        "headless_agent": agent_one_liner(
+            source_repo=SOURCE_REPO,
+            source_branch=SOURCE_BRANCH,
+            hub_url=hub_url,
+            node_name="<agent-name>",
+            port=8787,
+            bind_host="0.0.0.0",
+        ),
+        "notes": [
+            "Run the Hub one-liner on the Hub VPS.",
+            "Run the Headless Agent one-liner on each Agent VPS.",
+            "If old project content is detected, the installer prints a cleanup report and waits for DELETE confirmation.",
+            "Use --confirm-delete-old only for unattended clean installs where old project data should be removed.",
+            "Use TailScale/private IPs for hub_url and agent connection.",
+            "Secrets and SSH access must stay behind NewsBoardSecureAgent.",
+        ],
     })
 
 
@@ -2044,6 +2229,32 @@ def api_nodes_reboot():
     }), 501
 
 
+def deployment_default_control_hub_url() -> str:
+    return os.environ.get("STREAM_HUB_PUBLIC_URL", "").strip().rstrip("/")
+
+
+@APP.post("/api/nodes/deploy/plan")
+def api_nodes_deploy_plan():
+    payload = request.get_json(silent=True) or {}
+    node_ids = [str(item) for item in payload.get("node_ids") or []]
+    include_script = bool(payload.get("include_script", True))
+    control_hub_url = str(payload.get("control_hub_url") or deployment_default_control_hub_url()).strip().rstrip("/")
+    plans = []
+    for node_id in node_ids:
+        node = node_by_id(node_id)
+        if not node:
+            plans.append({"node_id": node_id, "ok": False, "message": "node not found"})
+            continue
+        plans.append(build_deployment_plan(
+            node,
+            source_repo=SOURCE_REPO,
+            source_branch=SOURCE_BRANCH,
+            default_control_hub_url=control_hub_url,
+            include_script=include_script,
+        ))
+    return jsonify({"ok": True, "plans": plans})
+
+
 def run_git(args: list[str], cwd: Path | None = None, timeout: int = 60) -> dict[str, Any]:
     proc = subprocess.run(
         ["git", *args],
@@ -2063,7 +2274,7 @@ def run_git(args: list[str], cwd: Path | None = None, timeout: int = 60) -> dict
 @APP.post("/api/github/check")
 def api_github_check():
     ensure_dirs()
-    repo_dir = WORK_DIR / "istanbul-stream-dashboard"
+    repo_dir = WORK_DIR / "stream-control-hub"
     if not repo_dir.exists():
         clone = run_git(["clone", "--branch", SOURCE_BRANCH, "--depth", "1", SOURCE_REPO, str(repo_dir)], timeout=180)
         if not clone["ok"]:
@@ -2088,17 +2299,27 @@ def api_github_check():
 def api_nodes_upgrade():
     payload = request.get_json(silent=True) or {}
     node_ids = [str(item) for item in payload.get("node_ids") or []]
+    control_hub_url = str(payload.get("control_hub_url") or deployment_default_control_hub_url()).strip().rstrip("/")
     plans = []
     for node_id in node_ids:
         node = node_by_id(node_id)
         if not node:
             plans.append({"node_id": node_id, "ok": False, "message": "node not found"})
             continue
+        plan = build_deployment_plan(
+            node,
+            source_repo=SOURCE_REPO,
+            source_branch=SOURCE_BRANCH,
+            default_control_hub_url=control_hub_url,
+            include_script=False,
+        )
         plans.append({
             "node_id": node_id,
-            "ok": False,
-            "message": "upgrade transport not configured yet; design keeps FFmpeg untouched and restarts panel only",
+            "ok": True,
+            "message": "manual upgrade plan generated; Hub did not execute remote commands",
             "target": str(node.get("base_url") or ""),
+            "upgrade_commands": plan["upgrade_commands"],
+            "warnings": plan["warnings"],
         })
     return jsonify({"ok": True, "plans": plans})
 
