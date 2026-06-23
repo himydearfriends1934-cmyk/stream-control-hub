@@ -9,6 +9,7 @@ DEFAULT_SERVICE_NAME = "stream-control-node-agent"
 DEFAULT_SERVICE_USER = "streamdash"
 DEFAULT_STREAM_DIR = "/srv/stream-videos"
 DEFAULT_AGENT_PORT = 8787
+DEFAULT_HUB_PORT = 8788
 
 
 def shell_quote(value: object) -> str:
@@ -38,6 +39,7 @@ def deployment_options(
     service_name = str(node_value(node, "service_name", DEFAULT_SERVICE_NAME))
     service_user = str(node_value(node, "service_user", DEFAULT_SERVICE_USER))
     stream_dir = str(node_value(node, "stream_upload_dir", DEFAULT_STREAM_DIR)).rstrip("/")
+    data_dir = str(node_value(node, "agent_data_dir", f"/var/lib/{service_name}")).rstrip("/")
     port = int(node_value(node, "agent_port", DEFAULT_AGENT_PORT))
     control_hub_url = str(node_value(node, "control_hub_url", default_control_hub_url)).rstrip("/")
     node_name = str(node_value(node, "name", node_value(node, "id", "stream-node")))
@@ -46,6 +48,7 @@ def deployment_options(
         "service_name": service_name,
         "service_user": service_user,
         "stream_dir": stream_dir,
+        "data_dir": data_dir,
         "port": port,
         "node_name": node_name,
         "control_hub_url": control_hub_url,
@@ -60,6 +63,7 @@ def deployment_options(
 def agent_environment(options: dict[str, Any]) -> dict[str, str]:
     install_dir = options["install_dir"]
     service_name = options["service_name"]
+    data_dir = options["data_dir"]
     return {
         "PYTHONUNBUFFERED": "1",
         "PORT": str(options["port"]),
@@ -69,15 +73,15 @@ def agent_environment(options: dict[str, Any]) -> dict[str, str]:
         "CONTROL_HUB_URL": str(options["control_hub_url"]),
         "STREAM_UPLOAD_DIR": str(options["stream_dir"]),
         "STREAM_LOG_FILE": f"/var/log/{service_name}/stream.log",
-        "STREAM_CONFIG_FILE": f"{install_dir}/stream_config.json",
-        "STREAM_TUNING_FILE": f"{install_dir}/stream_tuning.json",
-        "STREAM_RUNTIME_FILE": f"{install_dir}/stream_runtime_state.json",
+        "STREAM_CONFIG_FILE": f"{data_dir}/stream_config.json",
+        "STREAM_TUNING_FILE": f"{data_dir}/stream_tuning.json",
+        "STREAM_RUNTIME_FILE": f"{data_dir}/stream_runtime_state.json",
         "STREAM_PID_FILE": f"/run/{service_name}/ffmpeg.pid",
-        "CHAT_PLAN_FILE": f"{install_dir}/chat_plan.json",
-        "YOUTUBE_CLIENT_FILE": f"{install_dir}/youtube_client.json",
-        "YOUTUBE_TOKEN_FILE": f"{install_dir}/youtube_token.json",
-        "DASHBOARD_SECRET_FILE": f"{install_dir}/dashboard_secret.key",
-        "DASHBOARD_PASSWORD_FILE": f"{install_dir}/dashboard_password.txt",
+        "CHAT_PLAN_FILE": f"{data_dir}/chat_plan.json",
+        "YOUTUBE_CLIENT_FILE": f"{data_dir}/youtube_client.json",
+        "YOUTUBE_TOKEN_FILE": f"{data_dir}/youtube_token.json",
+        "DASHBOARD_SECRET_FILE": f"{data_dir}/dashboard_secret.key",
+        "DASHBOARD_PASSWORD_FILE": f"{data_dir}/dashboard_password.txt",
         "PUBLIC_UPLOAD_FIREWALL": str(options["public_upload_firewall"]),
         "PUBLIC_UPLOAD_RESTRICT": "1",
         "PUBLIC_UPLOAD_CLOSE_ON_START": "1",
@@ -121,6 +125,7 @@ def bootstrap_script(options: dict[str, Any]) -> str:
     service_user = options["service_user"]
     service_name = options["service_name"]
     stream_dir = options["stream_dir"]
+    data_dir = options["data_dir"]
     repo = options["repo"]
     branch = options["branch"]
     unit = systemd_unit(options).rstrip()
@@ -131,6 +136,7 @@ APP_DIR={shell_quote(install_dir)}
 SERVICE_USER={shell_quote(service_user)}
 SERVICE_NAME={shell_quote(service_name)}
 STREAM_DIR={shell_quote(stream_dir)}
+DATA_DIR={shell_quote(data_dir)}
 REPO_URL={shell_quote(repo)}
 BRANCH={shell_quote(branch)}
 
@@ -141,8 +147,8 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
   sudo useradd --system --create-home --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 
-sudo mkdir -p "$APP_DIR" "$STREAM_DIR" "/var/log/$SERVICE_NAME"
-sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR" "$STREAM_DIR" "/var/log/$SERVICE_NAME"
+sudo mkdir -p "$APP_DIR" "$DATA_DIR" "$STREAM_DIR" "/var/log/$SERVICE_NAME"
+sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR" "$DATA_DIR" "$STREAM_DIR" "/var/log/$SERVICE_NAME"
 
 if [ ! -d "$APP_DIR/.git" ]; then
   sudo -u "$SERVICE_USER" git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
@@ -182,6 +188,38 @@ def upgrade_commands(options: dict[str, Any]) -> list[str]:
     ]
 
 
+def raw_script_url(*, source_repo: str, source_branch: str, script_name: str) -> str:
+    repo = source_repo.removesuffix(".git").replace("https://github.com/", "")
+    return f"https://raw.githubusercontent.com/{repo}/{source_branch}/deploy/{script_name}"
+
+
+def hub_one_liner(*, source_repo: str, source_branch: str, port: int = DEFAULT_HUB_PORT, bind_host: str = "0.0.0.0") -> str:
+    url = raw_script_url(source_repo=source_repo, source_branch=source_branch, script_name="install-hub.sh")
+    return (
+        f"curl -fsSL {shell_quote(url)} | sudo bash -s -- "
+        f"--branch {shell_quote(source_branch)} --port {int(port)} --bind {shell_quote(bind_host)}"
+    )
+
+
+def agent_one_liner(
+    *,
+    source_repo: str,
+    source_branch: str,
+    hub_url: str,
+    node_name: str = "stream-node",
+    port: int = DEFAULT_AGENT_PORT,
+    bind_host: str = "0.0.0.0",
+) -> str:
+    url = raw_script_url(source_repo=source_repo, source_branch=source_branch, script_name="install-agent.sh")
+    return (
+        f"curl -fsSL {shell_quote(url)} | sudo bash -s -- "
+        f"--branch {shell_quote(source_branch)} "
+        f"--hub-url {shell_quote(hub_url)} "
+        f"--node-name {shell_quote(node_name)} "
+        f"--port {int(port)} --bind {shell_quote(bind_host)}"
+    )
+
+
 def build_deployment_plan(
     node: dict[str, Any],
     *,
@@ -215,6 +253,14 @@ def build_deployment_plan(
         "environment": agent_environment(options),
         "systemd_unit": systemd_unit(options),
         "upgrade_commands": upgrade_commands(options),
+        "one_liner": agent_one_liner(
+            source_repo=options["repo"],
+            source_branch=options["branch"],
+            hub_url=options["control_hub_url"],
+            node_name=options["node_name"],
+            port=options["port"],
+            bind_host=options["bind_host"],
+        ),
     }
     if include_script:
         plan["bootstrap_script"] = bootstrap_script(options)

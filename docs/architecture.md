@@ -9,7 +9,9 @@ This repository is organized around two deployable roles.
 The Hub keeps local media, reads `config/nodes.json`, polls node health, and
 pushes media to selected nodes through the node Agent API. Deployment planning
 lives in `stream_control_hub/deployment.py` and is exposed by Hub API routes
-without executing SSH commands directly.
+without executing SSH commands directly. Hub-side node onboarding accepts a
+TailScale/private Agent IP, validates `/api/status`, then persists the node in
+`config/nodes.json`.
 
 ## Agent Role
 
@@ -55,3 +57,15 @@ Run one Hub on a trusted local machine, then run one Agent per VPS. The Hub
 should reach Agents over a trusted private network when possible. Public upload
 windows are temporary and token-protected, but long-lived secrets still belong
 outside the repository.
+
+Deployment is fixed and systemd-backed:
+
+- Hub one-liner: `deploy/install-hub.sh`
+- Headless Agent one-liner: `deploy/install-agent.sh`
+- Hub service: `stream-control-hub.service`
+- Agent service: `stream-control-node-agent.service`
+- Hub config: `/etc/stream-control-hub/hub.env`
+- Agent config: `/etc/stream-control-hub/agent.env`
+
+No direct SSH secrets are part of the Hub. Operator-side VPS access should go
+through NewsBoardSecureAgent or another approved secret bridge.

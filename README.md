@@ -47,6 +47,28 @@ In headless mode, `/` returns the agent contract as JSON. Set
 
 Linux deployments can adapt `deploy/stream-control-node-agent.service`.
 
+## One-Line Deployment
+
+Use fixed systemd services, fixed install directories, and TailScale/private IPs.
+Do not paste secrets into commands. SSH credentials stay behind
+NewsBoardSecureAgent.
+
+Hub VPS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/deploy/install-hub.sh | sudo bash -s -- --bind 0.0.0.0 --port 8788
+```
+
+Headless Agent VPS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/deploy/install-agent.sh | sudo bash -s -- --hub-url http://<hub-tailscale-ip>:8788 --node-name <agent-name> --bind 0.0.0.0 --port 8787
+```
+
+After the Agent is running, open the Hub and enter the Agent TailScale IP in the
+`Connect Agent` field. The Hub persists it in `config/nodes.json`, checks
+`/api/status`, and then uses the Agent API for updates and media sync.
+
 ## Repository Layout
 
 ```text
@@ -67,6 +89,8 @@ stream_control_hub/node_agent/dashboard_ui.py Node Dashboard UI routes
 stream_control_hub/node_agent/dashboard_templates.py Dashboard HTML templates
 stream_control_hub/node_agent/streaming.py Stream config, probing, tuning helpers
 deploy/stream-control-node-agent.service  Example systemd unit for a VPS node
+deploy/install-hub.sh                     One-line Hub installer
+deploy/install-agent.sh                   One-line Headless Agent installer
 ```
 
 ## Node Model
@@ -110,8 +134,10 @@ POST /api/stream/tuning
 The Hub exposes a safe deployment planner that does not execute SSH commands:
 
 ```text
+GET  /api/deploy/oneliners
 POST /api/nodes/deploy/plan
 POST /api/nodes/upgrade
+POST /api/nodes/connect-agent
 ```
 
 `/api/nodes/deploy/plan` returns a reviewed bootstrap script, systemd unit, and

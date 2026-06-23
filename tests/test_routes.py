@@ -15,6 +15,7 @@ class RouteRegistrationTests(unittest.TestCase):
         self.assertIn("/api/nodes", routes)
         self.assertIn("/api/media/push", routes)
         self.assertIn("/api/github/check", routes)
+        self.assertIn("/api/deploy/oneliners", routes)
         self.assertIn("/api/nodes/deploy/plan", routes)
 
     def test_node_agent_routes_are_registered_once(self) -> None:
@@ -100,6 +101,42 @@ class RouteRegistrationTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["plans"][0]["node_id"], "node-a")
         self.assertNotIn("bootstrap_script", payload["plans"][0])
+
+    def test_deploy_oneliners_api(self) -> None:
+        from stream_control_hub import app
+
+        response = app.APP.test_client().get("/api/deploy/oneliners")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertIn("install-hub.sh", payload["hub"])
+        self.assertIn("install-agent.sh", payload["headless_agent"])
+
+    def test_connect_agent_api_persists_node(self) -> None:
+        from stream_control_hub import app
+
+        original_nodes_file = app.NODES_FILE
+        original_request_node_json = app.request_node_json
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text("[]", encoding="utf-8")
+            app.NODES_FILE = nodes_file
+            app.request_node_json = lambda node, path, timeout=6: {"ok": True, "agent": {"mode": "headless-agent"}}
+            try:
+                response = app.APP.test_client().post(
+                    "/api/nodes/connect-agent",
+                    json={"tailscale_ip": "100.85.233.24", "port": 8787},
+                )
+            finally:
+                app.NODES_FILE = original_nodes_file
+                app.request_node_json = original_request_node_json
+            saved_nodes = json.loads(nodes_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["node"]["id"], "agent-100-85-233-24")
+        self.assertEqual(saved_nodes[0]["base_url"], "http://100.85.233.24:8787")
 
 
 if __name__ == "__main__":
