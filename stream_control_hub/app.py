@@ -14,6 +14,8 @@ import requests
 from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
 
+from .deployment import build_deployment_plan
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "config"
@@ -24,7 +26,7 @@ NODES_FILE = Path(os.environ.get("STREAM_HUB_NODES_FILE", str(CONFIG_DIR / "node
 PORT = int(os.environ.get("STREAM_HUB_PORT", "8788"))
 SOURCE_REPO = os.environ.get(
     "STREAM_HUB_SOURCE_REPO",
-    "https://github.com/himydearfriends1934-cmyk/istanbul-stream-dashboard.git",
+    "https://github.com/himydearfriends1934-cmyk/stream-control-hub.git",
 )
 SOURCE_BRANCH = os.environ.get("STREAM_HUB_SOURCE_BRANCH", "main")
 ALLOWED_MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
@@ -541,6 +543,7 @@ HTML = r"""
           <p>低频维护功能放在底部，不占用节点监控主视野。</p>
           <div class="actions">
             <button id="checkUpdatesBtn">检查 GitHub 更新</button>
+            <button id="deployPlanBtn">Deploy Plan</button>
             <button class="primary" id="upgradeSelectedBtn">更新选中节点</button>
           </div>
         </div>
@@ -559,6 +562,7 @@ HTML = r"""
       mediaList: document.getElementById("mediaList"),
       refreshBtn: document.getElementById("refreshBtn"),
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
+      deployPlanBtn: document.getElementById("deployPlanBtn"),
       policyBtn: document.getElementById("policyBtn"),
       auditBtn: document.getElementById("auditBtn"),
       upgradeSelectedBtn: document.getElementById("upgradeSelectedBtn"),
@@ -1169,6 +1173,25 @@ HTML = r"""
       }
     }
 
+    async function showDeployPlan() {
+      const node_ids = selectedNodeIds();
+      if (!node_ids.length) {
+        refs.updateBox.textContent = "Select at least one node.";
+        return;
+      }
+      refs.deployPlanBtn.disabled = true;
+      try {
+        const resp = await fetch("/api/nodes/deploy/plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ node_ids, include_script: true }),
+        });
+        refs.updateBox.textContent = JSON.stringify(await resp.json(), null, 2);
+      } finally {
+        refs.deployPlanBtn.disabled = false;
+      }
+    }
+
     async function upgradeSelectedNodes() {
       const node_ids = selectedNodeIds();
       if (!node_ids.length) {
@@ -1208,6 +1231,7 @@ HTML = r"""
     refs.refreshBtn.addEventListener("click", refreshAll);
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
+    refs.deployPlanBtn.addEventListener("click", showDeployPlan);
     refs.policyBtn.addEventListener("click", showPolicy);
     refs.auditBtn.addEventListener("click", showAudit);
     refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
@@ -2044,6 +2068,32 @@ def api_nodes_reboot():
     }), 501
 
 
+def deployment_default_control_hub_url() -> str:
+    return os.environ.get("STREAM_HUB_PUBLIC_URL", "").strip().rstrip("/")
+
+
+@APP.post("/api/nodes/deploy/plan")
+def api_nodes_deploy_plan():
+    payload = request.get_json(silent=True) or {}
+    node_ids = [str(item) for item in payload.get("node_ids") or []]
+    include_script = bool(payload.get("include_script", True))
+    control_hub_url = str(payload.get("control_hub_url") or deployment_default_control_hub_url()).strip().rstrip("/")
+    plans = []
+    for node_id in node_ids:
+        node = node_by_id(node_id)
+        if not node:
+            plans.append({"node_id": node_id, "ok": False, "message": "node not found"})
+            continue
+        plans.append(build_deployment_plan(
+            node,
+            source_repo=SOURCE_REPO,
+            source_branch=SOURCE_BRANCH,
+            default_control_hub_url=control_hub_url,
+            include_script=include_script,
+        ))
+    return jsonify({"ok": True, "plans": plans})
+
+
 def run_git(args: list[str], cwd: Path | None = None, timeout: int = 60) -> dict[str, Any]:
     proc = subprocess.run(
         ["git", *args],
@@ -2063,7 +2113,7 @@ def run_git(args: list[str], cwd: Path | None = None, timeout: int = 60) -> dict
 @APP.post("/api/github/check")
 def api_github_check():
     ensure_dirs()
-    repo_dir = WORK_DIR / "istanbul-stream-dashboard"
+    repo_dir = WORK_DIR / "stream-control-hub"
     if not repo_dir.exists():
         clone = run_git(["clone", "--branch", SOURCE_BRANCH, "--depth", "1", SOURCE_REPO, str(repo_dir)], timeout=180)
         if not clone["ok"]:
@@ -2088,17 +2138,27 @@ def api_github_check():
 def api_nodes_upgrade():
     payload = request.get_json(silent=True) or {}
     node_ids = [str(item) for item in payload.get("node_ids") or []]
+    control_hub_url = str(payload.get("control_hub_url") or deployment_default_control_hub_url()).strip().rstrip("/")
     plans = []
     for node_id in node_ids:
         node = node_by_id(node_id)
         if not node:
             plans.append({"node_id": node_id, "ok": False, "message": "node not found"})
             continue
+        plan = build_deployment_plan(
+            node,
+            source_repo=SOURCE_REPO,
+            source_branch=SOURCE_BRANCH,
+            default_control_hub_url=control_hub_url,
+            include_script=False,
+        )
         plans.append({
             "node_id": node_id,
-            "ok": False,
-            "message": "upgrade transport not configured yet; design keeps FFmpeg untouched and restarts panel only",
+            "ok": True,
+            "message": "manual upgrade plan generated; Hub did not execute remote commands",
             "target": str(node.get("base_url") or ""),
+            "upgrade_commands": plan["upgrade_commands"],
+            "warnings": plan["warnings"],
         })
     return jsonify({"ok": True, "plans": plans})
 

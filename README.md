@@ -1,18 +1,24 @@
 # Stream Control Hub
 
-Local control hub for managing multiple VPS stream nodes.
+Local control hub and VPS stream node agent in one repository.
 
-The hub is designed to run on a local server. VPS nodes stay lightweight: they keep streaming, receive media files, report health, and accept controlled updates.
+The same codebase now contains:
+
+- a local Hub for managing multiple stream nodes
+- a node Agent API for VPS status, uploads, and FFmpeg control
+- the optional node Dashboard UI for direct single-node operation
 
 ## Goals
 
 - Upload media once to the local hub, then push it to selected VPS nodes.
 - Watch all stream nodes from one place.
+- Run headless VPS agents that expose a stable API to the Hub.
+- Keep the node Dashboard UI separate from the Agent API.
 - Check GitHub updates centrally and deploy them to nodes.
 - Keep FFmpeg streaming processes independent from panel upgrades.
 - Never store server secrets in the repository.
 
-## Quick Start
+## Quick Start: Hub
 
 ```powershell
 python -m venv .venv
@@ -23,20 +29,104 @@ copy config\nodes.example.json config\nodes.json
 
 Open `http://127.0.0.1:8788`.
 
+## Quick Start: Node Agent
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\pip install -r requirements.txt
+$env:STREAM_CONTROL_ROLE="agent"
+$env:STREAM_NODE_AGENT_MODE="1"
+$env:PORT="8787"
+.\.venv\Scripts\python -m stream_control_hub
+```
+
+Open `http://127.0.0.1:8787`.
+
+In headless mode, `/` returns the agent contract as JSON. Set
+`STREAM_NODE_AGENT_MODE=0` to serve the single-node Dashboard UI.
+
+Linux deployments can adapt `deploy/stream-control-node-agent.service`.
+
+## Repository Layout
+
+```text
+stream_control_hub/app.py                 Hub backend and Hub UI
+stream_control_hub/deployment.py          Agent deployment plan builder
+stream_control_hub/node_agent/settings.py Environment-backed node settings
+stream_control_hub/node_agent/state.py Process-local mutable node state
+stream_control_hub/node_agent/runtime.py  Node guards, FFmpeg lifecycle, watchdogs
+stream_control_hub/node_agent/agent_api.py Agent status route
+stream_control_hub/node_agent/chat_api.py Chat-plan and chat-helper routes
+stream_control_hub/node_agent/chat.py Chat-plan state and YouTube chat scheduler
+stream_control_hub/node_agent/youtube_api.py YouTube OAuth routes
+stream_control_hub/node_agent/youtube.py YouTube OAuth and live chat client helpers
+stream_control_hub/node_agent/upload_api.py Upload and public upload-window routes
+stream_control_hub/node_agent/uploads.py Upload window, transfer state, and media file helpers
+stream_control_hub/node_agent/stream_api.py Streaming control and tuning routes
+stream_control_hub/node_agent/dashboard_ui.py Node Dashboard UI routes
+stream_control_hub/node_agent/dashboard_templates.py Dashboard HTML templates
+stream_control_hub/node_agent/streaming.py Stream config, probing, tuning helpers
+deploy/stream-control-node-agent.service  Example systemd unit for a VPS node
+```
+
 ## Node Model
 
 Each node entry describes how the hub reaches a VPS dashboard or node agent over a trusted network such as Tailscale.
 
 ```json
 {
-  "id": "racknerd",
-  "name": "RACKNERD Istanbul",
-  "base_url": "http://100.112.98.95:8787",
+  "id": "node-a",
+  "name": "Primary Stream Node",
+  "base_url": "http://100.64.0.10:8787",
   "role": "stream-node"
 }
 ```
 
+Keep the real `config/nodes.json` local. Only `config/nodes.example.json` is tracked.
+
 Future secure deployment should use a local secret bridge or per-node tokens outside this repo.
+
+## Node Agent API
+
+The Hub talks to these node endpoints:
+
+```text
+GET  /api/status
+GET  /api/public-upload
+POST /api/public-upload/open
+POST /api/public-upload/heartbeat
+POST /api/public-upload/close
+POST /api/upload-probe
+POST /api/upload-chunk
+POST /api/upload-chunk/cancel
+POST /api/start-stream
+POST /api/stream/recommend
+GET  /api/stream/tuning
+POST /api/stream/tuning
+```
+
+## Deployment Module
+
+The Hub exposes a safe deployment planner that does not execute SSH commands:
+
+```text
+POST /api/nodes/deploy/plan
+POST /api/nodes/upgrade
+```
+
+`/api/nodes/deploy/plan` returns a reviewed bootstrap script, systemd unit, and
+upgrade commands for the selected node ids. `/api/nodes/upgrade` returns the
+upgrade command list only. Set `STREAM_HUB_PUBLIC_URL` or per-node
+`control_hub_url` so generated agents know how to report back to the Hub.
+
+Headless agent mode is controlled by:
+
+```text
+STREAM_CONTROL_ROLE=agent
+STREAM_NODE_AGENT_MODE=1
+STREAM_NODE_AGENT_NAME=<node-name>
+CONTROL_HUB_URL=http://<hub-host>:8788
+```
 
 ## Media Push
 
