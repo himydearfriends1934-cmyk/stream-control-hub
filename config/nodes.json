@@ -1,9 +1,1 @@
-[
-  {
-    "id": "hkold-lightcone",
-    "name": "HKOLD_LIGHTCONE",
-    "base_url": "http://100.106.138.106:8787",
-    "role": "stream-node",
-    "enabled": true
-  }
-]
+[]

@@ -6,9 +6,13 @@ import shutil
 import subprocess
 import time
 import uuid
+import hmac
+import ipaddress
+import threading
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, jsonify, request
@@ -16,6 +20,23 @@ from werkzeug.utils import secure_filename
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_env_file(ROOT / ".env")
 CONFIG_DIR = ROOT / "config"
 DATA_DIR = Path(os.environ.get("STREAM_HUB_DATA_DIR", str(ROOT / "data")))
 MEDIA_DIR = DATA_DIR / "media"
@@ -30,6 +51,7 @@ SOURCE_BRANCH = os.environ.get("STREAM_HUB_SOURCE_BRANCH", "main")
 ALLOWED_MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
 NODE_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_CHUNK_BYTES", str(8 * 1024 ** 2)))
 NODE_PUBLIC_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_NODE_PUBLIC_UPLOAD_CHUNK_BYTES", str(16 * 1024 ** 2)))
+DIRECT_AGENT_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_DIRECT_AGENT_UPLOAD_CHUNK_BYTES", str(32 * 1024 ** 2)))
 NODE_UPLOAD_TIMEOUT_SECONDS = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_TIMEOUT_SECONDS", "300"))
 NODE_PUBLIC_UPLOAD_TTL_SECONDS = int(os.environ.get("STREAM_HUB_NODE_PUBLIC_UPLOAD_TTL_SECONDS", "900"))
 NODE_UPLOAD_RETRIES = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_RETRIES", "2"))
@@ -40,6 +62,11 @@ MIN_FREE_AFTER_UPLOAD_BYTES = int(os.environ.get("STREAM_HUB_MIN_FREE_AFTER_UPLO
 UPLOAD_POLICY_NAME = os.environ.get("STREAM_HUB_UPLOAD_POLICY_NAME", "safe-stable-fast-v1")
 PUSH_AUDIT_LOG = DATA_DIR / "push_audit.jsonl"
 PUSH_AUDIT_LOG_MAX_BYTES = int(os.environ.get("STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYTES", str(5 * 1024 ** 2)))
+CONTROL_TOKEN = os.environ.get("STREAM_HUB_CONTROL_TOKEN", "").strip()
+TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_HUB_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
+TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+SHARE_TASKS: dict[str, dict[str, Any]] = {}
+SHARE_TASKS_LOCK = threading.Lock()
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("STREAM_HUB_MAX_UPLOAD_BYTES", str(200 * 1024 ** 3)))
@@ -125,6 +152,9 @@ HTML = r"""
       border: 1px solid rgba(49, 89, 76, 0.8);
       background: rgba(25, 43, 37, 0.78);
     }
+    .media-name { min-width: 0; }
+    .media-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .media-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
     .command-strip {
       margin-top: 12px;
       border-color: rgba(251, 191, 36, 0.45);
@@ -360,8 +390,25 @@ HTML = r"""
     .resource-card { display: grid; gap: 10px; }
     .resource-card .split { grid-template-columns: 1fr; }
     .resource-card .actions { display: grid; grid-template-columns: 1fr; }
-    .resource-card pre { min-height: 96px; max-height: 190px; overflow: auto; }
     .resource-card .media-list { max-height: 260px; overflow: auto; padding-right: 3px; }
+    .transfer-box {
+      border: 1px solid rgba(49, 89, 76, 0.85);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(7, 18, 14, 0.78);
+      min-height: 122px;
+      display: grid;
+      gap: 8px;
+    }
+    .transfer-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 900; }
+    .progress-track { height: 12px; border-radius: 999px; background: rgba(255,255,255,0.1); overflow: hidden; }
+    .progress-fill { width: var(--value, 0%); height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.25s ease; }
+    .transfer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .transfer-grid small { display: block; color: var(--muted); font-size: 11px; }
+    .transfer-grid strong { display: block; margin-top: 2px; font-size: 15px; }
+    .transfer-message { color: var(--muted); line-height: 1.45; word-break: break-word; }
+    .transfer-box.fail { border-color: rgba(251, 113, 133, 0.75); }
+    .transfer-box.done { border-color: rgba(54, 211, 153, 0.9); }
     .pill {
       display: inline-flex;
       padding: 5px 8px;
@@ -404,7 +451,7 @@ HTML = r"""
     <section class="hero">
       <div>
         <h1>Stream Control Hub</h1>
-        <p>本地总控台：集中监控 VPS 推流节点，本地上传资源，再选择推送到一台或多台 VPS。升级面板时不触碰正在运行的 FFmpeg 推流。</p>
+        <p>本地总控台：集中监控 VPS 推流节点，视频从浏览器直传 Agent，也可以在 Agent 之间共享。升级面板时不触碰正在运行的 FFmpeg 推流。</p>
       </div>
       <div class="actions">
         <button class="primary" id="refreshBtn">刷新状态</button>
@@ -513,16 +560,16 @@ HTML = r"""
         </div>
 
         <div class="card resource-card">
-          <h2>本地资源与推送</h2>
+          <h2>节点资源共享</h2>
           <div class="split">
             <div>
               <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
               <div class="actions" style="margin-top: 8px;">
-                <button class="primary" id="uploadBtn">上传到总控台</button>
-                <button id="pushSelectedBtn">推送到选中 VPS</button>
+                <button class="primary" id="uploadBtn">上传到当前 Agent</button>
+                <button id="pushSelectedBtn">共享到勾选 Agent</button>
               </div>
             </div>
-            <pre id="uploadBox">先把视频上传到总控台，再选择 VPS 推送。</pre>
+            <div id="uploadBox" class="transfer-box"></div>
           </div>
           <div class="media-list" id="mediaList">加载中...</div>
         </div>
@@ -548,11 +595,28 @@ HTML = r"""
           <h2>当前策略</h2>
           <p>上传链路固定为 safe-stable-fast：公网 probe、速度阈值、失败切内网、审计脱敏。</p>
         </div>
+        <div class="card compact-card">
+          <h2>Tailscale 连接</h2>
+          <p>输入一次性 auth key，把 Hub 接入 tailnet；Headless Agent 使用同一个 tailnet 后会出现在节点列表。</p>
+          <div class="split">
+            <input id="tailscaleAuthInput" type="password" autocomplete="off" placeholder="tskey-auth-...">
+            <input id="tailscaleHostInput" type="text" value="stream-control-hub" placeholder="hostname">
+          </div>
+          <div style="height: 10px;"></div>
+          <div class="actions">
+            <button id="tailscaleStatusBtn">Tailscale 状态</button>
+            <button class="primary" id="tailscaleConnectBtn">连接 Tailscale</button>
+          </div>
+        </div>
       </div>
     </section>
   </div>
 
   <script>
+    const CONTROL_TOKEN = new URLSearchParams(window.location.search).get("token") || localStorage.getItem("streamHubControlToken") || "";
+    function authHeaders(extra = {}) {
+      return CONTROL_TOKEN ? { ...extra, "X-Control-Token": CONTROL_TOKEN } : extra;
+    }
     const refs = {
       nodeList: document.getElementById("nodeList"),
       nodeMonitor: document.getElementById("nodeMonitor"),
@@ -562,6 +626,10 @@ HTML = r"""
       policyBtn: document.getElementById("policyBtn"),
       auditBtn: document.getElementById("auditBtn"),
       upgradeSelectedBtn: document.getElementById("upgradeSelectedBtn"),
+      tailscaleAuthInput: document.getElementById("tailscaleAuthInput"),
+      tailscaleHostInput: document.getElementById("tailscaleHostInput"),
+      tailscaleStatusBtn: document.getElementById("tailscaleStatusBtn"),
+      tailscaleConnectBtn: document.getElementById("tailscaleConnectBtn"),
       mediaInput: document.getElementById("mediaInput"),
       uploadBtn: document.getElementById("uploadBtn"),
       pushSelectedBtn: document.getElementById("pushSelectedBtn"),
@@ -587,9 +655,14 @@ HTML = r"""
       logBox: document.getElementById("logBox"),
     };
     let nodes = [];
-    let media = [];
     let selectedNodeId = "";
     let lastTuneRecommendation = null;
+
+    renderTransfer({
+      title: "传输状态",
+      badge: "ready",
+      message: "选择右侧当前 Agent 后，文件会从浏览器直接传到该 Agent；共享时由源 Agent 直接复制到目标 Agent。",
+    });
 
     function selectedNodeIds() {
       return [...document.querySelectorAll("[data-node-check]:checked")].map((el) => el.value);
@@ -598,6 +671,11 @@ HTML = r"""
     function selectedMediaName() {
       const checked = document.querySelector("[data-media-check]:checked");
       return checked ? checked.value : "";
+    }
+
+    function selectedMediaPath() {
+      const checked = document.querySelector("[data-media-check]:checked");
+      return checked ? (checked.dataset.videoPath || checked.value) : "";
     }
 
     function log(message) {
@@ -636,6 +714,78 @@ HTML = r"""
 
     function fmtRate(bytesPerSecond) {
       return `${fmtBytes(bytesPerSecond)}/s`;
+    }
+
+    function fmtDuration(seconds) {
+      const value = Math.max(0, Number(seconds || 0));
+      if (!Number.isFinite(value) || value <= 0) return "--";
+      if (value < 60) return `${Math.ceil(value)} 秒`;
+      const minutes = Math.floor(value / 60);
+      const rest = Math.ceil(value % 60);
+      if (minutes < 60) return `${minutes} 分 ${rest} 秒`;
+      const hours = Math.floor(minutes / 60);
+      return `${hours} 小时 ${minutes % 60} 分`;
+    }
+
+    function friendlyError(error, fallback = "操作失败") {
+      if (!error) return fallback;
+      const message = String(error.message || error.messageText || error || fallback);
+      if (message.includes("Failed to fetch")) return "网络连接失败：浏览器无法连接到目标 Agent，请检查 Tailscale、Agent 服务和端口。";
+      if (message.includes("cross-origin")) return "Hub 写入被跨域保护拦截，请刷新页面或确认通过 Tailscale/内网地址访问。";
+      if (message.includes("unsupported media")) return "文件格式不支持，请使用 mp4、mov、mkv、m4v 或 webm。";
+      if (message.includes("already exists")) return "目标文件名已经存在，请换一个名称。";
+      return message;
+    }
+
+    function renderTransfer(state = {}) {
+      const status = state.status || "idle";
+      const percent = pct(state.percent || 0);
+      const boxClass = status === "failed" ? "fail" : status === "done" ? "done" : "";
+      refs.uploadBox.className = `transfer-box ${boxClass}`;
+      refs.uploadBox.innerHTML = `
+        <div class="transfer-title">
+          <span>${escapeHtml(state.title || "传输状态")}</span>
+          <span class="pill ${status === "failed" ? "bad" : status === "done" ? "" : "warn"}">${escapeHtml(state.badge || status)}</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" style="--value:${percent}%"></div></div>
+        <div class="transfer-grid">
+          <div><small>进度</small><strong>${Math.round(percent)}%</strong></div>
+          <div><small>已传 / 总量</small><strong>${escapeHtml(fmtBytes(state.doneBytes || 0))} / ${escapeHtml(fmtBytes(state.totalBytes || 0))}</strong></div>
+          <div><small>当前速度</small><strong>${escapeHtml(fmtRate(state.currentBps || 0))}</strong></div>
+          <div><small>平均速度</small><strong>${escapeHtml(fmtRate(state.averageBps || 0))}</strong></div>
+          <div><small>预计剩余</small><strong>${escapeHtml(fmtDuration(state.etaSeconds))}</strong></div>
+          <div><small>目标</small><strong>${escapeHtml(state.target || "--")}</strong></div>
+        </div>
+        <div class="transfer-message">${escapeHtml(state.message || "等待操作。")}</div>
+      `;
+    }
+
+    function uploadFormWithProgress(url, headers, form, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", url, true);
+        Object.entries(headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value));
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) onProgress(event.loaded, event.total);
+        };
+        xhr.onload = () => {
+          let payload = {};
+          try {
+            payload = JSON.parse(xhr.responseText || "{}");
+          } catch {
+            payload = { ok: false, message: xhr.responseText || xhr.statusText || "目标 Agent 返回了无法识别的响应" };
+          }
+          if (xhr.status >= 200 && xhr.status < 300 && payload.ok) {
+            resolve(payload);
+          } else {
+            reject(new Error(payload.message || xhr.statusText || `上传失败，HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error("网络连接失败：浏览器无法连接到目标 Agent"));
+        xhr.ontimeout = () => reject(new Error("上传超时：目标 Agent 响应太慢"));
+        xhr.timeout = 0;
+        xhr.send(form);
+      });
     }
 
     function pct(value) {
@@ -887,16 +1037,22 @@ HTML = r"""
     }
 
     function renderMedia() {
-      refs.mediaList.innerHTML = media.length ? media.map((item) => `
-        <label class="media">
-          <input data-media-check type="radio" name="media" value="${escapeHtml(item.name)}">
-          <span>
-            <strong>${escapeHtml(item.name)}</strong>
-            <small>${escapeHtml(item.size_label)} | ${escapeHtml(item.modified_label)}</small>
+      const node = selectedNode();
+      const videos = [...(node?.health?.videos || [])].sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
+      refs.mediaList.innerHTML = videos.length ? videos.map((item) => `
+        <div class="media" data-media-row data-node-id="${escapeHtml(node.id)}" data-media-name="${escapeHtml(item.name)}" data-video-path="${escapeHtml(item.video_path || item.path || item.name)}">
+          <input data-media-check type="radio" name="media" value="${escapeHtml(item.name)}" data-video-path="${escapeHtml(item.video_path || item.path || item.name)}">
+          <span class="media-name">
+            <strong>${escapeHtml(item.name || item.video_path || item.path)}</strong>
+            <small>${escapeHtml(fmtBytes(item.size || 0))} | ${escapeHtml(item.modified_label || "--")} | ${escapeHtml(node.name || node.id || "Agent")}</small>
           </span>
-          <span class="pill">local</span>
-        </label>
-      `).join("") : "本地资源库还没有视频。";
+          <span class="media-actions">
+            <button class="tiny" data-media-action="use">选用</button>
+            <button class="tiny" data-media-action="rename">重命名</button>
+            <button class="tiny danger" data-media-action="delete">删除</button>
+          </span>
+        </div>
+      `).join("") : "当前 Agent 还没有服务器视频。先上传到当前 Agent，或从其他 Agent 共享过来。";
     }
 
     function renderStreamControls() {
@@ -987,12 +1143,8 @@ HTML = r"""
     async function refreshAll() {
       refs.refreshBtn.disabled = true;
       try {
-        const [nodeResp, mediaResp] = await Promise.all([
-          fetch("/api/nodes"),
-          fetch("/api/media"),
-        ]);
+        const nodeResp = await fetch("/api/nodes");
         nodes = await nodeResp.json();
-        media = await mediaResp.json();
         renderNodes();
         renderMedia();
         renderStreamControls();
@@ -1003,20 +1155,132 @@ HTML = r"""
     }
 
     async function uploadMedia() {
+      const node = selectedNode();
       const file = refs.mediaInput.files[0];
+      if (!node?.id) {
+        renderTransfer({ status: "failed", badge: "失败", title: "上传未开始", message: "请先在右侧选择一个目标 Agent。" });
+        return;
+      }
       if (!file) {
-        refs.uploadBox.textContent = "请先选择一个视频文件。";
+        renderTransfer({ status: "failed", badge: "失败", title: "上传未开始", message: "请先选择一个视频文件。" });
         return;
       }
       refs.uploadBtn.disabled = true;
-      refs.uploadBox.textContent = `正在上传到本地总控台：${file.name}`;
+      const uploadId = `browser_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      let target = null;
       try {
-        const form = new FormData();
-        form.append("file", file, file.name);
-        const resp = await fetch("/api/media/upload", { method: "POST", body: form });
-        const data = await resp.json();
-        refs.uploadBox.textContent = JSON.stringify(data, null, 2);
+        const targetResp = await fetch("/api/nodes/upload-target", {
+          method: "POST",
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ node_id: node.id }),
+        });
+        target = await targetResp.json();
+        if (!target.ok) {
+          renderTransfer({
+            status: "failed",
+            badge: "失败",
+            title: "无法获取上传目标",
+            message: friendlyError(target.message || "Hub 未返回可用 Agent 上传地址"),
+          });
+          return;
+        }
+        const chunkSize = Number(target.chunk_bytes || 16 * 1024 * 1024);
+        const totalChunks = Math.ceil(file.size / chunkSize);
+        const startedAt = performance.now();
+        let lastPayload = {};
+        let lastPaintAt = 0;
+        renderTransfer({
+          status: "running",
+          badge: "上传中",
+          title: `上传到 ${node.name || node.id}`,
+          target: node.name || node.id,
+          totalBytes: file.size,
+          message: `准备上传：${file.name}`,
+        });
+        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+          const offset = chunkIndex * chunkSize;
+          const blob = file.slice(offset, Math.min(file.size, offset + chunkSize));
+          const form = new FormData();
+          form.append("upload_id", uploadId);
+          form.append("filename", file.name);
+          form.append("chunk_index", String(chunkIndex));
+          form.append("total_chunks", String(totalChunks));
+          form.append("offset", String(offset));
+          form.append("total_size", String(file.size));
+          form.append("chunk_size", String(chunkSize));
+          form.append("chunk", blob, file.name);
+          const chunkStartedAt = performance.now();
+          lastPayload = await uploadFormWithProgress(target.upload_url, target.headers || {}, form, (loaded) => {
+            const now = performance.now();
+            if (now - lastPaintAt < 250 && loaded < blob.size) return;
+            lastPaintAt = now;
+            const chunkSeconds = Math.max(0.001, (now - chunkStartedAt) / 1000);
+            const totalSeconds = Math.max(0.001, (now - startedAt) / 1000);
+            const uploaded = Math.min(file.size, offset + loaded);
+            const averageBps = uploaded / totalSeconds;
+            renderTransfer({
+              status: "running",
+              badge: "上传中",
+              title: `上传到 ${node.name || node.id}`,
+              target: node.name || node.id,
+              percent: file.size ? (uploaded / file.size) * 100 : 0,
+              doneBytes: uploaded,
+              totalBytes: file.size,
+              currentBps: loaded / chunkSeconds,
+              averageBps,
+              etaSeconds: averageBps > 0 ? (file.size - uploaded) / averageBps : 0,
+              message: `正在上传 ${file.name}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
+            });
+          });
+          const chunkSeconds = Math.max(0.001, (performance.now() - chunkStartedAt) / 1000);
+          const totalSeconds = Math.max(0.001, (performance.now() - startedAt) / 1000);
+          const uploaded = Math.min(file.size, offset + blob.size);
+          const averageBps = uploaded / totalSeconds;
+          renderTransfer({
+            status: "running",
+            badge: "上传中",
+            title: `上传到 ${node.name || node.id}`,
+            target: node.name || node.id,
+            percent: file.size ? (uploaded / file.size) * 100 : 0,
+            doneBytes: uploaded,
+            totalBytes: file.size,
+            currentBps: blob.size / chunkSeconds,
+            averageBps,
+            etaSeconds: averageBps > 0 ? (file.size - uploaded) / averageBps : 0,
+            message: `正在上传 ${file.name}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
+          });
+        }
+        const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
+        renderTransfer({
+          status: "done",
+          badge: "完成",
+          title: `上传完成`,
+          target: node.name || node.id,
+          percent: 100,
+          doneBytes: file.size,
+          totalBytes: file.size,
+          currentBps: 0,
+          averageBps: file.size / elapsed,
+          etaSeconds: 0,
+          message: `${file.name} 已上传到 ${node.name || node.id}。`,
+        });
         await refreshAll();
+      } catch (error) {
+        if (target?.cancel_url) {
+          await fetch(target.cancel_url, {
+            method: "POST",
+            headers: { ...(target.headers || {}), "Content-Type": "application/json" },
+            body: JSON.stringify({ upload_id: uploadId }),
+          }).catch(() => null);
+        }
+        renderTransfer({
+          status: "failed",
+          badge: "失败",
+          title: "上传失败",
+          target: node.name || node.id,
+          totalBytes: file.size,
+          message: friendlyError(error, "上传失败"),
+        });
       } finally {
         refs.uploadBtn.disabled = false;
       }
@@ -1024,7 +1288,7 @@ HTML = r"""
 
     async function checkUpdates() {
       refs.updateBox.textContent = "正在检查 GitHub...";
-      const resp = await fetch("/api/github/check", { method: "POST" });
+      const resp = await fetch("/api/github/check", { method: "POST", headers: authHeaders() });
       const data = await resp.json();
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
     }
@@ -1043,21 +1307,118 @@ HTML = r"""
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
     }
 
+    async function showTailscaleStatus() {
+      refs.updateBox.textContent = "Loading Tailscale status...";
+      const resp = await fetch("/api/tailscale/status");
+      const data = await resp.json();
+      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function connectTailscale() {
+      const auth_key = refs.tailscaleAuthInput.value.trim();
+      const hostname = refs.tailscaleHostInput.value.trim() || "stream-control-hub";
+      if (!auth_key) {
+        refs.updateBox.textContent = "请输入一次性 Tailscale auth key。";
+        return;
+      }
+      refs.tailscaleConnectBtn.disabled = true;
+      refs.updateBox.textContent = "Connecting Tailscale...";
+      try {
+        const resp = await fetch("/api/tailscale/connect", {
+          method: "POST",
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ auth_key, hostname, ssh: false, accept_routes: true }),
+        });
+        const data = await resp.json();
+        refs.tailscaleAuthInput.value = "";
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      } finally {
+        refs.tailscaleConnectBtn.disabled = false;
+      }
+    }
+
     async function pushSelectedMedia() {
-      const node_ids = selectedNodeIds();
-      const media_name = selectedMediaName();
-      if (!node_ids.length || !media_name) {
-        refs.uploadBox.textContent = "请选择至少一个节点和一个本地资源。";
+      const sourceNode = selectedNode();
+      const target_node_ids = selectedNodeIds().filter((id) => String(id) !== String(sourceNode?.id || ""));
+      const media = selectedMediaPath() || selectedMediaName();
+      const targetLabel = target_node_ids
+        .map((id) => nodes.find((item) => String(item.id) === String(id))?.name || id)
+        .join(", ");
+      if (!sourceNode?.id || !target_node_ids.length || !media) {
+        renderTransfer({
+          status: "failed",
+          badge: "失败",
+          title: "共享未开始",
+          message: "请选择源 Agent 的一个服务器视频，并勾选至少一个其他 Agent。",
+        });
         return;
       }
       refs.pushSelectedBtn.disabled = true;
+      renderTransfer({
+        status: "running",
+        badge: "共享中",
+        title: `共享到 ${targetLabel}`,
+        target: targetLabel,
+        message: `正在创建共享任务：${media}`,
+      });
       try {
-        const resp = await fetch("/api/media/push", {
+        const resp = await fetch("/api/media/share", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ node_ids, media_name }),
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ source_node_id: sourceNode.id, target_node_ids, media }),
         });
-        refs.uploadBox.textContent = JSON.stringify(await resp.json(), null, 2);
+        const first = await resp.json().catch(() => ({ ok: false, message: resp.statusText }));
+        if (!resp.ok || !first.ok || !first.task_id) {
+          renderTransfer({
+            status: "failed",
+            badge: "失败",
+            title: "共享启动失败",
+            target: targetLabel,
+            message: friendlyError(first.message || first.error || "Hub 未能创建共享任务"),
+          });
+          return;
+        }
+        let last = first;
+        while (true) {
+          renderTransfer({
+            status: last.status === "done" ? "done" : last.status === "failed" ? "failed" : "running",
+            badge: last.status === "done" ? "完成" : last.status === "failed" ? "失败" : "共享中",
+            title: last.status === "done" ? "共享完成" : last.status === "failed" ? "共享失败" : `共享到 ${targetLabel}`,
+            target: targetLabel,
+            percent: last.percent || 0,
+            doneBytes: last.done_bytes || 0,
+            totalBytes: last.total_bytes || 0,
+            currentBps: last.current_bps || 0,
+            averageBps: last.average_bps || 0,
+            etaSeconds: last.eta_seconds || 0,
+            message: last.status === "failed"
+              ? friendlyError(last.error || last.message || "共享失败")
+              : last.status === "done"
+                ? `${media} 已共享到 ${targetLabel}。`
+                : (last.message || "正在共享，请稍候。"),
+          });
+          if (last.status === "done") {
+            await refreshAll();
+            break;
+          }
+          if (last.status === "failed") {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          const statusResp = await fetch(`/api/media/share/status/${encodeURIComponent(first.task_id)}`);
+          last = await statusResp.json().catch(() => ({ ok: false, status: "failed", message: statusResp.statusText }));
+          if (!statusResp.ok && last.status !== "failed") {
+            last = { ...last, status: "failed", message: last.message || "无法读取共享进度" };
+          }
+        }
+      } catch (error) {
+        renderTransfer({
+          status: "failed",
+          badge: "失败",
+          title: "共享失败",
+          target: targetLabel,
+          message: friendlyError(error, "共享失败"),
+        });
       } finally {
         refs.pushSelectedBtn.disabled = false;
       }
@@ -1134,12 +1495,84 @@ HTML = r"""
     async function postNodeAction(path, payload) {
       const resp = await fetch(path, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(payload),
       });
       const data = await resp.json();
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
       return data;
+    }
+
+    async function postJson(path, payload) {
+      const resp = await fetch(path, {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json().catch(() => ({ ok: false, message: resp.statusText }));
+      if (!resp.ok && data.ok !== false) data.ok = false;
+      return data;
+    }
+
+    async function handleMediaAction(action, row) {
+      const nodeId = row.dataset.nodeId || selectedNodeId;
+      const mediaName = row.dataset.mediaName || "";
+      const videoPath = row.dataset.videoPath || mediaName;
+      const node = nodes.find((item) => String(item.id) === String(nodeId));
+      const nodeLabel = node?.name || nodeId;
+      if (action === "use") {
+        selectedNodeId = nodeId;
+        const input = row.querySelector("[data-media-check]");
+        if (input) input.checked = true;
+        renderTransfer({
+          status: "done",
+          badge: "已选用",
+          title: "已选用服务器视频",
+          target: nodeLabel,
+          percent: 100,
+          message: `${mediaName} 已放入当前 Agent 的开播选择。`,
+        });
+        renderNodes();
+        renderMedia();
+        renderStreamControls();
+        refs.streamVideoSelect.value = videoPath;
+        return;
+      }
+      if (action === "rename") {
+        const nextName = prompt("输入新的文件名，保留 .mp4/.mov/.mkv/.m4v/.webm 后缀：", mediaName);
+        if (!nextName || nextName === mediaName) return;
+        const data = await postJson("/api/nodes/media/rename", {
+          node_id: nodeId,
+          media: videoPath,
+          new_name: nextName,
+        });
+        renderTransfer({
+          status: data.ok ? "done" : "failed",
+          badge: data.ok ? "完成" : "失败",
+          title: data.ok ? "重命名完成" : "重命名失败",
+          target: nodeLabel,
+          percent: data.ok ? 100 : 0,
+          message: data.ok ? `${mediaName} 已改名为 ${data.name || nextName}。` : friendlyError(data.message || data.error || "重命名失败"),
+        });
+        await refreshAll();
+        return;
+      }
+      if (action === "delete") {
+        if (!confirm(`确认删除 ${mediaName}？\n\n只删除当前 Agent 上的这个视频，不会影响其他 Agent。`)) return;
+        const data = await postJson("/api/nodes/media/delete", {
+          node_id: nodeId,
+          media: videoPath,
+        });
+        renderTransfer({
+          status: data.ok ? "done" : "failed",
+          badge: data.ok ? "完成" : "失败",
+          title: data.ok ? "删除完成" : "删除失败",
+          target: nodeLabel,
+          percent: data.ok ? 100 : 0,
+          message: data.ok ? `${data.name || mediaName} 已从 ${nodeLabel} 删除。` : friendlyError(data.message || data.error || "删除失败"),
+        });
+        await refreshAll();
+      }
     }
 
     async function handleNodeAction(action, nodeId) {
@@ -1179,7 +1612,7 @@ HTML = r"""
       try {
         const resp = await fetch("/api/nodes/upgrade", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ node_ids }),
         });
         refs.updateBox.textContent = JSON.stringify(await resp.json(), null, 2);
@@ -1203,13 +1636,30 @@ HTML = r"""
       if (!row) return;
       selectedNodeId = row.dataset.nodeId;
       renderNodes();
+      renderMedia();
       renderStreamControls();
+    });
+    refs.mediaList.addEventListener("click", (event) => {
+      const actionButton = event.target.closest("[data-media-action]");
+      if (actionButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        const row = actionButton.closest("[data-media-row]");
+        if (row) handleMediaAction(actionButton.dataset.mediaAction, row);
+        return;
+      }
+      const row = event.target.closest("[data-media-row]");
+      if (!row) return;
+      const input = row.querySelector("[data-media-check]");
+      if (input) input.checked = true;
     });
     refs.refreshBtn.addEventListener("click", refreshAll);
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
     refs.policyBtn.addEventListener("click", showPolicy);
     refs.auditBtn.addEventListener("click", showAudit);
+    refs.tailscaleStatusBtn.addEventListener("click", showTailscaleStatus);
+    refs.tailscaleConnectBtn.addEventListener("click", connectTailscale);
     refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
     refs.previewTuneBtn.addEventListener("click", previewTune);
     refs.applyTuneBtn.addEventListener("click", applyLastTune);
@@ -1229,6 +1679,124 @@ HTML = r"""
 @APP.get("/")
 def index():
     return HTML
+
+
+def is_private_or_loopback_host(hostname: str) -> bool:
+    if not hostname:
+        return False
+    if hostname in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(hostname.split("%", 1)[0])
+    except ValueError:
+        return hostname.endswith(".local") or hostname.endswith(".ts.net") or hostname.endswith(".beta.tailscale.net")
+    return ip.is_loopback or ip.is_private or ip in TAILSCALE_CGNAT
+
+
+def request_is_local() -> bool:
+    remote_addr = request.remote_addr or ""
+    try:
+        remote_ip = ipaddress.ip_address(remote_addr.split("%", 1)[0])
+    except ValueError:
+        return False
+    return remote_ip.is_loopback
+
+
+def request_control_token() -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return request.headers.get("X-Control-Token", "").strip()
+
+
+def has_valid_control_token() -> bool:
+    return bool(CONTROL_TOKEN and hmac.compare_digest(request_control_token(), CONTROL_TOKEN))
+
+
+def write_request_allowed() -> bool:
+    if request_is_local() or has_valid_control_token():
+        return True
+    return TRUSTED_REMOTE_WRITES
+
+
+def dangerous_local_action_allowed() -> bool:
+    return request_is_local() or has_valid_control_token() or TRUSTED_REMOTE_WRITES
+
+
+def reject_forbidden(message: str = "control token or localhost access required"):
+    return jsonify({"ok": False, "message": message}), 403
+
+
+@APP.before_request
+def protect_write_requests():
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return None
+    if not write_request_allowed():
+        return reject_forbidden()
+    origin = request.headers.get("Origin")
+    if origin:
+        parsed = urlparse(origin)
+        host = parsed.hostname or ""
+        if not is_private_or_loopback_host(host) and not has_valid_control_token():
+            return reject_forbidden("cross-origin write requests require STREAM_HUB_CONTROL_TOKEN")
+    return None
+
+
+def redact_secret(value: str, *secrets: str) -> str:
+    redacted = value
+    for secret in secrets:
+        if secret:
+            redacted = redacted.replace(secret, "[redacted]")
+    return redacted
+
+
+def run_command(args: list[str], timeout: int = 60, secrets: list[str] | None = None) -> dict[str, Any]:
+    if not args:
+        return {"ok": False, "message": "missing command"}
+    if not shutil.which(args[0]):
+        return {"ok": False, "message": f"{args[0]} is not installed"}
+    try:
+        proc = subprocess.run(args, text=True, capture_output=True, timeout=timeout)
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+    secret_values = secrets or []
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "stdout": redact_secret(proc.stdout.strip(), *secret_values),
+        "stderr": redact_secret(proc.stderr.strip(), *secret_values),
+    }
+
+
+def tailscale_status() -> dict[str, Any]:
+    result = run_command(["tailscale", "status", "--json"], timeout=15)
+    if not result.get("ok"):
+        return result
+    try:
+        data = json.loads(result.get("stdout") or "{}")
+    except json.JSONDecodeError:
+        return {"ok": False, "message": "tailscale returned invalid json"}
+    self_info = data.get("Self") or {}
+    return {
+        "ok": True,
+        "backend_state": data.get("BackendState"),
+        "self": {
+            "host_name": self_info.get("HostName"),
+            "dns_name": self_info.get("DNSName"),
+            "tailscale_ips": self_info.get("TailscaleIPs") or [],
+            "online": self_info.get("Online"),
+        },
+        "peers": [
+            {
+                "host_name": peer.get("HostName"),
+                "dns_name": peer.get("DNSName"),
+                "tailscale_ips": peer.get("TailscaleIPs") or [],
+                "online": peer.get("Online"),
+                "last_seen": peer.get("LastSeen"),
+            }
+            for peer in (data.get("Peer") or {}).values()
+        ],
+    }
 
 
 def ensure_dirs() -> None:
@@ -1262,7 +1830,7 @@ def request_node_json(node: dict[str, Any], path: str, *, timeout: int = 6) -> d
     if not base_url:
         return {"ok": False, "message": "missing node base_url"}
     try:
-        resp = requests.get(f"{base_url}{path}", timeout=timeout)
+        resp = requests.get(f"{base_url}{path}", headers=node_headers(node), timeout=timeout)
         try:
             data = resp.json()
         except ValueError:
@@ -1278,12 +1846,17 @@ def node_base_url(node: dict[str, Any]) -> str:
     return str(node.get("base_url") or "").rstrip("/")
 
 
+def node_headers(node: dict[str, Any]) -> dict[str, str]:
+    token = str(node.get("token") or node.get("control_token") or "").strip()
+    return {"X-Control-Token": token} if token else {}
+
+
 def post_node_json(node: dict[str, Any], path: str, payload: dict[str, Any], *, timeout: int = 15) -> dict[str, Any]:
     base_url = node_base_url(node)
     if not base_url:
         return {"ok": False, "message": "missing node base_url"}
     try:
-        resp = requests.post(f"{base_url}{path}", json=payload, timeout=timeout)
+        resp = requests.post(f"{base_url}{path}", json=payload, headers=node_headers(node), timeout=timeout)
         try:
             data = resp.json()
         except ValueError:
@@ -1293,6 +1866,103 @@ def post_node_json(node: dict[str, Any], path: str, payload: dict[str, Any], *, 
         return data
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
+
+
+def share_task_snapshot(task_id: str) -> dict[str, Any] | None:
+    with SHARE_TASKS_LOCK:
+        task = SHARE_TASKS.get(task_id)
+        return dict(task) if task else None
+
+
+def update_share_task(task_id: str, **updates: Any) -> None:
+    with SHARE_TASKS_LOCK:
+        task = SHARE_TASKS.get(task_id)
+        if not task:
+            return
+        task.update(updates)
+        task["updated_at"] = time.time()
+
+
+def share_task_payload(task: dict[str, Any]) -> dict[str, Any]:
+    total = int(task.get("total_bytes") or 0)
+    done = int(task.get("done_bytes") or 0)
+    average_bps = int(task.get("average_bps") or 0)
+    eta = int((total - done) / average_bps) if total and average_bps > 0 and done < total else 0
+    return {
+        "ok": task.get("status") != "failed",
+        "task_id": task.get("task_id"),
+        "status": task.get("status"),
+        "message": task.get("message") or "",
+        "source_node_id": task.get("source_node_id"),
+        "target_node_ids": task.get("target_node_ids") or [],
+        "media": task.get("media"),
+        "done_bytes": done,
+        "total_bytes": total,
+        "percent": round((done / total) * 100, 2) if total else 0,
+        "current_bps": int(task.get("current_bps") or 0),
+        "average_bps": average_bps,
+        "eta_seconds": eta,
+        "results": task.get("results") or [],
+        "error": task.get("error") or "",
+    }
+
+
+def run_share_task(
+    task_id: str,
+    source_node: dict[str, Any],
+    target_nodes: list[dict[str, Any]],
+    media: str,
+    progress_url: str,
+) -> None:
+    started_at = time.time()
+    results: list[dict[str, Any]] = []
+    try:
+        for target_index, target_node in enumerate(target_nodes):
+            target_node_id = str(target_node.get("id") or "")
+            previous_task = share_task_snapshot(task_id) or {}
+            previous_total = int(previous_task.get("single_target_total_bytes") or previous_task.get("total_bytes") or 0)
+            update_share_task(
+                task_id,
+                status="running",
+                message=f"正在共享到 {target_node.get('name') or target_node_id}",
+                done_bytes=previous_total * target_index if previous_total else int(previous_task.get("done_bytes") or 0),
+                total_bytes=previous_total * len(target_nodes) if previous_total else int(previous_task.get("total_bytes") or 0),
+            )
+            share_payload = {
+                "media": media,
+                "target_base_url": node_base_url(target_node),
+                "target_token": str(target_node.get("token") or target_node.get("control_token") or "").strip(),
+                "progress_url": progress_url,
+                "progress_task_id": task_id,
+                "progress_target_index": target_index,
+                "progress_target_count": len(target_nodes),
+                "progress_target_node_id": target_node_id,
+            }
+            result = post_node_json(source_node, "/api/share-media", share_payload, timeout=1800)
+            result["node_id"] = target_node_id
+            results.append(result)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("message") or f"{target_node_id} 共享失败")
+        elapsed = max(0.001, time.time() - started_at)
+        task = share_task_snapshot(task_id) or {}
+        total = int(task.get("total_bytes") or 0)
+        update_share_task(
+            task_id,
+            status="done",
+            done_bytes=total or int(task.get("done_bytes") or 0),
+            current_bps=0,
+            average_bps=int((total or int(task.get("done_bytes") or 0)) / elapsed),
+            message="共享完成",
+            results=results,
+        )
+    except Exception as exc:
+        update_share_task(
+            task_id,
+            status="failed",
+            message="共享失败",
+            error=str(exc),
+            results=results,
+        )
 
 
 def public_upload_summary(data: dict[str, Any]) -> dict[str, Any]:
@@ -1411,7 +2081,7 @@ def make_internal_upload_route(node: dict[str, Any], warnings: list[str] | None 
         "route": "internal",
         "route_label": "internal",
         "token": "",
-        "headers": {},
+        "headers": node_headers(node),
         "opened_public_window": False,
         "chunk_bytes": NODE_UPLOAD_CHUNK_BYTES,
         "public_status": {},
@@ -1464,7 +2134,10 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
                     "route": "public-window",
                     "route_label": "public window",
                     "token": token,
-                    "headers": {"X-Public-Upload-Token": token} if token else {},
+                    "headers": {
+                        **node_headers(node),
+                        **({"X-Public-Upload-Token": token} if token else {}),
+                    },
                     "opened_public_window": True,
                     "chunk_bytes": NODE_PUBLIC_UPLOAD_CHUNK_BYTES,
                     "public_status": public_upload_summary(opened),
@@ -1813,6 +2486,8 @@ def api_nodes():
     result = []
     for node in load_nodes():
         node_view = dict(node)
+        node_view.pop("token", None)
+        node_view.pop("control_token", None)
         node_view["health"] = request_node_json(node, "/api/status") if node.get("enabled", True) else {"ok": False}
         result.append(node_view)
     return jsonify(result)
@@ -1821,6 +2496,31 @@ def api_nodes():
 @APP.get("/api/media")
 def api_media():
     return jsonify(list_media())
+
+
+@APP.post("/api/nodes/upload-target")
+def api_node_upload_target():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    if not node.get("enabled", True):
+        return jsonify({"ok": False, "message": "node disabled"}), 400
+    base_url = node_base_url(node)
+    if not base_url:
+        return jsonify({"ok": False, "message": "missing node base_url"}), 400
+    headers = node_headers(node)
+    headers["X-Upload-Route"] = "direct-browser"
+    return jsonify({
+        "ok": True,
+        "node_id": node_id,
+        "base_url": base_url,
+        "upload_url": f"{base_url}/api/upload-chunk",
+        "cancel_url": f"{base_url}/api/upload-chunk/cancel",
+        "chunk_bytes": DIRECT_AGENT_UPLOAD_CHUNK_BYTES,
+        "headers": headers,
+    })
 
 
 @APP.get("/api/policy")
@@ -1843,6 +2543,43 @@ def api_push_audit():
     })
 
 
+@APP.get("/api/tailscale/status")
+def api_tailscale_status():
+    return jsonify(tailscale_status())
+
+
+@APP.post("/api/tailscale/connect")
+def api_tailscale_connect():
+    if not dangerous_local_action_allowed():
+        return reject_forbidden("Tailscale connect requires localhost, trusted network, or STREAM_HUB_CONTROL_TOKEN")
+    payload = request.get_json(silent=True) or {}
+    auth_key = str(payload.get("auth_key") or "").strip()
+    hostname = secure_filename(str(payload.get("hostname") or "stream-control-hub").strip()) or "stream-control-hub"
+    if not auth_key.startswith("tskey-"):
+        return jsonify({"ok": False, "message": "valid Tailscale auth key required"}), 400
+    args = [
+        "tailscale",
+        "up",
+        "--auth-key",
+        auth_key,
+        "--hostname",
+        hostname,
+        "--accept-dns=false",
+    ]
+    if bool(payload.get("accept_routes")):
+        args.append("--accept-routes")
+    if bool(payload.get("ssh")):
+        args.append("--ssh")
+    result = run_command(args, timeout=90, secrets=[auth_key])
+    status_code = 200 if result.get("ok") else 500
+    return jsonify({
+        "ok": bool(result.get("ok")),
+        "message": "Tailscale connected" if result.get("ok") else "Tailscale connect failed",
+        "result": result,
+        "status": tailscale_status() if result.get("ok") else None,
+    }), status_code
+
+
 @APP.post("/api/media/upload")
 def api_media_upload():
     ensure_dirs()
@@ -1858,6 +2595,8 @@ def api_media_upload():
         except RuntimeError as exc:
             return jsonify({"ok": False, "message": str(exc)}), 507
     name = secure_filename(upload.filename)
+    if not name:
+        return jsonify({"ok": False, "message": "invalid filename"}), 400
     target = MEDIA_DIR / name
     counter = 1
     while target.exists():
@@ -1895,6 +2634,124 @@ def api_media_push():
         "media": media_name,
         "results": results,
     })
+
+
+@APP.post("/api/media/share")
+def api_media_share():
+    payload = request.get_json(silent=True) or {}
+    source_node_id = str(payload.get("source_node_id") or "").strip()
+    target_node_ids = [str(item) for item in payload.get("target_node_ids") or []]
+    media = str(payload.get("media") or payload.get("video_path") or "").strip()
+    source_node = node_by_id(source_node_id)
+    if not source_node:
+        return jsonify({"ok": False, "message": "source node not found"}), 404
+    if not source_node.get("enabled", True):
+        return jsonify({"ok": False, "message": "source node disabled"}), 400
+    if not target_node_ids:
+        return jsonify({"ok": False, "message": "no target agents selected"}), 400
+    if not media:
+        return jsonify({"ok": False, "message": "no media selected"}), 400
+
+    target_nodes = []
+    for target_node_id in target_node_ids:
+        if target_node_id == source_node_id:
+            continue
+        target_node = node_by_id(target_node_id)
+        if not target_node:
+            return jsonify({"ok": False, "message": f"target node not found: {target_node_id}"}), 404
+        if not target_node.get("enabled", True):
+            return jsonify({"ok": False, "message": f"target node disabled: {target_node_id}"}), 400
+        target_nodes.append(target_node)
+    if not target_nodes:
+        return jsonify({"ok": False, "message": "no target agents selected"}), 400
+
+    task_id = f"share_{uuid.uuid4().hex}"
+    progress_url = request.host_url.rstrip("/") + f"/api/media/share/progress/{task_id}"
+    with SHARE_TASKS_LOCK:
+        SHARE_TASKS[task_id] = {
+            "task_id": task_id,
+            "status": "queued",
+            "source_node_id": source_node_id,
+            "target_node_ids": [str(node.get("id") or "") for node in target_nodes],
+            "media": media,
+            "message": "共享任务已创建",
+            "done_bytes": 0,
+            "total_bytes": 0,
+            "current_bps": 0,
+            "average_bps": 0,
+            "results": [],
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+    worker = threading.Thread(
+        target=run_share_task,
+        args=(task_id, source_node, target_nodes, media, progress_url),
+        daemon=True,
+    )
+    worker.start()
+    return jsonify({"ok": True, **share_task_payload(share_task_snapshot(task_id) or {})})
+
+
+@APP.get("/api/media/share/status/<task_id>")
+def api_media_share_status(task_id: str):
+    task = share_task_snapshot(task_id)
+    if not task:
+        return jsonify({"ok": False, "message": "share task not found"}), 404
+    return jsonify(share_task_payload(task))
+
+
+@APP.post("/api/media/share/progress/<task_id>")
+def api_media_share_progress(task_id: str):
+    payload = request.get_json(silent=True) or {}
+    task = share_task_snapshot(task_id)
+    if not task:
+        return jsonify({"ok": False, "message": "share task not found"}), 404
+    target_index = max(0, int(payload.get("target_index") or 0))
+    target_count = max(1, int(payload.get("target_count") or 1))
+    single_total = int(payload.get("total_bytes") or 0)
+    single_done = int(payload.get("done_bytes") or 0)
+    aggregate_total = single_total * target_count if single_total else int(task.get("total_bytes") or 0)
+    aggregate_done = (single_total * target_index + single_done) if single_total else single_done
+    update_share_task(
+        task_id,
+        status="running",
+        message=str(payload.get("message") or "正在共享"),
+        done_bytes=aggregate_done,
+        total_bytes=aggregate_total,
+        single_target_total_bytes=single_total or int(task.get("single_target_total_bytes") or 0),
+        current_bps=int(payload.get("current_bps") or 0),
+        average_bps=int(payload.get("average_bps") or 0),
+    )
+    return jsonify({"ok": True})
+
+
+@APP.post("/api/nodes/media/rename")
+def api_node_media_rename():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    media = str(payload.get("media") or payload.get("video_path") or "").strip()
+    new_name = secure_filename(str(payload.get("new_name") or "").strip())
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    if not media or not new_name:
+        return jsonify({"ok": False, "message": "media and new_name are required"}), 400
+    result = post_node_json(node, "/api/media/rename", {"media": media, "new_name": new_name}, timeout=30)
+    return jsonify({"node_id": node_id, **result}), 200 if result.get("ok") else int(result.get("status_code") or 502)
+
+
+@APP.post("/api/nodes/media/delete")
+def api_node_media_delete():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    media = str(payload.get("media") or payload.get("video_path") or "").strip()
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    if not media:
+        return jsonify({"ok": False, "message": "media is required"}), 400
+    result = post_node_json(node, "/api/media/delete", {"media": media}, timeout=30)
+    return jsonify({"node_id": node_id, **result}), 200 if result.get("ok") else int(result.get("status_code") or 502)
 
 
 def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2105,4 +2962,10 @@ def api_nodes_upgrade():
 
 def main() -> None:
     ensure_dirs()
-    APP.run(host=os.environ.get("STREAM_HUB_HOST", "127.0.0.1"), port=PORT, threaded=True)
+    host = os.environ.get("STREAM_HUB_HOST", "127.0.0.1")
+    try:
+        from waitress import serve
+
+        serve(APP, host=host, port=PORT)
+    except ImportError:
+        APP.run(host=host, port=PORT, threaded=True)
