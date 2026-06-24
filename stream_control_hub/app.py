@@ -334,6 +334,24 @@ HTML = r"""
     }
     .monitor-hero h3 { margin: 0; font-size: 24px; letter-spacing: -0.03em; }
     .monitor-hero small { color: var(--muted); display: block; margin-top: 4px; }
+    .machine-compact {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 7px;
+    }
+    .machine-compact span {
+      display: inline-flex;
+      min-height: 22px;
+      align-items: center;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(54, 211, 153, 0.08);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .machine-compact strong { color: #d6fff0; }
     .health-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
     .health-donut {
       display: grid;
@@ -1083,6 +1101,13 @@ HTML = r"""
             <h3>${escapeHtml(node.name || node.id)}</h3>
             <small>${escapeHtml(h.hostname || node.id)} · ${escapeHtml(h.platform || "未知系统")}</small>
             <small class="mono">${escapeHtml(node.base_url || "")}</small>
+            <div class="machine-compact">
+              <span>核心 <strong>${escapeHtml(h.cpu_count || "--")}</strong></span>
+              <span>系统在线 <strong>${escapeHtml(h.uptime || "--")}</strong></span>
+              <span>面板在线 <strong>${escapeHtml(h.app_uptime || "--")}</strong></span>
+              <span>内存 <strong>${escapeHtml(`${fmtBytes(h.memory?.used || 0)} / ${fmtBytes(h.memory?.total || 0)}`)}</strong></span>
+              <span>硬盘 <strong>${escapeHtml(`${fmtBytes(h.disk?.used || 0)} / ${fmtBytes(h.disk?.total || 0)}`)}</strong></span>
+            </div>
           </div>
           ${nodeStatusPill(node)}
         </div>
@@ -1133,17 +1158,6 @@ HTML = r"""
         </div>
 
         <div class="monitor-panel-grid">
-          <div class="monitor-panel">
-            <h4>机器详情</h4>
-            <div class="mini-table">
-              ${miniRow("逻辑核心", h.cpu_count || "--")}
-              ${miniRow("系统在线", h.uptime || "--")}
-              ${miniRow("面板在线", h.app_uptime || "--")}
-              ${miniRow("内存用量", `${fmtBytes(h.memory?.used || 0)} / ${fmtBytes(h.memory?.total || 0)}`)}
-              ${miniRow("硬盘用量", `${fmtBytes(h.disk?.used || 0)} / ${fmtBytes(h.disk?.total || 0)}`)}
-            </div>
-          </div>
-
           <div class="monitor-panel">
             <h4>推流引擎</h4>
             <div class="metric-grid">
