@@ -238,7 +238,8 @@ HTML = r"""
     }
     .media-context-menu button:hover { background: rgba(54, 211, 153, 0.12); }
     .media-context-menu button.danger:hover { background: rgba(251, 113, 133, 0.16); }
-    .agent-compact {
+    .agent-compact,
+    .network-compact {
       display: flex;
       flex-wrap: wrap;
       gap: 7px;
@@ -252,7 +253,8 @@ HTML = r"""
       font-size: 12px;
       font-weight: 800;
     }
-    .agent-compact span {
+    .agent-compact span,
+    .network-compact span {
       display: inline-flex;
       min-height: 24px;
       align-items: center;
@@ -260,7 +262,18 @@ HTML = r"""
       border-radius: 999px;
       background: rgba(54, 211, 153, 0.08);
     }
-    .agent-compact strong { color: #d6fff0; }
+    .agent-compact strong,
+    .network-compact strong { color: #d6fff0; }
+    .network-compact {
+      margin-top: -4px;
+      margin-bottom: 10px;
+    }
+    .network-compact .compact-title {
+      background: transparent;
+      color: #d6fff0;
+      padding-left: 0;
+      font-size: 13px;
+    }
     .command-strip {
       margin-top: 12px;
       border-color: rgba(251, 191, 36, 0.45);
@@ -379,13 +392,6 @@ HTML = r"""
     }
     .donut-info small { color: var(--muted); display: block; font-size: 12px; }
     .donut-info strong { display: block; font-size: 16px; line-height: 1.2; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .network-panel {
-      display: grid;
-      grid-template-columns: 1.2fr 1fr;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    .network-live { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
     .monitor-panel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .monitor-panel {
       border: 1px solid rgba(49, 89, 76, 0.75);
@@ -559,7 +565,7 @@ HTML = r"""
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     @media (max-width: 1080px) {
-      .grid, .split, .hero, .node-detail, .bottom-section, .health-strip, .network-panel, .network-live, .monitor-panel-grid, .command-grid { grid-template-columns: 1fr; }
+      .grid, .split, .hero, .node-detail, .bottom-section, .health-strip, .monitor-panel-grid, .command-grid { grid-template-columns: 1fr; }
       .bottom-section { grid-column: auto; }
       .monitor-card, .node-table-card { min-height: auto; }
       .node-monitor { min-height: 420px; }
@@ -1129,32 +1135,15 @@ HTML = r"""
           <span>最近错误 <strong>${escapeHtml(transfer.last_error || "无")}</strong></span>
         </div>
 
-        <div class="network-panel">
-          <div class="monitor-panel">
-            <h4>网络实时</h4>
-            <div class="network-live">
-              ${metric("实时上传", fmtRate(net.current_upload_bps || 0))}
-              ${metric("实时下载", fmtRate(net.current_download_bps || 0))}
-            </div>
-            <div class="mini-table" style="margin-top: 10px;">
-              ${miniRow("速率标签", net.rate_label || "--")}
-              ${miniRow("上传策略", "公网优先 / 慢速回落内网 / 分块重试")}
-            </div>
-          </div>
-
-          <div class="monitor-panel">
-            <h4>网络累计</h4>
-            <div class="metric-grid">
-              ${metric("累计发送", fmtBytes(net.bytes_sent || 0))}
-              ${metric("累计接收", fmtBytes(net.bytes_recv || 0))}
-              ${metric("流量占用", `${Number(quota.total_percent || 0).toFixed(2)}%`, quota.total_percent)}
-              ${metric("剩余额度", fmtBytes(quota.remaining || 0))}
-            </div>
-            <div class="mini-table" style="margin-top: 10px;">
-              ${miniRow("总额度", fmtBytes(quota.limit || 0))}
-              ${miniRow("已用总量", fmtBytes(quota.total_used || 0))}
-            </div>
-          </div>
+        <div class="network-compact">
+          <span class="compact-title">网络</span>
+          <span>上行 <strong>${escapeHtml(fmtRate(net.current_upload_bps || 0))}</strong></span>
+          <span>下行 <strong>${escapeHtml(fmtRate(net.current_download_bps || 0))}</strong></span>
+          <span>累计发 <strong>${escapeHtml(fmtBytes(net.bytes_sent || 0))}</strong></span>
+          <span>累计收 <strong>${escapeHtml(fmtBytes(net.bytes_recv || 0))}</strong></span>
+          <span>流量 <strong>${escapeHtml(`${Number(quota.total_percent || 0).toFixed(2)}%`)}</strong></span>
+          <span>剩余 <strong>${escapeHtml(fmtBytes(quota.remaining || 0))}</strong></span>
+          <span>线路 <strong>${escapeHtml(net.rate_label || "--")}</strong></span>
         </div>
 
         <div class="monitor-panel-grid">
