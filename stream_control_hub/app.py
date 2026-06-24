@@ -51,7 +51,7 @@ SOURCE_BRANCH = os.environ.get("STREAM_HUB_SOURCE_BRANCH", "main")
 ALLOWED_MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
 NODE_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_CHUNK_BYTES", str(8 * 1024 ** 2)))
 NODE_PUBLIC_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_NODE_PUBLIC_UPLOAD_CHUNK_BYTES", str(16 * 1024 ** 2)))
-DIRECT_AGENT_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_DIRECT_AGENT_UPLOAD_CHUNK_BYTES", str(32 * 1024 ** 2)))
+DIRECT_AGENT_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_DIRECT_AGENT_UPLOAD_CHUNK_BYTES", str(8 * 1024 ** 2)))
 NODE_UPLOAD_TIMEOUT_SECONDS = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_TIMEOUT_SECONDS", "300"))
 NODE_PUBLIC_UPLOAD_TTL_SECONDS = int(os.environ.get("STREAM_HUB_NODE_PUBLIC_UPLOAD_TTL_SECONDS", "900"))
 NODE_UPLOAD_RETRIES = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_RETRIES", "2"))
@@ -155,6 +155,16 @@ HTML = r"""
     .media-name { min-width: 0; }
     .media-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .media-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .media-toolbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .media.current-agent { border-color: rgba(54, 211, 153, 0.85); }
     .command-strip {
       margin-top: 12px;
       border-color: rgba(251, 191, 36, 0.45);
@@ -443,6 +453,8 @@ HTML = r"""
       .node-table-head { display: none; }
       .node-row { grid-template-columns: 24px minmax(0, 1fr); }
       .node-state, .row-actions { grid-column: 2; }
+      .media { grid-template-columns: 24px minmax(0, 1fr); }
+      .media-actions { grid-column: 2; justify-content: flex-start; }
     }
   </style>
 </head>
@@ -566,6 +578,7 @@ HTML = r"""
               <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
               <div class="actions" style="margin-top: 8px;">
                 <button class="primary" id="uploadBtn">上传到当前 Agent</button>
+                <button class="danger" id="cancelUploadBtn" disabled>取消上传</button>
                 <button id="pushSelectedBtn">共享到勾选 Agent</button>
               </div>
             </div>
@@ -654,9 +667,11 @@ HTML = r"""
       uploadBox: document.getElementById("uploadBox"),
       logBox: document.getElementById("logBox"),
     };
+    refs.cancelUploadBtn = document.getElementById("cancelUploadBtn");
     let nodes = [];
     let selectedNodeId = "";
     let lastTuneRecommendation = null;
+    let activeUpload = null;
 
     renderTransfer({
       title: "传输状态",
@@ -676,6 +691,11 @@ HTML = r"""
     function selectedMediaPath() {
       const checked = document.querySelector("[data-media-check]:checked");
       return checked ? (checked.dataset.videoPath || checked.value) : "";
+    }
+
+    function selectedMediaNodeId() {
+      const checked = document.querySelector("[data-media-check]:checked");
+      return checked ? (checked.dataset.nodeId || "") : "";
     }
 
     function log(message) {
@@ -760,9 +780,10 @@ HTML = r"""
       `;
     }
 
-    function uploadFormWithProgress(url, headers, form, onProgress) {
+    function uploadFormWithProgress(url, headers, form, onProgress, uploadState = null) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
+        if (uploadState) uploadState.xhr = xhr;
         xhr.open("POST", url, true);
         Object.entries(headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value));
         xhr.upload.onprogress = (event) => {
@@ -782,9 +803,45 @@ HTML = r"""
           }
         };
         xhr.onerror = () => reject(new Error("网络连接失败：浏览器无法连接到目标 Agent"));
+        xhr.onabort = () => reject(new Error("上传已取消"));
         xhr.ontimeout = () => reject(new Error("上传超时：目标 Agent 响应太慢"));
+        xhr.onloadend = () => {
+          if (uploadState?.xhr === xhr) uploadState.xhr = null;
+        };
         xhr.timeout = 0;
         xhr.send(form);
+      });
+    }
+
+    async function cancelUploadState(uploadState) {
+      if (!uploadState || uploadState.cancelSent) return;
+      uploadState.cancelSent = true;
+      const cancelUrl = uploadState.route?.cancel_url || uploadState.target?.cancel_url;
+      const cancelHeaders = uploadState.route?.headers || uploadState.target?.headers || {};
+      if (!cancelUrl) return;
+      await fetch(cancelUrl, {
+        method: "POST",
+        headers: { ...cancelHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ upload_id: uploadState.uploadId }),
+      }).catch(() => null);
+    }
+
+    async function cancelActiveUpload() {
+      const uploadState = activeUpload;
+      if (!uploadState) return;
+      uploadState.canceled = true;
+      refs.cancelUploadBtn.disabled = true;
+      if (uploadState.xhr) uploadState.xhr.abort();
+      await cancelUploadState(uploadState);
+      renderTransfer({
+        status: "failed",
+        badge: "已取消",
+        title: "上传已取消",
+        target: uploadState.targetLabel || "--",
+        percent: uploadState.percent || 0,
+        doneBytes: uploadState.doneBytes || 0,
+        totalBytes: uploadState.totalBytes || 0,
+        message: "已取消上传，Agent 上的临时分片已经清理。",
       });
     }
 
@@ -1084,22 +1141,42 @@ HTML = r"""
     }
 
     function renderMedia() {
-      const node = selectedNode();
-      const videos = [...(node?.health?.videos || [])].sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
-      refs.mediaList.innerHTML = videos.length ? videos.map((item) => `
-        <div class="media" data-media-row data-node-id="${escapeHtml(node.id)}" data-media-name="${escapeHtml(item.name)}" data-video-path="${escapeHtml(item.video_path || item.path || item.name)}">
-          <input data-media-check type="radio" name="media" value="${escapeHtml(item.name)}" data-video-path="${escapeHtml(item.video_path || item.path || item.name)}">
-          <span class="media-name">
-            <strong>${escapeHtml(item.name || item.video_path || item.path)}</strong>
-            <small>${escapeHtml(fmtBytes(item.size || 0))} | ${escapeHtml(item.modified_label || "--")} | ${escapeHtml(node.name || node.id || "Agent")}</small>
-          </span>
-          <span class="media-actions">
-            <button class="tiny" data-media-action="use">选用</button>
-            <button class="tiny" data-media-action="rename">重命名</button>
-            <button class="tiny danger" data-media-action="delete">删除</button>
-          </span>
+      const checkedPath = selectedMediaPath();
+      const checkedNodeId = selectedMediaNodeId();
+      const entries = nodes
+        .flatMap((mediaNode) => [...(mediaNode.health?.videos || [])].map((item) => ({ node: mediaNode, item })))
+        .sort((a, b) => Number(b.item.modified || 0) - Number(a.item.modified || 0));
+      if (!entries.length) {
+        refs.mediaList.innerHTML = `<div class="empty-state">还没有任何 Agent 视频。先上传到当前 Agent，或从其他 Agent 共享过来。</div>`;
+        return;
+      }
+      refs.mediaList.innerHTML = `
+        <div class="media-toolbar">
+          <strong>全部 Agent 文件</strong>
+          <small>按上传时间倒序，共 ${entries.length} 个</small>
         </div>
-      `).join("") : "当前 Agent 还没有服务器视频。先上传到当前 Agent，或从其他 Agent 共享过来。";
+        ${entries.map(({ node, item }) => {
+          const videoPath = item.video_path || item.path || item.name;
+          const nodeId = String(node.id || "");
+          const selected = checkedPath && checkedNodeId === nodeId && checkedPath === videoPath;
+          const current = nodeId === String(selectedNodeId);
+          return `
+            <div class="media ${current ? "current-agent" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(item.name || videoPath)}" data-video-path="${escapeHtml(videoPath)}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
+              <input data-media-check type="radio" name="media" value="${escapeHtml(item.name || videoPath)}" data-node-id="${escapeHtml(nodeId)}" data-video-path="${escapeHtml(videoPath)}" ${selected ? "checked" : ""}>
+              <span class="media-name">
+                <strong>${escapeHtml(item.name || videoPath)}</strong>
+                <small>${escapeHtml(node.name || node.id || "Agent")} | ${escapeHtml(fmtBytes(item.size || 0))} | ${escapeHtml(item.modified_label || "--")}${current ? " | 当前 Agent" : ""}</small>
+              </span>
+              <span class="media-actions">
+                <button class="tiny" data-media-action="inspect">详情</button>
+                <button class="tiny" data-media-action="use">选用</button>
+                <button class="tiny" data-media-action="rename">编辑名称</button>
+                <button class="tiny danger" data-media-action="delete">删除</button>
+              </span>
+            </div>
+          `;
+        }).join("")}
+      `;
     }
 
     function renderStreamControls() {
@@ -1213,9 +1290,23 @@ HTML = r"""
         return;
       }
       refs.uploadBtn.disabled = true;
+      refs.cancelUploadBtn.disabled = false;
       const uploadId = `browser_${Date.now()}_${Math.random().toString(16).slice(2)}`;
       let target = null;
       let uploadRoute = null;
+      const uploadState = {
+        uploadId,
+        target: null,
+        route: null,
+        xhr: null,
+        canceled: false,
+        cancelSent: false,
+        targetLabel: node.name || node.id,
+        doneBytes: 0,
+        totalBytes: file.size,
+        percent: 0,
+      };
+      activeUpload = uploadState;
       try {
         const targetResp = await fetch("/api/nodes/upload-target", {
           method: "POST",
@@ -1223,6 +1314,7 @@ HTML = r"""
           body: JSON.stringify({ node_id: node.id, upload_id: uploadId, filename: file.name, total_size: file.size }),
         });
         target = await targetResp.json();
+        uploadState.target = target;
         if (!target.ok) {
           renderTransfer({
             status: "failed",
@@ -1232,6 +1324,7 @@ HTML = r"""
           });
           return;
         }
+        if (uploadState.canceled) throw new Error("上传已取消");
         renderTransfer({
           status: "running",
           badge: "测速中",
@@ -1241,7 +1334,12 @@ HTML = r"""
           message: "正在自动测速公网和 Tailscale 线路，优先选择最快公网直连。",
         });
         const routeChoice = await chooseUploadRoute(target);
+        if (uploadState.canceled) throw new Error("上传已取消");
         uploadRoute = routeChoice.selected;
+        uploadState.route = uploadRoute;
+        uploadState.targetLabel = `${node.name || node.id} / ${uploadRoute.label}`;
+        const uploadFilename = target.filename || file.name;
+        const savedNameNote = uploadFilename !== file.name ? `，保存名：${uploadFilename}` : "";
         const chunkSize = Number(target.chunk_bytes || 16 * 1024 * 1024);
         const totalChunks = Math.ceil(file.size / chunkSize);
         const startedAt = performance.now();
@@ -1254,20 +1352,21 @@ HTML = r"""
           target: `${node.name || node.id} / ${uploadRoute.label}`,
           totalBytes: file.size,
           currentBps: uploadRoute.bps || 0,
-          message: `已选择 ${uploadRoute.label}，测速 ${fmtRate(uploadRoute.bps || 0)}，准备上传：${file.name}`,
+          message: `已选择 ${uploadRoute.label}，测速 ${fmtRate(uploadRoute.bps || 0)}，准备上传：${file.name}${savedNameNote}`,
         });
         for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+          if (uploadState.canceled) throw new Error("上传已取消");
           const offset = chunkIndex * chunkSize;
           const blob = file.slice(offset, Math.min(file.size, offset + chunkSize));
           const form = new FormData();
           form.append("upload_id", uploadId);
-          form.append("filename", file.name);
+          form.append("filename", uploadFilename);
           form.append("chunk_index", String(chunkIndex));
           form.append("total_chunks", String(totalChunks));
           form.append("offset", String(offset));
           form.append("total_size", String(file.size));
           form.append("chunk_size", String(chunkSize));
-          form.append("chunk", blob, file.name);
+          form.append("chunk", blob, uploadFilename);
           const chunkStartedAt = performance.now();
           lastPayload = await uploadFormWithProgress(uploadRoute.upload_url, uploadRoute.headers || target.headers || {}, form, (loaded) => {
             const now = performance.now();
@@ -1277,6 +1376,8 @@ HTML = r"""
             const totalSeconds = Math.max(0.001, (now - startedAt) / 1000);
             const uploaded = Math.min(file.size, offset + loaded);
             const averageBps = uploaded / totalSeconds;
+            uploadState.doneBytes = uploaded;
+            uploadState.percent = file.size ? (uploaded / file.size) * 100 : 0;
             renderTransfer({
               status: "running",
               badge: "上传中",
@@ -1288,13 +1389,15 @@ HTML = r"""
               currentBps: loaded / chunkSeconds,
               averageBps,
               etaSeconds: averageBps > 0 ? (file.size - uploaded) / averageBps : 0,
-              message: `正在通过 ${uploadRoute.label} 上传 ${file.name}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
+              message: `正在通过 ${uploadRoute.label} 上传 ${file.name}${savedNameNote}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
             });
-          });
+          }, uploadState);
           const chunkSeconds = Math.max(0.001, (performance.now() - chunkStartedAt) / 1000);
           const totalSeconds = Math.max(0.001, (performance.now() - startedAt) / 1000);
           const uploaded = Math.min(file.size, offset + blob.size);
           const averageBps = uploaded / totalSeconds;
+          uploadState.doneBytes = uploaded;
+          uploadState.percent = file.size ? (uploaded / file.size) * 100 : 0;
           renderTransfer({
             status: "running",
             badge: "上传中",
@@ -1306,7 +1409,7 @@ HTML = r"""
             currentBps: blob.size / chunkSeconds,
             averageBps,
             etaSeconds: averageBps > 0 ? (file.size - uploaded) / averageBps : 0,
-            message: `正在通过 ${uploadRoute.label} 上传 ${file.name}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
+            message: `正在通过 ${uploadRoute.label} 上传 ${file.name}${savedNameNote}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
           });
         }
         const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
@@ -1321,18 +1424,23 @@ HTML = r"""
           currentBps: 0,
           averageBps: file.size / elapsed,
           etaSeconds: 0,
-          message: `${file.name} 已通过 ${uploadRoute?.label || "默认线路"} 上传到 ${node.name || node.id}。`,
+          message: `${file.name} 已通过 ${uploadRoute?.label || "默认线路"} 上传到 ${node.name || node.id}${savedNameNote}。`,
         });
         await refreshAll();
       } catch (error) {
-        const cancelUrl = uploadRoute?.cancel_url || target?.cancel_url;
-        const cancelHeaders = uploadRoute?.headers || target?.headers || {};
-        if (cancelUrl) {
-          await fetch(cancelUrl, {
-            method: "POST",
-            headers: { ...cancelHeaders, "Content-Type": "application/json" },
-            body: JSON.stringify({ upload_id: uploadId }),
-          }).catch(() => null);
+        await cancelUploadState(uploadState);
+        if (uploadState.canceled) {
+          renderTransfer({
+            status: "failed",
+            badge: "已取消",
+            title: "上传已取消",
+            target: `${node.name || node.id}${uploadRoute?.label ? " / " + uploadRoute.label : ""}`,
+            percent: uploadState.percent || 0,
+            doneBytes: uploadState.doneBytes || 0,
+            totalBytes: file.size,
+            message: "已取消上传，Agent 上的临时分片已经清理。",
+          });
+          return;
         }
         renderTransfer({
           status: "failed",
@@ -1344,6 +1452,8 @@ HTML = r"""
         });
       } finally {
         refs.uploadBtn.disabled = false;
+        refs.cancelUploadBtn.disabled = true;
+        if (activeUpload === uploadState) activeUpload = null;
       }
     }
 
@@ -1399,7 +1509,7 @@ HTML = r"""
     }
 
     async function pushSelectedMedia() {
-      const sourceNode = selectedNode();
+      const sourceNode = nodes.find((item) => String(item.id) === String(selectedMediaNodeId())) || selectedNode();
       const target_node_ids = selectedNodeIds().filter((id) => String(id) !== String(sourceNode?.id || ""));
       const media = selectedMediaPath() || selectedMediaName();
       const targetLabel = target_node_ids
@@ -1581,6 +1691,21 @@ HTML = r"""
       const videoPath = row.dataset.videoPath || mediaName;
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const nodeLabel = node?.name || nodeId;
+      if (action === "inspect") {
+        const input = row.querySelector("[data-media-check]");
+        if (input) input.checked = true;
+        renderTransfer({
+          status: "done",
+          badge: "详情",
+          title: "Agent 文件详情",
+          target: nodeLabel,
+          percent: 100,
+          doneBytes: Number(row.dataset.size || 0),
+          totalBytes: Number(row.dataset.size || 0),
+          message: `${mediaName} | ${row.dataset.modifiedLabel || "--"} | ${videoPath}`,
+        });
+        return;
+      }
       if (action === "use") {
         selectedNodeId = nodeId;
         const input = row.querySelector("[data-media-check]");
@@ -1716,6 +1841,7 @@ HTML = r"""
     });
     refs.refreshBtn.addEventListener("click", refreshAll);
     refs.uploadBtn.addEventListener("click", uploadMedia);
+    refs.cancelUploadBtn.addEventListener("click", cancelActiveUpload);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
     refs.policyBtn.addEventListener("click", showPolicy);
     refs.auditBtn.addEventListener("click", showAudit);
@@ -1927,6 +2053,19 @@ def node_upload_base_urls(node: dict[str, Any]) -> list[str]:
             result.append(value)
             seen.add(value)
     return result
+
+
+def safe_media_filename(value: str) -> str:
+    raw = Path(str(value or "").strip()).name
+    name = secure_filename(raw)
+    suffix = Path(raw).suffix.lower()
+    if suffix not in ALLOWED_MEDIA_EXTENSIONS and Path(name).suffix.lower() not in ALLOWED_MEDIA_EXTENSIONS:
+        raise ValueError("unsupported media extension")
+    if not name or Path(name).suffix.lower() not in ALLOWED_MEDIA_EXTENSIONS:
+        name = f"upload-{uuid.uuid4().hex}{suffix}"
+    if not media_allowed(name):
+        raise ValueError("unsupported media extension")
+    return name
 
 
 def upload_route_label(url: str, base_url: str) -> str:
@@ -2636,8 +2775,12 @@ def api_node_upload_target():
     payload = request.get_json(silent=True) or {}
     node_id = str(payload.get("node_id") or "").strip()
     upload_id = secure_filename(str(payload.get("upload_id") or "").strip())
-    filename = secure_filename(str(payload.get("filename") or "").strip())
-    total_size = int(payload.get("total_size") or 0)
+    original_filename = str(payload.get("filename") or "").strip()
+    try:
+        filename = safe_media_filename(original_filename)
+        total_size = int(payload.get("total_size") or 0)
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
     node = node_by_id(node_id)
     if not node:
         return jsonify({"ok": False, "message": "node not found"}), 404
@@ -2672,6 +2815,8 @@ def api_node_upload_target():
     return jsonify({
         "ok": True,
         "node_id": node_id,
+        "filename": filename,
+        "original_filename": original_filename,
         "base_url": base_url,
         "upload_url": candidates[0]["upload_url"],
         "cancel_url": candidates[0]["cancel_url"],
@@ -2890,7 +3035,10 @@ def api_node_media_rename():
     payload = request.get_json(silent=True) or {}
     node_id = str(payload.get("node_id") or "").strip()
     media = str(payload.get("media") or payload.get("video_path") or "").strip()
-    new_name = secure_filename(str(payload.get("new_name") or "").strip())
+    try:
+        new_name = safe_media_filename(str(payload.get("new_name") or "").strip())
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
     node = node_by_id(node_id)
     if not node:
         return jsonify({"ok": False, "message": "node not found"}), 404

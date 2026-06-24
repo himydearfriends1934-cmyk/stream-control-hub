@@ -367,6 +367,19 @@ def media_allowed(filename: str) -> bool:
     return Path(filename).suffix.lower() in {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
 
 
+def safe_media_filename(value: str) -> str:
+    raw = Path(str(value or "").strip()).name
+    name = secure_filename(raw)
+    suffix = Path(raw).suffix.lower()
+    if suffix not in {".mp4", ".mov", ".mkv", ".m4v", ".webm"} and not media_allowed(name):
+        raise ValueError("unsupported media extension")
+    if not name or not media_allowed(name):
+        name = f"upload-{uuid.uuid4().hex}{suffix}"
+    if not media_allowed(name):
+        raise ValueError("unsupported media extension")
+    return name
+
+
 def list_media() -> list[dict[str, Any]]:
     ensure_dirs()
     items: list[dict[str, Any]] = []
@@ -414,15 +427,6 @@ def media_by_name_or_path(value: str) -> Path:
 
 def resolve_media_path(value: str) -> Path:
     return media_by_name_or_path(value)
-
-
-def safe_media_filename(value: str) -> str:
-    name = secure_filename(str(value or "").strip())
-    if not name:
-        raise ValueError("invalid filename")
-    if not media_allowed(name):
-        raise ValueError("unsupported media extension")
-    return name
 
 
 def stream_output_url(payload: dict[str, Any]) -> str:
@@ -662,11 +666,12 @@ def api_upload_chunk():
     ensure_dirs()
     started_at = time.time()
     upload_id = secure_filename(str(request.form.get("upload_id") or "upload"))
-    filename = secure_filename(str(request.form.get("filename") or "media.bin"))
-    if not upload_id or not filename:
+    try:
+        filename = safe_media_filename(str(request.form.get("filename") or "media.bin"))
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    if not upload_id:
         return jsonify({"ok": False, "message": "invalid upload metadata"}), 400
-    if not media_allowed(filename):
-        return jsonify({"ok": False, "message": "unsupported media extension"}), 400
     chunk = request.files.get("chunk")
     if not chunk:
         return jsonify({"ok": False, "message": "missing chunk"}), 400

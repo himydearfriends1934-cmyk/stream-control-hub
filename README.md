@@ -243,6 +243,8 @@ data/nodes.local.json
 - `upload_base_url` 填 VPS 公网 IP 或公网域名，用于浏览器直传大视频和 Agent 之间共享。
 - Hub 会自动测速公网和 Tailscale，优先走公网；公网不可达时自动回退 Tailscale。
 - 浏览器拿到的是短期 `X-Upload-Ticket`，不是 Agent 长期控制 token，票据只绑定这一次上传。
+- 浏览器直传默认使用 8MB 分块，页面会显示进度、速度、预计剩余时间；上传中可以点击“取消上传”，Agent 会清理临时分片。
+- Hub 的资源区会按上传时间倒序显示全部 Agent 上的视频，可以在 Hub 页面查看详情、选用、编辑名称、删除，也可以把选中的视频从源 Agent 共享到勾选的其他 Agent。
 
 ### Tailscale 连接管理
 
