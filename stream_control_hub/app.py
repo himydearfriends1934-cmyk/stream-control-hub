@@ -272,6 +272,7 @@ HTML = r"""
     .wizard-head p { margin: 0; font-size: 13px; }
     .wizard-close { min-width: 42px; padding: 8px 10px; }
     .wizard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .wizard-existing-grid { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(170px, 1fr) auto; gap: 10px; align-items: end; }
     .wizard-field { display: grid; gap: 5px; min-width: 0; }
     .wizard-field label { color: var(--muted); font-size: 12px; font-weight: 900; }
     .wizard-step-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
@@ -290,11 +291,23 @@ HTML = r"""
     .wizard-step.done { border-color: rgba(54, 211, 153, 0.9); }
     .wizard-step.fail { border-color: rgba(251, 113, 133, 0.85); }
     .wizard-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-    .wizard-log {
-      min-height: 170px;
-      max-height: 260px;
-      font-size: 12px;
+    .wizard-status {
+      min-height: 128px;
+      max-height: 240px;
+      overflow: auto;
+      display: grid;
+      gap: 7px;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(49, 89, 76, 0.75);
+      background: rgba(7, 18, 14, 0.78);
+      color: #d6fff0;
+      line-height: 1.45;
     }
+    .wizard-status-line { color: var(--muted); }
+    .wizard-status-line strong { color: #effdf6; }
+    .wizard-status-line.fail { color: #fecdd3; }
+    .wizard-status-line.done { color: #b7f7dc; }
     .agent-compact,
     .network-compact {
       display: flex;
@@ -658,7 +671,7 @@ HTML = r"""
       .node-state, .row-actions { grid-column: 2; }
       .media-window-head,
       .media-file-row { grid-template-columns: minmax(130px, 1.4fr) 74px 116px minmax(82px, 0.8fr); }
-      .wizard-grid, .wizard-step-grid, .wizard-actions { grid-template-columns: 1fr; }
+      .wizard-grid, .wizard-existing-grid, .wizard-step-grid, .wizard-actions { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -852,6 +865,17 @@ HTML = r"""
           <input id="tailscaleHostInput" type="text" value="stream-control-hub" placeholder="stream-control-hub">
         </div>
       </div>
+      <div class="wizard-existing-grid">
+        <div class="wizard-field">
+          <label>目标 Agent</label>
+          <select id="tailscaleNodeSelect"></select>
+        </div>
+        <div class="wizard-field">
+          <label>已有 Tailscale IP</label>
+          <input id="tailscaleExistingIpInput" type="text" autocomplete="off" placeholder="100.x.x.x">
+        </div>
+        <button id="tailscaleUseExistingIpBtn">验证并连接</button>
+      </div>
       <div class="wizard-step-grid">
         <div class="wizard-step" data-tailscale-step="precheck">
           <strong>1. 环境检查</strong>
@@ -876,7 +900,9 @@ HTML = r"""
         <button class="primary" id="tailscaleConnectBtn">3. 登录连接</button>
         <button id="tailscaleVerifyBtn">4. 验证</button>
       </div>
-      <pre class="wizard-log" id="tailscaleWizardLog">打开向导后，先点“1. 检查”。如果显示环境可安装，再继续安装/修复和登录连接。</pre>
+      <div class="wizard-status" id="tailscaleWizardLog">
+        <div class="wizard-status-line">打开向导后，先点“1. 检查”。已有 Tailscale IP 的 Agent 可以直接填写 IP 后点“验证并连接”。</div>
+      </div>
     </div>
   </div>
 
@@ -901,6 +927,9 @@ HTML = r"""
       tailscaleWizardLog: document.getElementById("tailscaleWizardLog"),
       tailscaleAuthInput: document.getElementById("tailscaleAuthInput"),
       tailscaleHostInput: document.getElementById("tailscaleHostInput"),
+      tailscaleNodeSelect: document.getElementById("tailscaleNodeSelect"),
+      tailscaleExistingIpInput: document.getElementById("tailscaleExistingIpInput"),
+      tailscaleUseExistingIpBtn: document.getElementById("tailscaleUseExistingIpBtn"),
       tailscalePrecheckBtn: document.getElementById("tailscalePrecheckBtn"),
       tailscaleInstallBtn: document.getElementById("tailscaleInstallBtn"),
       tailscaleStatusBtn: document.getElementById("tailscaleStatusBtn"),
@@ -1496,6 +1525,7 @@ HTML = r"""
         renderNodes();
         renderMedia();
         renderStreamControls();
+        renderTailscaleNodeOptions();
         log("状态已刷新");
       } finally {
         refs.refreshBtn.disabled = false;
@@ -1718,8 +1748,33 @@ HTML = r"""
       refs.tailscaleWizardModal.setAttribute("aria-hidden", open ? "false" : "true");
     }
 
-    function setTailscaleLog(value) {
-      refs.tailscaleWizardLog.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    function tailscaleStatusLines(data, fallback = "Tailscale 状态已更新") {
+      if (typeof data === "string") return [{ text: data }];
+      const ok = Boolean(data?.ok);
+      const lines = [{ text: ok ? (data.message || fallback) : (data?.message || "操作失败"), tone: ok ? "done" : "fail" }];
+      if (data?.installed === false) lines.push({ text: "当前机器还没有安装 Tailscale。", tone: "fail" });
+      if (data?.backend_state) lines.push({ label: "运行状态", text: data.backend_state });
+      const self = data?.self || data?.status?.self || {};
+      const tailscaleIps = self.tailscale_ips || data?.tailscale_ips || data?.status?.tailscale_ips || [];
+      if (tailscaleIps.length) lines.push({ label: "本机 Tailscale IP", text: tailscaleIps.join(" / "), tone: "done" });
+      if (self.dns_name) lines.push({ label: "Tailnet 名称", text: self.dns_name });
+      const peers = data?.peers || data?.status?.peers || [];
+      if (Array.isArray(peers)) lines.push({ label: "可见设备", text: `${peers.length} 台` });
+      if (data?.node_id && data?.base_url) lines.push({ label: "Agent 连接", text: `${data.node_id} -> ${data.base_url}`, tone: "done" });
+      if (data?.previous_base_url) lines.push({ label: "原地址已保留", text: data.previous_base_url });
+      const detail = data?.error || data?.result?.stderr || data?.result?.message || data?.precheck?.message || "";
+      if (!ok && detail) lines.push({ label: "失败原因", text: String(detail).slice(0, 260), tone: "fail" });
+      lines.push({ label: "下一步", text: ok ? "可以刷新节点列表，或继续上传/共享/推流。" : "请按提示修复后重试。" });
+      return lines;
+    }
+
+    function setTailscaleLog(value, fallback = "Tailscale 状态已更新") {
+      const lines = tailscaleStatusLines(value, fallback);
+      refs.tailscaleWizardLog.innerHTML = lines.map((line) => {
+        const cls = line.tone === "fail" ? " fail" : line.tone === "done" ? " done" : "";
+        const label = line.label ? `<strong>${escapeHtml(line.label)}：</strong>` : "";
+        return `<div class="wizard-status-line${cls}">${label}${escapeHtml(line.text || "")}</div>`;
+      }).join("");
     }
 
     function setTailscaleStep(step, state) {
@@ -1730,8 +1785,19 @@ HTML = r"""
     }
 
     function setTailscaleBusy(busy) {
-      [refs.tailscalePrecheckBtn, refs.tailscaleInstallBtn, refs.tailscaleConnectBtn, refs.tailscaleVerifyBtn]
+      [refs.tailscalePrecheckBtn, refs.tailscaleInstallBtn, refs.tailscaleConnectBtn, refs.tailscaleVerifyBtn, refs.tailscaleUseExistingIpBtn]
         .forEach((button) => { button.disabled = busy; });
+    }
+
+    function renderTailscaleNodeOptions() {
+      const current = refs.tailscaleNodeSelect.value || String(selectedNodeId || "");
+      refs.tailscaleNodeSelect.innerHTML = nodes.length
+        ? nodes.map((node) => {
+            const id = String(node.id || "");
+            const label = `${node.name || id} (${node.base_url || "未配置地址"})`;
+            return `<option value="${escapeHtml(id)}" ${id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
+          }).join("")
+        : `<option value="">暂无 Agent</option>`;
     }
 
     async function runTailscaleStep(step, label, action) {
@@ -1798,6 +1864,33 @@ HTML = r"""
 
     async function verifyTailscale() {
       return showTailscaleStatus();
+    }
+
+    async function connectExistingTailscaleIp() {
+      const node_id = refs.tailscaleNodeSelect.value || selectedNode()?.id || "";
+      const tailscale_ip = refs.tailscaleExistingIpInput.value.trim();
+      if (!node_id) {
+        setTailscaleWizardOpen(true);
+        setTailscaleLog("请选择要接入的 Agent。");
+        return;
+      }
+      if (!tailscale_ip) {
+        setTailscaleWizardOpen(true);
+        setTailscaleLog("请输入已有的 Tailscale IP，例如 100.x.x.x。");
+        return;
+      }
+      const data = await runTailscaleStep("verify", "正在验证已有 Tailscale IP 并连接 Agent", async () => {
+        const resp = await fetch("/api/tailscale/connect-existing-ip", {
+          method: "POST",
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ node_id, tailscale_ip }),
+        });
+        return resp.json();
+      });
+      if (data.ok) {
+        log(`已连接 ${data.node_id} 到 ${data.base_url}`);
+        await refreshAll();
+      }
     }
 
     async function pushSelectedMedia() {
@@ -2214,6 +2307,7 @@ HTML = r"""
     refs.tailscaleStatusBtn.addEventListener("click", showTailscaleStatus);
     refs.tailscaleConnectBtn.addEventListener("click", connectTailscale);
     refs.tailscaleVerifyBtn.addEventListener("click", verifyTailscale);
+    refs.tailscaleUseExistingIpBtn.addEventListener("click", connectExistingTailscaleIp);
     if (refs.pushSelectedBtn) refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
     refs.previewTuneBtn.addEventListener("click", previewTune);
     refs.applyTuneBtn.addEventListener("click", applyLastTune);
@@ -2474,6 +2568,11 @@ def load_nodes() -> list[dict[str, Any]]:
     except Exception:
         return []
     return [node for node in data if isinstance(node, dict)]
+
+
+def save_nodes(nodes: list[dict[str, Any]]) -> None:
+    ensure_dirs()
+    NODES_FILE.write_text(json.dumps(nodes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def node_by_id(node_id: str) -> dict[str, Any] | None:
@@ -3353,6 +3452,63 @@ def api_tailscale_connect():
         ssh=bool(payload.get("ssh", False)),
     )
     return jsonify(result), 200 if result.get("ok") else 500
+
+
+@APP.post("/api/tailscale/connect-existing-ip")
+def api_tailscale_connect_existing_ip():
+    if not dangerous_local_action_allowed():
+        return reject_forbidden("Tailscale Agent 接入需要 localhost、可信网络或 STREAM_HUB_CONTROL_TOKEN")
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    raw_ip = str(payload.get("tailscale_ip") or payload.get("ip") or "").strip()
+    if not node_id:
+        return jsonify({"ok": False, "message": "请选择要接入的 Agent"}), 400
+    try:
+        ip = ipaddress.ip_address(raw_ip.split("%", 1)[0])
+    except ValueError:
+        return jsonify({"ok": False, "message": "请输入有效的 Tailscale IP，例如 100.x.x.x"}), 400
+    if ip not in TAILSCALE_CGNAT:
+        return jsonify({"ok": False, "message": "这个地址不是 Tailscale 100.x 地址，请确认后再连接"}), 400
+
+    base_url = f"http://{ip}:8787"
+    nodes = load_nodes()
+    target_index = next((index for index, item in enumerate(nodes) if str(item.get("id")) == node_id), -1)
+    if target_index < 0:
+        return jsonify({"ok": False, "message": "Agent 不存在"}), 404
+    node = dict(nodes[target_index])
+    previous_base_url = node_base_url(node)
+    probe_node = dict(node)
+    probe_node["base_url"] = base_url
+    status = request_node_json(probe_node, "/api/status", timeout=12)
+    if not status.get("ok"):
+        status_code = int(status.get("status_code") or 502)
+        message = status.get("message") or "无法连接到这个 Tailscale IP 上的 Agent"
+        if status_code == 403:
+            message = "Agent 已响应，但控制 token 不匹配或未授权"
+        return jsonify({
+            "ok": False,
+            "message": message,
+            "node_id": node_id,
+            "base_url": base_url,
+            "status_code": status_code,
+        }), status_code
+
+    if previous_base_url and previous_base_url != base_url and not node.get("public_base_url"):
+        node["public_base_url"] = previous_base_url
+    node["base_url"] = base_url
+    node["tailscale_ip"] = str(ip)
+    node["tailscale_connected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    nodes[target_index] = node
+    save_nodes(nodes)
+    return jsonify({
+        "ok": True,
+        "message": "已有 Tailscale IP 验证成功，Agent 已接入",
+        "node_id": node_id,
+        "base_url": base_url,
+        "previous_base_url": previous_base_url,
+        "hostname": status.get("hostname"),
+        "platform": status.get("platform"),
+    })
 
 
 @APP.post("/api/media/upload")
