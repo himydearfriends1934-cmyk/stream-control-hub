@@ -165,6 +165,29 @@ HTML = r"""
       font-weight: 800;
     }
     .media.current-agent { border-color: rgba(54, 211, 153, 0.85); }
+    .agent-compact {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      align-items: center;
+      margin: -2px 0 10px;
+      padding: 7px 9px;
+      border: 1px solid rgba(49, 89, 76, 0.7);
+      border-radius: 10px;
+      background: rgba(8, 17, 14, 0.38);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .agent-compact span {
+      display: inline-flex;
+      min-height: 24px;
+      align-items: center;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: rgba(54, 211, 153, 0.08);
+    }
+    .agent-compact strong { color: #d6fff0; }
     .command-strip {
       margin-top: 12px;
       border-color: rgba(251, 191, 36, 0.45);
@@ -991,6 +1014,14 @@ HTML = r"""
           ${donut("推流", stream.running ? "运行中" : "未推流", stream.running ? 100 : 0, stream.running ? "var(--accent)" : "var(--danger)")}
         </div>
 
+        <div class="agent-compact">
+          <span>Agent <strong>${escapeHtml(agent.mode || "compatible")}</strong></span>
+          <span>版本 <strong>${escapeHtml(agent.version || "--")}</strong></span>
+          <span>${agent.headless ? "Headless" : "兼容模式"}</span>
+          <span>上传 <strong>${publicUpload.supported === false ? "直传" : "票据直传"}</strong></span>
+          <span>最近路由 <strong>${escapeHtml(transfer.last_route || "--")}</strong></span>
+        </div>
+
         <div class="network-panel">
           <div class="monitor-panel">
             <h4>网络实时</h4>
@@ -1028,22 +1059,6 @@ HTML = r"""
               ${miniRow("面板在线", h.app_uptime || "--")}
               ${miniRow("内存用量", `${fmtBytes(h.memory?.used || 0)} / ${fmtBytes(h.memory?.total || 0)}`)}
               ${miniRow("硬盘用量", `${fmtBytes(h.disk?.used || 0)} / ${fmtBytes(h.disk?.total || 0)}`)}
-            </div>
-          </div>
-
-          <div class="monitor-panel">
-            <h4>客户端 Agent</h4>
-            <div class="metric-grid">
-              ${metric("运行模式", agent.mode || "dashboard-compatible")}
-              ${metric("Headless", agent.headless ? "开启" : "兼容面板")}
-              ${metric("Agent 版本", agent.version || "--")}
-              ${metric("公网窗口", publicUpload.enabled ? "开启" : "关闭")}
-            </div>
-            <div class="mini-table" style="margin-top: 10px;">
-              ${miniRow("Agent 名称", agent.name || h.hostname || node.id || "--")}
-              ${miniRow("控制端", agent.control_hub || "--")}
-              ${miniRow("窗口来源", publicUpload.public_origin || "--")}
-              ${miniRow("窗口原因", publicUpload.last_reason || "--")}
             </div>
           </div>
 
