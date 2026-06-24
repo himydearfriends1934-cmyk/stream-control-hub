@@ -4,9 +4,11 @@ import json
 import hmac
 import os
 import platform
+import secrets
 import shutil
 import signal
 import subprocess
+import threading
 import time
 import uuid
 from contextlib import suppress
@@ -50,6 +52,10 @@ APP_STARTED_AT = time.time()
 SHARE_CHUNK_BYTES = int(os.environ.get("STREAM_AGENT_SHARE_CHUNK_BYTES", str(32 * 1024 ** 2)))
 SHARE_TIMEOUT_SECONDS = int(os.environ.get("STREAM_AGENT_SHARE_TIMEOUT_SECONDS", "300"))
 SHARE_RETRIES = int(os.environ.get("STREAM_AGENT_SHARE_RETRIES", "2"))
+UPLOAD_TICKET_TTL_SECONDS = int(os.environ.get("STREAM_AGENT_UPLOAD_TICKET_TTL_SECONDS", "3600"))
+UPLOAD_TICKETS: dict[str, dict[str, Any]] = {}
+UPLOAD_TICKETS_LOCK = threading.Lock()
+UPLOAD_TICKET_PATHS = {"/api/upload-probe", "/api/upload-chunk", "/api/upload-chunk/cancel"}
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = MAX_CHUNK_BYTES + 1024 * 1024
@@ -70,6 +76,53 @@ def has_valid_control_token() -> bool:
     return bool(CONTROL_TOKEN and hmac.compare_digest(request_control_token(), CONTROL_TOKEN))
 
 
+def request_upload_ticket() -> str:
+    return request.headers.get("X-Upload-Ticket", "").strip() or request.args.get("ticket", "").strip()
+
+
+def cleanup_expired_upload_tickets() -> None:
+    now = time.time()
+    with UPLOAD_TICKETS_LOCK:
+        expired = [ticket for ticket, record in UPLOAD_TICKETS.items() if float(record.get("expires_at") or 0) < now]
+        for ticket in expired:
+            UPLOAD_TICKETS.pop(ticket, None)
+
+
+def upload_ticket_record() -> dict[str, Any] | None:
+    ticket = request_upload_ticket()
+    if not ticket:
+        return None
+    cleanup_expired_upload_tickets()
+    with UPLOAD_TICKETS_LOCK:
+        record = UPLOAD_TICKETS.get(ticket)
+        return dict(record) if record else None
+
+
+def has_valid_upload_ticket() -> bool:
+    return upload_ticket_record() is not None
+
+
+def expire_upload_ticket(ticket: str) -> None:
+    if not ticket:
+        return
+    with UPLOAD_TICKETS_LOCK:
+        UPLOAD_TICKETS.pop(ticket, None)
+
+
+def validate_upload_ticket(record: dict[str, Any] | None, upload_id: str, filename: str, total_size: int) -> str:
+    if not record:
+        return "upload ticket required"
+    if str(record.get("upload_id") or "") != upload_id:
+        return "upload ticket does not match upload id"
+    expected_name = str(record.get("filename") or "")
+    if expected_name and expected_name != filename:
+        return "upload ticket does not match filename"
+    expected_size = int(record.get("total_size") or 0)
+    if expected_size and expected_size != total_size:
+        return "upload ticket does not match file size"
+    return ""
+
+
 def request_is_local() -> bool:
     return (request.remote_addr or "") in {"127.0.0.1", "::1"}
 
@@ -81,8 +134,12 @@ def protect_agent_api():
     if request.method == "OPTIONS":
         return None
     if CONTROL_TOKEN:
-        if not has_valid_control_token():
-            return jsonify({"ok": False, "message": "agent control token required"}), 403
+        if has_valid_control_token():
+            return None
+        if request.method == "POST" and request.path in UPLOAD_TICKET_PATHS and has_valid_upload_ticket():
+            return None
+        return jsonify({"ok": False, "message": "agent control token or upload ticket required"}), 403
+    if request.method == "POST" and request.path in UPLOAD_TICKET_PATHS and has_valid_upload_ticket():
         return None
     if request.method not in {"GET", "HEAD", "OPTIONS"} and not (request_is_local() or TRUSTED_REMOTE_WRITES):
         return jsonify({"ok": False, "message": "set STREAM_AGENT_CONTROL_TOKEN for remote writes"}), 403
@@ -93,7 +150,7 @@ def protect_agent_api():
 def add_agent_cors_headers(response):
     response.headers.setdefault("Access-Control-Allow-Origin", "*")
     response.headers.setdefault("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-    response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type,X-Control-Token,Authorization,X-Upload-Route")
+    response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type,X-Control-Token,Authorization,X-Upload-Route,X-Upload-Ticket")
     return response
 
 
@@ -552,13 +609,49 @@ def api_upload_probe():
     return jsonify({"ok": True, "received": size, "bytes_per_second": int(size / elapsed)})
 
 
+@APP.post("/api/upload-ticket")
+def api_upload_ticket():
+    payload = request.get_json(silent=True) or {}
+    try:
+        upload_id = secure_filename(str(payload.get("upload_id") or ""))
+        filename = safe_media_filename(str(payload.get("filename") or ""))
+        total_size = int(payload.get("total_size") or 0)
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    if not upload_id:
+        return jsonify({"ok": False, "message": "upload_id is required"}), 400
+    if total_size <= 0:
+        return jsonify({"ok": False, "message": "total_size is required"}), 400
+    ticket = secrets.token_urlsafe(32)
+    expires_at = time.time() + UPLOAD_TICKET_TTL_SECONDS
+    cleanup_expired_upload_tickets()
+    with UPLOAD_TICKETS_LOCK:
+        UPLOAD_TICKETS[ticket] = {
+            "upload_id": upload_id,
+            "filename": filename,
+            "total_size": total_size,
+            "created_at": time.time(),
+            "expires_at": expires_at,
+        }
+    return jsonify({
+        "ok": True,
+        "ticket": ticket,
+        "expires_at": expires_at,
+        "expires_in": UPLOAD_TICKET_TTL_SECONDS,
+        "upload_id": upload_id,
+        "filename": filename,
+    })
+
+
 @APP.get("/api/public-upload")
 def api_public_upload():
     return jsonify({
         "ok": True,
-        "supported": False,
+        "supported": True,
         "restrict_public_to_upload": True,
-        "message": "headless agent accepts internal Tailscale uploads only",
+        "ticket_required": True,
+        "ticket_ttl_seconds": UPLOAD_TICKET_TTL_SECONDS,
+        "message": "public browser uploads require a short-lived Hub-issued ticket",
     })
 
 
@@ -584,6 +677,10 @@ def api_upload_chunk():
         total_size = int(request.form.get("total_size") or 0)
     except ValueError:
         return jsonify({"ok": False, "message": "invalid chunk metadata"}), 400
+    ticket_value = request_upload_ticket()
+    ticket_error = validate_upload_ticket(upload_ticket_record(), upload_id, filename, total_size)
+    if ticket_value and ticket_error:
+        return jsonify({"ok": False, "message": ticket_error}), 403
 
     temp_path = MEDIA_DIR / f".{upload_id}.{filename}.part"
     final_path = MEDIA_DIR / filename
@@ -598,6 +695,7 @@ def api_upload_chunk():
             final_path = MEDIA_DIR / f"{Path(filename).stem}-{counter}{Path(filename).suffix}"
             counter += 1
         temp_path.replace(final_path)
+        expire_upload_ticket(ticket_value)
     elapsed = max(0.001, time.time() - started_at)
     chunk_bytes = int(received_size - offset) if received_size >= offset else 0
     state = load_state()
@@ -636,11 +734,18 @@ def api_upload_cancel():
     ensure_dirs()
     payload = request.get_json(silent=True) or {}
     upload_id = secure_filename(str(payload.get("upload_id") or ""))
+    expire_ticket_after_cancel = bool(payload.get("expire_ticket", True))
+    ticket_value = request_upload_ticket()
+    record = upload_ticket_record()
+    if ticket_value and (not record or str(record.get("upload_id") or "") != upload_id):
+        return jsonify({"ok": False, "message": "upload ticket does not match upload id"}), 403
     removed = 0
     if upload_id:
         for path in MEDIA_DIR.glob(f".{upload_id}.*.part"):
             path.unlink(missing_ok=True)
             removed += 1
+    if expire_ticket_after_cancel:
+        expire_upload_ticket(ticket_value)
     return jsonify({"ok": True, "removed": removed})
 
 
@@ -684,8 +789,12 @@ def api_media_delete():
 
 
 def target_headers(payload: dict[str, Any]) -> dict[str, str]:
-    token = str(payload.get("target_token") or "").strip()
     headers = {"X-Upload-Route": "agent-share"}
+    ticket = str(payload.get("target_upload_ticket") or payload.get("upload_ticket") or "").strip()
+    if ticket:
+        headers["X-Upload-Ticket"] = ticket
+        return headers
+    token = str(payload.get("target_token") or "").strip()
     if token:
         headers["X-Control-Token"] = token
     return headers
@@ -758,7 +867,15 @@ def report_share_progress(payload: dict[str, Any], *, done_bytes: int, total_byt
 def api_share_media():
     payload = request.get_json(silent=True) or {}
     target_base_url = str(payload.get("target_base_url") or "").strip().rstrip("/")
-    if not target_base_url:
+    target_base_urls = [
+        str(item or "").strip().rstrip("/")
+        for item in (payload.get("target_base_urls") or [])
+        if str(item or "").strip()
+    ]
+    if target_base_url:
+        target_base_urls.insert(0, target_base_url)
+    target_base_urls = list(dict.fromkeys(target_base_urls))
+    if not target_base_urls:
         return jsonify({"ok": False, "message": "missing target_base_url"}), 400
     try:
         media_path = media_by_name_or_path(str(payload.get("media") or payload.get("video_path") or ""))
@@ -770,41 +887,59 @@ def api_share_media():
         return jsonify({"ok": False, "message": "media file is empty"}), 400
     chunk_size = max(1024 * 1024, min(SHARE_CHUNK_BYTES, MAX_CHUNK_BYTES))
     total_chunks = (total_size + chunk_size - 1) // chunk_size
-    upload_id = f"share_{uuid.uuid4().hex}"
+    upload_id = secure_filename(str(payload.get("upload_id") or "")) or f"share_{uuid.uuid4().hex}"
     headers = target_headers(payload)
     started_at = time.time()
     last_payload: dict[str, Any] = {}
+    last_error = ""
     try:
-        for chunk_index in range(total_chunks):
-            offset = chunk_index * chunk_size
-            chunk_started_at = time.time()
-            for attempt in range(SHARE_RETRIES + 1):
-                last_payload = post_share_chunk(
-                    target_base_url,
-                    headers,
-                    media_path,
-                    upload_id=upload_id,
-                    chunk_index=chunk_index,
-                    total_chunks=total_chunks,
-                    offset=offset,
-                    total_size=total_size,
-                    chunk_size=chunk_size,
-                )
-                if last_payload.get("ok"):
+        active_target_base_url = ""
+        for candidate_index, candidate_url in enumerate(target_base_urls):
+            last_error = ""
+            if candidate_index:
+                with suppress(Exception):
+                    requests.post(
+                        f"{active_target_base_url}/api/upload-chunk/cancel",
+                        json={"upload_id": upload_id, "expire_ticket": False},
+                        headers=headers,
+                        timeout=30,
+                    )
+            active_target_base_url = candidate_url
+            for chunk_index in range(total_chunks):
+                offset = chunk_index * chunk_size
+                chunk_started_at = time.time()
+                for attempt in range(SHARE_RETRIES + 1):
+                    last_payload = post_share_chunk(
+                        candidate_url,
+                        headers,
+                        media_path,
+                        upload_id=upload_id,
+                        chunk_index=chunk_index,
+                        total_chunks=total_chunks,
+                        offset=offset,
+                        total_size=total_size,
+                        chunk_size=chunk_size,
+                    )
+                    if last_payload.get("ok"):
+                        break
+                    if attempt < SHARE_RETRIES:
+                        time.sleep(min(5, 0.8 * (attempt + 1)))
+                if not last_payload.get("ok"):
+                    last_error = last_payload.get("message") or f"chunk {chunk_index + 1} share failed"
                     break
-                if attempt < SHARE_RETRIES:
-                    time.sleep(min(5, 0.8 * (attempt + 1)))
-            if not last_payload.get("ok"):
-                raise RuntimeError(last_payload.get("message") or f"chunk {chunk_index + 1} share failed")
-            done_bytes = min(total_size, offset + min(chunk_size, total_size - offset))
-            chunk_elapsed = max(0.001, time.time() - chunk_started_at)
-            report_share_progress(
-                payload,
-                done_bytes=done_bytes,
-                total_bytes=total_size,
-                current_bps=int(min(chunk_size, total_size - offset) / chunk_elapsed),
-                started_at=started_at,
-            )
+                done_bytes = min(total_size, offset + min(chunk_size, total_size - offset))
+                chunk_elapsed = max(0.001, time.time() - chunk_started_at)
+                report_share_progress(
+                    payload,
+                    done_bytes=done_bytes,
+                    total_bytes=total_size,
+                    current_bps=int(min(chunk_size, total_size - offset) / chunk_elapsed),
+                    started_at=started_at,
+                )
+            if not last_error:
+                break
+        if last_error:
+            raise RuntimeError(last_error)
         if not last_payload.get("complete"):
             raise RuntimeError("target did not report upload completion")
         elapsed = max(0.001, time.time() - started_at)
@@ -817,13 +952,13 @@ def api_share_media():
             "elapsed_seconds": round(elapsed, 2),
             "average_bytes_per_second": int(total_size / elapsed),
             "average_rate_label": f"{file_size_label(int(total_size / elapsed))}/s",
-            "target_base_url": target_base_url,
+            "target_base_url": active_target_base_url,
             "video_path": last_payload.get("video_path"),
         })
     except Exception as exc:
         with suppress(Exception):
             requests.post(
-                f"{target_base_url}/api/upload-chunk/cancel",
+                f"{target_base_urls[0]}/api/upload-chunk/cancel",
                 json={"upload_id": upload_id},
                 headers=headers,
                 timeout=30,
@@ -838,7 +973,7 @@ def api_share_media():
             "message": str(exc),
             "media": media_path.name,
             "last_response": last_payload,
-            "target_base_url": target_base_url,
+            "target_base_url": target_base_urls[0],
         }), 502
 
 

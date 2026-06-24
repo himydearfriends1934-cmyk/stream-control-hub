@@ -59,6 +59,11 @@ tailscale_ip() {
   fi
 }
 
+public_ip() {
+  curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || \
+    curl -fsS --max-time 8 https://ifconfig.me 2>/dev/null || true
+}
+
 show_menu() {
   echo "Stream Control Headless Agent"
   echo "1) Install or update"
@@ -190,9 +195,23 @@ systemctl enable --now stream-control-headless-agent.service
 
 NODE_IP="$(tailscale_ip)"
 [ -n "$NODE_IP" ] || NODE_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+PUBLIC_IP="$(public_ip)"
 
 echo "Stream Control Headless Agent installed."
 echo "Add this node to the Hub nodes file:"
+if [ -n "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "$NODE_IP" ]; then
+cat <<EOF
+{
+  "id": "$STREAM_AGENT_NAME",
+  "name": "$STREAM_AGENT_NAME",
+  "base_url": "http://$NODE_IP:$STREAM_AGENT_PORT",
+  "upload_base_url": "http://$PUBLIC_IP:$STREAM_AGENT_PORT",
+  "role": "stream-node",
+  "enabled": true,
+  "token": "$TOKEN"
+}
+EOF
+else
 cat <<EOF
 {
   "id": "$STREAM_AGENT_NAME",
@@ -203,3 +222,4 @@ cat <<EOF
   "token": "$TOKEN"
 }
 EOF
+fi

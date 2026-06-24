@@ -788,6 +788,53 @@ HTML = r"""
       });
     }
 
+    async function probeUploadRoute(candidate) {
+      const startedAt = performance.now();
+      const payload = new Uint8Array(256 * 1024);
+      try {
+        const resp = await fetch(candidate.probe_url, {
+          method: "POST",
+          headers: candidate.headers || {},
+          body: payload,
+          cache: "no-store",
+        });
+        const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
+        const data = await resp.json().catch(() => ({}));
+        return {
+          ...candidate,
+          ok: resp.ok && data.ok !== false,
+          elapsed,
+          bps: payload.byteLength / elapsed,
+          message: data.message || "",
+        };
+      } catch (error) {
+        return {
+          ...candidate,
+          ok: false,
+          elapsed: 9999,
+          bps: 0,
+          message: friendlyError(error, "线路测速失败"),
+        };
+      }
+    }
+
+    async function chooseUploadRoute(target) {
+      const candidates = target.candidates?.length ? target.candidates : [{
+        label: "默认线路",
+        upload_url: target.upload_url,
+        cancel_url: target.cancel_url,
+        probe_url: target.probe_url || target.upload_url.replace("/api/upload-chunk", "/api/upload-probe"),
+        headers: target.headers || {},
+      }];
+      const results = await Promise.all(candidates.map(probeUploadRoute));
+      const usable = results.filter((item) => item.ok).sort((a, b) => b.bps - a.bps);
+      if (!usable.length) {
+        const reason = results.find((item) => item.message)?.message || "所有上传线路测速失败";
+        throw new Error(reason);
+      }
+      return { selected: usable[0], results };
+    }
+
     function pct(value) {
       return Math.max(0, Math.min(100, Number(value || 0)));
     }
@@ -1168,11 +1215,12 @@ HTML = r"""
       refs.uploadBtn.disabled = true;
       const uploadId = `browser_${Date.now()}_${Math.random().toString(16).slice(2)}`;
       let target = null;
+      let uploadRoute = null;
       try {
         const targetResp = await fetch("/api/nodes/upload-target", {
           method: "POST",
           headers: authHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ node_id: node.id }),
+          body: JSON.stringify({ node_id: node.id, upload_id: uploadId, filename: file.name, total_size: file.size }),
         });
         target = await targetResp.json();
         if (!target.ok) {
@@ -1184,6 +1232,16 @@ HTML = r"""
           });
           return;
         }
+        renderTransfer({
+          status: "running",
+          badge: "测速中",
+          title: `选择上传线路`,
+          target: node.name || node.id,
+          totalBytes: file.size,
+          message: "正在自动测速公网和 Tailscale 线路，优先选择最快公网直连。",
+        });
+        const routeChoice = await chooseUploadRoute(target);
+        uploadRoute = routeChoice.selected;
         const chunkSize = Number(target.chunk_bytes || 16 * 1024 * 1024);
         const totalChunks = Math.ceil(file.size / chunkSize);
         const startedAt = performance.now();
@@ -1193,9 +1251,10 @@ HTML = r"""
           status: "running",
           badge: "上传中",
           title: `上传到 ${node.name || node.id}`,
-          target: node.name || node.id,
+          target: `${node.name || node.id} / ${uploadRoute.label}`,
           totalBytes: file.size,
-          message: `准备上传：${file.name}`,
+          currentBps: uploadRoute.bps || 0,
+          message: `已选择 ${uploadRoute.label}，测速 ${fmtRate(uploadRoute.bps || 0)}，准备上传：${file.name}`,
         });
         for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
           const offset = chunkIndex * chunkSize;
@@ -1210,7 +1269,7 @@ HTML = r"""
           form.append("chunk_size", String(chunkSize));
           form.append("chunk", blob, file.name);
           const chunkStartedAt = performance.now();
-          lastPayload = await uploadFormWithProgress(target.upload_url, target.headers || {}, form, (loaded) => {
+          lastPayload = await uploadFormWithProgress(uploadRoute.upload_url, uploadRoute.headers || target.headers || {}, form, (loaded) => {
             const now = performance.now();
             if (now - lastPaintAt < 250 && loaded < blob.size) return;
             lastPaintAt = now;
@@ -1222,14 +1281,14 @@ HTML = r"""
               status: "running",
               badge: "上传中",
               title: `上传到 ${node.name || node.id}`,
-              target: node.name || node.id,
+              target: `${node.name || node.id} / ${uploadRoute.label}`,
               percent: file.size ? (uploaded / file.size) * 100 : 0,
               doneBytes: uploaded,
               totalBytes: file.size,
               currentBps: loaded / chunkSeconds,
               averageBps,
               etaSeconds: averageBps > 0 ? (file.size - uploaded) / averageBps : 0,
-              message: `正在上传 ${file.name}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
+              message: `正在通过 ${uploadRoute.label} 上传 ${file.name}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
             });
           });
           const chunkSeconds = Math.max(0.001, (performance.now() - chunkStartedAt) / 1000);
@@ -1240,14 +1299,14 @@ HTML = r"""
             status: "running",
             badge: "上传中",
             title: `上传到 ${node.name || node.id}`,
-            target: node.name || node.id,
+            target: `${node.name || node.id} / ${uploadRoute.label}`,
             percent: file.size ? (uploaded / file.size) * 100 : 0,
             doneBytes: uploaded,
             totalBytes: file.size,
             currentBps: blob.size / chunkSeconds,
             averageBps,
             etaSeconds: averageBps > 0 ? (file.size - uploaded) / averageBps : 0,
-            message: `正在上传 ${file.name}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
+            message: `正在通过 ${uploadRoute.label} 上传 ${file.name}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
           });
         }
         const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
@@ -1255,21 +1314,23 @@ HTML = r"""
           status: "done",
           badge: "完成",
           title: `上传完成`,
-          target: node.name || node.id,
+          target: `${node.name || node.id} / ${uploadRoute?.label || "默认线路"}`,
           percent: 100,
           doneBytes: file.size,
           totalBytes: file.size,
           currentBps: 0,
           averageBps: file.size / elapsed,
           etaSeconds: 0,
-          message: `${file.name} 已上传到 ${node.name || node.id}。`,
+          message: `${file.name} 已通过 ${uploadRoute?.label || "默认线路"} 上传到 ${node.name || node.id}。`,
         });
         await refreshAll();
       } catch (error) {
-        if (target?.cancel_url) {
-          await fetch(target.cancel_url, {
+        const cancelUrl = uploadRoute?.cancel_url || target?.cancel_url;
+        const cancelHeaders = uploadRoute?.headers || target?.headers || {};
+        if (cancelUrl) {
+          await fetch(cancelUrl, {
             method: "POST",
-            headers: { ...(target.headers || {}), "Content-Type": "application/json" },
+            headers: { ...cancelHeaders, "Content-Type": "application/json" },
             body: JSON.stringify({ upload_id: uploadId }),
           }).catch(() => null);
         }
@@ -1277,7 +1338,7 @@ HTML = r"""
           status: "failed",
           badge: "失败",
           title: "上传失败",
-          target: node.name || node.id,
+          target: `${node.name || node.id}${uploadRoute?.label ? " / " + uploadRoute.label : ""}`,
           totalBytes: file.size,
           message: friendlyError(error, "上传失败"),
         });
@@ -1846,6 +1907,42 @@ def node_base_url(node: dict[str, Any]) -> str:
     return str(node.get("base_url") or "").rstrip("/")
 
 
+def node_upload_base_urls(node: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("upload_base_url", "public_base_url"):
+        value = str(node.get(key) or "").strip().rstrip("/")
+        if value:
+            values.append(value)
+    for value in node.get("upload_base_urls") or []:
+        value = str(value or "").strip().rstrip("/")
+        if value:
+            values.append(value)
+    base_url = node_base_url(node)
+    if base_url:
+        values.append(base_url)
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
+
+
+def upload_route_label(url: str, base_url: str) -> str:
+    try:
+        host = urlparse(url).hostname or ""
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
+        if ip in TAILSCALE_CGNAT:
+            return "Tailscale 兜底"
+        if ip.is_private or ip.is_loopback:
+            return "内网直连"
+    except ValueError:
+        if host.endswith(".ts.net") or host.endswith(".beta.tailscale.net"):
+            return "Tailscale 兜底"
+    return "公网直连" if url != base_url else "默认线路"
+
+
 def node_headers(node: dict[str, Any]) -> dict[str, str]:
     token = str(node.get("token") or node.get("control_token") or "").strip()
     return {"X-Control-Token": token} if token else {}
@@ -1866,6 +1963,27 @@ def post_node_json(node: dict[str, Any], path: str, payload: dict[str, Any], *, 
         return data
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
+
+
+def request_node_upload_ticket(node: dict[str, Any], *, upload_id: str, filename: str, total_size: int) -> dict[str, Any]:
+    return post_node_json(
+        node,
+        "/api/upload-ticket",
+        {"upload_id": upload_id, "filename": filename, "total_size": total_size},
+        timeout=10,
+    )
+
+
+def request_node_media_info(node: dict[str, Any], media: str) -> dict[str, Any]:
+    status = request_node_json(node, "/api/status", timeout=10)
+    if not status.get("ok"):
+        return {"ok": False, "message": status.get("message") or "source node status unavailable"}
+    media_name = Path(media).name
+    for item in status.get("videos") or []:
+        values = {str(item.get("name") or ""), str(item.get("video_path") or ""), str(item.get("path") or "")}
+        if media in values or media_name in values:
+            return {"ok": True, **item}
+    return {"ok": False, "message": "media not found on source node"}
 
 
 def share_task_snapshot(task_id: str) -> dict[str, Any] | None:
@@ -1921,6 +2039,19 @@ def run_share_task(
             target_node_id = str(target_node.get("id") or "")
             previous_task = share_task_snapshot(task_id) or {}
             previous_total = int(previous_task.get("single_target_total_bytes") or previous_task.get("total_bytes") or 0)
+            media_info = request_node_media_info(source_node, media)
+            if not media_info.get("ok"):
+                raise RuntimeError(media_info.get("message") or "source media not found")
+            filename = str(media_info.get("name") or Path(media).name)
+            total_size = int(media_info.get("size") or 0)
+            if total_size <= 0:
+                raise RuntimeError("source media size is unavailable")
+            upload_id = f"share_{uuid.uuid4().hex}"
+            ticket = request_node_upload_ticket(target_node, upload_id=upload_id, filename=filename, total_size=total_size)
+            if not ticket.get("ok"):
+                raise RuntimeError(ticket.get("message") or f"{target_node_id} did not issue an upload ticket")
+            upload_urls = node_upload_base_urls(target_node)
+            target_upload_base_urls = upload_urls or [node_base_url(target_node)]
             update_share_task(
                 task_id,
                 status="running",
@@ -1930,8 +2061,10 @@ def run_share_task(
             )
             share_payload = {
                 "media": media,
-                "target_base_url": node_base_url(target_node),
-                "target_token": str(target_node.get("token") or target_node.get("control_token") or "").strip(),
+                "target_base_url": target_upload_base_urls[0],
+                "target_base_urls": target_upload_base_urls,
+                "upload_id": upload_id,
+                "target_upload_ticket": str(ticket.get("ticket") or ""),
                 "progress_url": progress_url,
                 "progress_task_id": task_id,
                 "progress_target_index": target_index,
@@ -2502,6 +2635,9 @@ def api_media():
 def api_node_upload_target():
     payload = request.get_json(silent=True) or {}
     node_id = str(payload.get("node_id") or "").strip()
+    upload_id = secure_filename(str(payload.get("upload_id") or "").strip())
+    filename = secure_filename(str(payload.get("filename") or "").strip())
+    total_size = int(payload.get("total_size") or 0)
     node = node_by_id(node_id)
     if not node:
         return jsonify({"ok": False, "message": "node not found"}), 404
@@ -2510,16 +2646,40 @@ def api_node_upload_target():
     base_url = node_base_url(node)
     if not base_url:
         return jsonify({"ok": False, "message": "missing node base_url"}), 400
-    headers = node_headers(node)
-    headers["X-Upload-Route"] = "direct-browser"
+    if not upload_id or not filename or total_size <= 0:
+        return jsonify({"ok": False, "message": "upload_id, filename and total_size are required"}), 400
+    ticket = request_node_upload_ticket(node, upload_id=upload_id, filename=filename, total_size=total_size)
+    if not ticket.get("ok"):
+        return jsonify({
+            "ok": False,
+            "message": ticket.get("message") or "Agent did not issue an upload ticket",
+            "status_code": ticket.get("status_code"),
+        }), int(ticket.get("status_code") or 502)
+    headers = {
+        "X-Upload-Route": "direct-browser",
+        "X-Upload-Ticket": str(ticket.get("ticket") or ""),
+    }
+    candidates = []
+    for url in node_upload_base_urls(node):
+        candidates.append({
+            "url": url,
+            "label": upload_route_label(url, base_url),
+            "upload_url": f"{url}/api/upload-chunk",
+            "probe_url": f"{url}/api/upload-probe",
+            "cancel_url": f"{url}/api/upload-chunk/cancel",
+            "headers": headers,
+        })
     return jsonify({
         "ok": True,
         "node_id": node_id,
         "base_url": base_url,
-        "upload_url": f"{base_url}/api/upload-chunk",
-        "cancel_url": f"{base_url}/api/upload-chunk/cancel",
+        "upload_url": candidates[0]["upload_url"],
+        "cancel_url": candidates[0]["cancel_url"],
+        "probe_url": candidates[0]["probe_url"],
+        "candidates": candidates,
         "chunk_bytes": DIRECT_AGENT_UPLOAD_CHUNK_BYTES,
         "headers": headers,
+        "ticket_expires_in": ticket.get("expires_in"),
     })
 
 

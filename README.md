@@ -75,6 +75,7 @@ Each node entry describes how the hub reaches a VPS dashboard or node agent over
   "id": "sample-tailnet-node",
   "name": "Sample Tailnet Node",
   "base_url": "http://100.64.0.10:8787",
+  "upload_base_url": "http://198.51.100.10:8787",
   "role": "stream-node"
 }
 ```
@@ -90,11 +91,14 @@ Node entries may include a per-agent control token:
   "id": "hk-agent",
   "name": "HK Agent",
   "base_url": "http://100.64.0.10:8787",
+  "upload_base_url": "http://203.0.113.10:8787",
   "role": "stream-node",
   "enabled": true,
   "token": "generated-agent-token"
 }
 ```
+
+Use `base_url` for trusted control traffic, normally Tailscale. Use `upload_base_url` for the VPS public IP or public DNS name. Browser uploads automatically probe public and Tailscale routes, choose the fastest working route, and use a short-lived upload ticket instead of exposing the long-lived Agent token to the browser.
 
 ## Tailscale
 
@@ -113,6 +117,7 @@ When Codex needs to log in to VPS machines or use stored external credentials on
 The Hub is a coordinator, not the media warehouse. Browser uploads go straight to the selected Agent through `/api/upload-chunk`, and existing Agent videos can be copied directly from one Agent to another through `/api/share-media`.
 
 - Direct Agent uploads use large chunks and show per-chunk and average speed in the Hub UI.
+- Public Agent uploads use Hub-issued short-lived upload tickets; the Agent control token stays on the Hub.
 - Agent-to-Agent sharing uses large chunks and retries a small number of times before cleanup.
 - Failed pushes call `/api/upload-chunk/cancel` through the node `base_url`, then close the public window if one was opened.
 - Public routes must pass `/api/upload-probe` and the minimum speed threshold before large chunks are sent.
@@ -230,6 +235,14 @@ data/nodes.local.json
 ```
 
 `base_url` 建议使用 Tailscale IP 或内网地址。`token` 是 Agent 安装时生成的控制令牌，Hub 会自动带上它访问 Agent。
+
+
+公网文件上传说明：
+
+- `base_url` 建议继续填 Tailscale 地址，用于 Hub 管理 Agent、申请上传票据、读取状态。
+- `upload_base_url` 填 VPS 公网 IP 或公网域名，用于浏览器直传大视频和 Agent 之间共享。
+- Hub 会自动测速公网和 Tailscale，优先走公网；公网不可达时自动回退 Tailscale。
+- 浏览器拿到的是短期 `X-Upload-Ticket`，不是 Agent 长期控制 token，票据只绑定这一次上传。
 
 ### Tailscale 连接管理
 
