@@ -167,10 +167,10 @@ EOF
 chmod 600 "$ENV_FILE"
 
 if [ -n "$TAILSCALE_AUTH_KEY" ]; then
-  if ! command -v tailscale >/dev/null 2>&1; then
-    curl -fsSL https://tailscale.com/install.sh | sh
-  fi
-  tailscale up --auth-key "$TAILSCALE_AUTH_KEY" --hostname "$TAILSCALE_HOSTNAME" --accept-dns=false
+  TAILSCALE_HOSTNAME="$TAILSCALE_HOSTNAME" \
+  TAILSCALE_AUTH_KEY="$TAILSCALE_AUTH_KEY" \
+  TAILSCALE_ACCEPT_ROUTES="${TAILSCALE_ACCEPT_ROUTES:-1}" \
+  sh "$INSTALL_DIR/scripts/tailscale-install.sh" connect
 fi
 
 cat > /etc/systemd/system/stream-control-headless-agent.service <<EOF

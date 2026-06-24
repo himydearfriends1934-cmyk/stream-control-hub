@@ -146,11 +146,10 @@ EOF
 chmod +x "$INSTALL_DIR/run-hub.sh"
 
 if [ -n "$TAILSCALE_AUTH_KEY" ]; then
-  if command -v tailscale >/dev/null 2>&1; then
-    tailscale up --auth-key "$TAILSCALE_AUTH_KEY" --hostname "$TAILSCALE_HOSTNAME" --accept-dns=false
-  else
-    echo "tailscale is not installed. Install Tailscale, then use the Hub Tailscale panel or rerun with TAILSCALE_AUTH_KEY." >&2
-  fi
+  TAILSCALE_HOSTNAME="$TAILSCALE_HOSTNAME" \
+  TAILSCALE_AUTH_KEY="$TAILSCALE_AUTH_KEY" \
+  TAILSCALE_ACCEPT_ROUTES="${TAILSCALE_ACCEPT_ROUTES:-1}" \
+  sh "$INSTALL_DIR/scripts/tailscale-install.sh" connect
 fi
 
 if command -v systemctl >/dev/null 2>&1; then

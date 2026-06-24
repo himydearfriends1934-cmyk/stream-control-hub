@@ -102,7 +102,9 @@ Use `base_url` for trusted control traffic, normally Tailscale. Use `upload_base
 
 ## Tailscale
 
-The Hub has a Tailscale panel at the bottom of the page. Paste a one-time Tailscale auth key and click connect to run `tailscale up` for the Hub. Headless Agent install accepts the same style of auth key with `TAILSCALE_AUTH_KEY=...`.
+The Hub has a Tailscale panel at the bottom of the page. Paste a one-time Tailscale auth key and click connect; the Hub reuses the Tailscale install flow from `vps-pulse-control`: pre-check Linux environment, install or repair Tailscale when missing, enable `tailscaled`, run `tailscale up`, and read final status.
+
+The Linux Hub and Headless Agent one-line installers use the same helper when `TAILSCALE_AUTH_KEY=...` is supplied, so a fresh VPS does not need Tailscale preinstalled.
 
 The app does not write the Tailscale auth key to repo config or audit logs. The intended deployment model is local or trusted-network use, preferably behind Tailscale.
 
@@ -248,7 +250,9 @@ data/nodes.local.json
 
 ### Tailscale 连接管理
 
-Hub 页面底部有 `Tailscale 连接` 面板。为了操作方便，可以直接粘贴一次性 Tailscale auth key，Hub 会执行 `tailscale up`，并且不会把 auth key 写入仓库配置或审计日志。
+Hub 页面底部有 `Tailscale 连接` 面板。为了操作方便，可以直接粘贴一次性 Tailscale auth key。Hub 会复用 `vps-pulse-control` 里的 Tailscale 安装流程：先检查 Linux 环境、包管理器、提权能力、TUN 和 tailscale.com 连通性；如果没安装就自动安装/修复 Tailscale；然后执行 `tailscale up` 并读取最终状态。
+
+Linux Hub 和 Headless Agent 一键安装脚本在传入 `TAILSCALE_AUTH_KEY=...` 时也会走同一个 helper，所以新 VPS 不需要提前手动装 Tailscale。auth key 不会写入仓库配置或审计日志。
 
 ### 推流说明
 

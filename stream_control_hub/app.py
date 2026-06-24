@@ -65,6 +65,7 @@ PUSH_AUDIT_LOG_MAX_BYTES = int(os.environ.get("STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYT
 CONTROL_TOKEN = os.environ.get("STREAM_HUB_CONTROL_TOKEN", "").strip()
 TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_HUB_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
 TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+TAILSCALE_HELPER = ROOT / "scripts" / "tailscale-install.sh"
 SHARE_TASKS: dict[str, dict[str, Any]] = {}
 SHARE_TASKS_LOCK = threading.Lock()
 
@@ -759,7 +760,7 @@ HTML = r"""
         </div>
         <div class="card compact-card">
           <h2>Tailscale 连接</h2>
-          <p>输入一次性 auth key，把 Hub 接入 tailnet；Headless Agent 使用同一个 tailnet 后会出现在节点列表。</p>
+          <p>输入一次性 auth key，Hub 会先检查并自动安装/修复 Tailscale，然后接入 tailnet。</p>
           <div class="split">
             <input id="tailscaleAuthInput" type="password" autocomplete="off" placeholder="tskey-auth-...">
             <input id="tailscaleHostInput" type="text" value="stream-control-hub" placeholder="hostname">
@@ -2129,7 +2130,51 @@ def run_command(args: list[str], timeout: int = 60, secrets: list[str] | None = 
     }
 
 
+def run_helper_script(
+    script: Path,
+    args: list[str],
+    timeout: int = 60,
+    env: dict[str, str] | None = None,
+    secrets: list[str] | None = None,
+) -> dict[str, Any]:
+    if not script.exists():
+        return {"ok": False, "message": f"helper script missing: {script}"}
+    if not shutil.which("sh"):
+        return {"ok": False, "message": "sh is not available"}
+    proc_env = os.environ.copy()
+    if env:
+        proc_env.update(env)
+    try:
+        proc = subprocess.run(
+            ["sh", str(script), *args],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=proc_env,
+        )
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+    secret_values = secrets or []
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "stdout": redact_secret(proc.stdout.strip(), *secret_values),
+        "stderr": redact_secret(proc.stderr.strip(), *secret_values),
+    }
+
+
 def tailscale_status() -> dict[str, Any]:
+    if TAILSCALE_HELPER.exists():
+        helper = run_helper_script(TAILSCALE_HELPER, ["status"], timeout=15)
+        if helper.get("ok"):
+            try:
+                data = json.loads(helper.get("stdout") or "{}")
+            except json.JSONDecodeError:
+                data = {}
+            if data:
+                return tailscale_status_from_json(data)
+        if "not installed" in str(helper.get("stdout") or helper.get("stderr") or helper.get("message") or "").lower():
+            return {"ok": False, "installed": False, "message": "tailscale is not installed"}
     result = run_command(["tailscale", "status", "--json"], timeout=15)
     if not result.get("ok"):
         return result
@@ -2137,9 +2182,14 @@ def tailscale_status() -> dict[str, Any]:
         data = json.loads(result.get("stdout") or "{}")
     except json.JSONDecodeError:
         return {"ok": False, "message": "tailscale returned invalid json"}
+    return tailscale_status_from_json(data)
+
+
+def tailscale_status_from_json(data: dict[str, Any]) -> dict[str, Any]:
     self_info = data.get("Self") or {}
     return {
         "ok": True,
+        "installed": True,
         "backend_state": data.get("BackendState"),
         "self": {
             "host_name": self_info.get("HostName"),
@@ -2157,6 +2207,49 @@ def tailscale_status() -> dict[str, Any]:
             }
             for peer in (data.get("Peer") or {}).values()
         ],
+    }
+
+
+def tailscale_precheck() -> dict[str, Any]:
+    result = run_helper_script(TAILSCALE_HELPER, ["precheck"], timeout=60)
+    payload: dict[str, Any] = {"ok": False, "message": result.get("message") or "Tailscale precheck failed"}
+    with suppress(json.JSONDecodeError):
+        payload = json.loads(result.get("stdout") or "{}")
+    payload["result"] = result
+    return payload
+
+
+def tailscale_connect(auth_key: str, hostname: str, *, accept_routes: bool = True, ssh: bool = False) -> dict[str, Any]:
+    env = {
+        "TAILSCALE_AUTH_KEY": auth_key,
+        "TAILSCALE_HOSTNAME": hostname,
+        "TAILSCALE_ACCEPT_ROUTES": "1" if accept_routes else "0",
+        "TAILSCALE_SSH": "1" if ssh else "0",
+    }
+    precheck = tailscale_precheck()
+    result = run_helper_script(TAILSCALE_HELPER, ["connect"], timeout=600, env=env, secrets=[auth_key])
+    if not result.get("ok") and "sh is not available" in str(result.get("message") or ""):
+        args = [
+            "tailscale",
+            "up",
+            "--auth-key",
+            auth_key,
+            "--hostname",
+            hostname,
+            "--accept-dns=false",
+        ]
+        if accept_routes:
+            args.append("--accept-routes")
+        if ssh:
+            args.append("--ssh")
+        result = run_command(args, timeout=90, secrets=[auth_key])
+    status = tailscale_status() if result.get("ok") else None
+    return {
+        "ok": bool(result.get("ok")),
+        "message": "Tailscale connected" if result.get("ok") else "Tailscale connect failed",
+        "precheck": precheck,
+        "result": result,
+        "status": status,
     }
 
 
@@ -3027,6 +3120,11 @@ def api_tailscale_status():
     return jsonify(tailscale_status())
 
 
+@APP.get("/api/tailscale/precheck")
+def api_tailscale_precheck():
+    return jsonify(tailscale_precheck())
+
+
 @APP.post("/api/tailscale/connect")
 def api_tailscale_connect():
     if not dangerous_local_action_allowed():
@@ -3036,27 +3134,13 @@ def api_tailscale_connect():
     hostname = secure_filename(str(payload.get("hostname") or "stream-control-hub").strip()) or "stream-control-hub"
     if not auth_key.startswith("tskey-"):
         return jsonify({"ok": False, "message": "valid Tailscale auth key required"}), 400
-    args = [
-        "tailscale",
-        "up",
-        "--auth-key",
+    result = tailscale_connect(
         auth_key,
-        "--hostname",
         hostname,
-        "--accept-dns=false",
-    ]
-    if bool(payload.get("accept_routes")):
-        args.append("--accept-routes")
-    if bool(payload.get("ssh")):
-        args.append("--ssh")
-    result = run_command(args, timeout=90, secrets=[auth_key])
-    status_code = 200 if result.get("ok") else 500
-    return jsonify({
-        "ok": bool(result.get("ok")),
-        "message": "Tailscale connected" if result.get("ok") else "Tailscale connect failed",
-        "result": result,
-        "status": tailscale_status() if result.get("ok") else None,
-    }), status_code
+        accept_routes=bool(payload.get("accept_routes", True)),
+        ssh=bool(payload.get("ssh", False)),
+    )
+    return jsonify(result), 200 if result.get("ok") else 500
 
 
 @APP.post("/api/media/upload")
