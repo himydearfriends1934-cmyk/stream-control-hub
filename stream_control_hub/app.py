@@ -165,6 +165,79 @@ HTML = r"""
       font-weight: 800;
     }
     .media.current-agent { border-color: rgba(54, 211, 153, 0.85); }
+    .media-window {
+      border: 1px solid rgba(49, 89, 76, 0.85);
+      border-radius: 8px;
+      max-height: 340px;
+      overflow: auto;
+      background: rgba(7, 18, 14, 0.66);
+    }
+    .media-window-head,
+    .media-file-row {
+      display: grid;
+      grid-template-columns: minmax(150px, 1.35fr) 82px 132px minmax(92px, 0.75fr);
+      gap: 8px;
+      align-items: center;
+    }
+    .media-window-head {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 8px 10px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      background: rgba(19, 32, 28, 0.98);
+      border-bottom: 1px solid rgba(49, 89, 76, 0.7);
+    }
+    .media-file-row {
+      width: 100%;
+      padding: 8px 10px;
+      border: 0;
+      border-bottom: 1px solid rgba(49, 89, 76, 0.42);
+      border-radius: 0;
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      text-align: left;
+      font-weight: 700;
+    }
+    .media-file-row:hover,
+    .media-file-row.selected {
+      background: rgba(54, 211, 153, 0.1);
+    }
+    .media-file-row.current-agent {
+      box-shadow: inset 3px 0 0 rgba(54, 211, 153, 0.9);
+    }
+    .media-file-row span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .media-file-row .muted { color: var(--muted); font-size: 12px; }
+    .media-context-menu {
+      position: fixed;
+      z-index: 100;
+      min-width: 150px;
+      display: none;
+      padding: 6px;
+      border: 1px solid rgba(49, 89, 76, 0.9);
+      border-radius: 8px;
+      background: #10201b;
+      box-shadow: 0 18px 40px rgba(0,0,0,0.35);
+    }
+    .media-context-menu.open { display: grid; gap: 4px; }
+    .media-context-menu button {
+      width: 100%;
+      padding: 8px 9px;
+      border-radius: 7px;
+      text-align: left;
+      background: transparent;
+      border: 0;
+    }
+    .media-context-menu button:hover { background: rgba(54, 211, 153, 0.12); }
+    .media-context-menu button.danger:hover { background: rgba(251, 113, 133, 0.16); }
     .agent-compact {
       display: flex;
       flex-wrap: wrap;
@@ -423,7 +496,7 @@ HTML = r"""
     .resource-card { display: grid; gap: 10px; }
     .resource-card .split { grid-template-columns: 1fr; }
     .resource-card .actions { display: grid; grid-template-columns: 1fr; }
-    .resource-card .media-list { max-height: 260px; overflow: auto; padding-right: 3px; }
+    .resource-card .media-list { overflow: visible; padding-right: 0; }
     .transfer-box {
       border: 1px solid rgba(49, 89, 76, 0.85);
       border-radius: 8px;
@@ -476,8 +549,8 @@ HTML = r"""
       .node-table-head { display: none; }
       .node-row { grid-template-columns: 24px minmax(0, 1fr); }
       .node-state, .row-actions { grid-column: 2; }
-      .media { grid-template-columns: 24px minmax(0, 1fr); }
-      .media-actions { grid-column: 2; justify-content: flex-start; }
+      .media-window-head,
+      .media-file-row { grid-template-columns: minmax(130px, 1.4fr) 74px 116px minmax(82px, 0.8fr); }
     }
   </style>
 </head>
@@ -602,12 +675,18 @@ HTML = r"""
               <div class="actions" style="margin-top: 8px;">
                 <button class="primary" id="uploadBtn">上传到当前 Agent</button>
                 <button class="danger" id="cancelUploadBtn" disabled>取消上传</button>
-                <button id="pushSelectedBtn">共享到勾选 Agent</button>
               </div>
             </div>
             <div id="uploadBox" class="transfer-box"></div>
           </div>
           <div class="media-list" id="mediaList">加载中...</div>
+          <div class="media-context-menu" id="mediaContextMenu">
+            <button data-media-menu-action="inspect">查看详情</button>
+            <button data-media-menu-action="use">选用开播</button>
+            <button data-media-menu-action="share">共享到勾选 Agent</button>
+            <button data-media-menu-action="rename">编辑名称</button>
+            <button class="danger" data-media-menu-action="delete">删除文件</button>
+          </div>
         </div>
       </div>
 
@@ -657,6 +736,7 @@ HTML = r"""
       nodeList: document.getElementById("nodeList"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
+      mediaContextMenu: document.getElementById("mediaContextMenu"),
       refreshBtn: document.getElementById("refreshBtn"),
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
       policyBtn: document.getElementById("policyBtn"),
@@ -695,6 +775,7 @@ HTML = r"""
     let selectedNodeId = "";
     let lastTuneRecommendation = null;
     let activeUpload = null;
+    let contextMediaRow = null;
 
     renderTransfer({
       title: "传输状态",
@@ -1020,6 +1101,7 @@ HTML = r"""
           <span>${agent.headless ? "Headless" : "兼容模式"}</span>
           <span>上传 <strong>${publicUpload.supported === false ? "直传" : "票据直传"}</strong></span>
           <span>最近路由 <strong>${escapeHtml(transfer.last_route || "--")}</strong></span>
+          <span>最近错误 <strong>${escapeHtml(transfer.last_error || "无")}</strong></span>
         </div>
 
         <div class="network-panel">
@@ -1059,23 +1141,6 @@ HTML = r"""
               ${miniRow("面板在线", h.app_uptime || "--")}
               ${miniRow("内存用量", `${fmtBytes(h.memory?.used || 0)} / ${fmtBytes(h.memory?.total || 0)}`)}
               ${miniRow("硬盘用量", `${fmtBytes(h.disk?.used || 0)} / ${fmtBytes(h.disk?.total || 0)}`)}
-            </div>
-          </div>
-
-          <div class="monitor-panel">
-            <h4>传输监控</h4>
-            <div class="metric-grid">
-              ${metric("活跃上传", `${transfer.active_upload_count || 0}`)}
-              ${metric("已收总量", fmtBytes(transfer.bytes_received_total || 0))}
-              ${metric("已收分块", `${transfer.chunks_received_total || 0}`)}
-              ${metric("完成上传", `${transfer.completed_uploads_total || 0}`)}
-            </div>
-            <div class="mini-table" style="margin-top: 10px;">
-              ${miniRow("最后事件", transfer.last_event || "--")}
-              ${miniRow("最后路由", transfer.last_route || "--")}
-              ${miniRow("最近错误", transfer.last_error || "无")}
-              ${miniRow("最后更新时间", transfer.last_event_at_label || "--")}
-              ${miniRow("最近测速", transfer.last_probe?.elapsed_ms ? `${transfer.last_probe.elapsed_ms} ms / ${fmtBytes(transfer.last_probe.size || 0)}` : "--")}
             </div>
           </div>
 
@@ -1168,29 +1233,32 @@ HTML = r"""
       refs.mediaList.innerHTML = `
         <div class="media-toolbar">
           <strong>全部 Agent 文件</strong>
-          <small>按上传时间倒序，共 ${entries.length} 个</small>
+          <small>按上传时间倒序，共 ${entries.length} 个。右键文件操作。</small>
         </div>
-        ${entries.map(({ node, item }) => {
-          const videoPath = item.video_path || item.path || item.name;
-          const nodeId = String(node.id || "");
-          const selected = checkedPath && checkedNodeId === nodeId && checkedPath === videoPath;
-          const current = nodeId === String(selectedNodeId);
-          return `
-            <div class="media ${current ? "current-agent" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(item.name || videoPath)}" data-video-path="${escapeHtml(videoPath)}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
-              <input data-media-check type="radio" name="media" value="${escapeHtml(item.name || videoPath)}" data-node-id="${escapeHtml(nodeId)}" data-video-path="${escapeHtml(videoPath)}" ${selected ? "checked" : ""}>
-              <span class="media-name">
-                <strong>${escapeHtml(item.name || videoPath)}</strong>
-                <small>${escapeHtml(node.name || node.id || "Agent")} | ${escapeHtml(fmtBytes(item.size || 0))} | ${escapeHtml(item.modified_label || "--")}${current ? " | 当前 Agent" : ""}</small>
-              </span>
-              <span class="media-actions">
-                <button class="tiny" data-media-action="inspect">详情</button>
-                <button class="tiny" data-media-action="use">选用</button>
-                <button class="tiny" data-media-action="rename">编辑名称</button>
-                <button class="tiny danger" data-media-action="delete">删除</button>
-              </span>
-            </div>
-          `;
-        }).join("")}
+        <div class="media-window">
+          <div class="media-window-head">
+            <span>文件名</span>
+            <span>大小</span>
+            <span>上传时间</span>
+            <span>所属 Agent</span>
+          </div>
+          ${entries.map(({ node, item }) => {
+            const videoPath = item.video_path || item.path || item.name;
+            const nodeId = String(node.id || "");
+            const selected = checkedPath && checkedNodeId === nodeId && checkedPath === videoPath;
+            const current = nodeId === String(selectedNodeId);
+            const name = item.name || videoPath;
+            return `
+              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
+                <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                <span class="muted">${escapeHtml(fmtBytes(item.size || 0))}</span>
+                <span class="muted">${escapeHtml(item.modified_label || "--")}</span>
+                <span title="${escapeHtml(node.name || node.id || "Agent")}">${escapeHtml(node.name || node.id || "Agent")}</span>
+                <input data-media-check type="radio" name="media" value="${escapeHtml(name)}" data-node-id="${escapeHtml(nodeId)}" data-video-path="${escapeHtml(videoPath)}" ${selected ? "checked" : ""} hidden>
+              </div>
+            `;
+          }).join("")}
+        </div>
       `;
     }
 
@@ -1539,7 +1607,7 @@ HTML = r"""
         });
         return;
       }
-      refs.pushSelectedBtn.disabled = true;
+      if (refs.pushSelectedBtn) refs.pushSelectedBtn.disabled = true;
       renderTransfer({
         status: "running",
         badge: "共享中",
@@ -1606,7 +1674,7 @@ HTML = r"""
           message: friendlyError(error, "共享失败"),
         });
       } finally {
-        refs.pushSelectedBtn.disabled = false;
+        if (refs.pushSelectedBtn) refs.pushSelectedBtn.disabled = false;
       }
     }
 
@@ -1776,6 +1844,33 @@ HTML = r"""
       }
     }
 
+    function selectMediaRow(row) {
+      document.querySelectorAll("[data-media-row].selected").forEach((item) => item.classList.remove("selected"));
+      row.classList.add("selected");
+      const input = row.querySelector("[data-media-check]");
+      if (input) input.checked = true;
+    }
+
+    function hideMediaMenu() {
+      refs.mediaContextMenu.classList.remove("open");
+      refs.mediaContextMenu.style.left = "";
+      refs.mediaContextMenu.style.top = "";
+      contextMediaRow = null;
+    }
+
+    function showMediaMenu(event, row) {
+      event.preventDefault();
+      selectMediaRow(row);
+      contextMediaRow = row;
+      refs.mediaContextMenu.classList.add("open");
+      const menuWidth = refs.mediaContextMenu.offsetWidth || 160;
+      const menuHeight = refs.mediaContextMenu.offsetHeight || 170;
+      const left = Math.min(event.clientX, window.innerWidth - menuWidth - 8);
+      const top = Math.min(event.clientY, window.innerHeight - menuHeight - 8);
+      refs.mediaContextMenu.style.left = `${Math.max(8, left)}px`;
+      refs.mediaContextMenu.style.top = `${Math.max(8, top)}px`;
+    }
+
     async function handleNodeAction(action, nodeId) {
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const nodeName = node?.name || nodeId;
@@ -1841,18 +1936,46 @@ HTML = r"""
       renderStreamControls();
     });
     refs.mediaList.addEventListener("click", (event) => {
-      const actionButton = event.target.closest("[data-media-action]");
-      if (actionButton) {
-        event.preventDefault();
-        event.stopPropagation();
-        const row = actionButton.closest("[data-media-row]");
-        if (row) handleMediaAction(actionButton.dataset.mediaAction, row);
-        return;
-      }
+      hideMediaMenu();
       const row = event.target.closest("[data-media-row]");
       if (!row) return;
-      const input = row.querySelector("[data-media-check]");
-      if (input) input.checked = true;
+      selectMediaRow(row);
+    });
+    refs.mediaList.addEventListener("dblclick", (event) => {
+      const row = event.target.closest("[data-media-row]");
+      if (row) handleMediaAction("inspect", row);
+    });
+    refs.mediaList.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const row = event.target.closest("[data-media-row]");
+      if (!row) return;
+      event.preventDefault();
+      selectMediaRow(row);
+      handleMediaAction("inspect", row);
+    });
+    refs.mediaList.addEventListener("contextmenu", (event) => {
+      const row = event.target.closest("[data-media-row]");
+      if (!row) return;
+      showMediaMenu(event, row);
+    });
+    refs.mediaContextMenu.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-media-menu-action]");
+      if (!button || !contextMediaRow) return;
+      const row = contextMediaRow;
+      const action = button.dataset.mediaMenuAction;
+      hideMediaMenu();
+      if (action === "share") {
+        selectMediaRow(row);
+        pushSelectedMedia();
+      } else {
+        handleMediaAction(action, row);
+      }
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest("#mediaContextMenu")) hideMediaMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") hideMediaMenu();
     });
     refs.refreshBtn.addEventListener("click", refreshAll);
     refs.uploadBtn.addEventListener("click", uploadMedia);
@@ -1862,7 +1985,7 @@ HTML = r"""
     refs.auditBtn.addEventListener("click", showAudit);
     refs.tailscaleStatusBtn.addEventListener("click", showTailscaleStatus);
     refs.tailscaleConnectBtn.addEventListener("click", connectTailscale);
-    refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
+    if (refs.pushSelectedBtn) refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
     refs.previewTuneBtn.addEventListener("click", previewTune);
     refs.applyTuneBtn.addEventListener("click", applyLastTune);
     refs.smartStartBtn.addEventListener("click", smartStart);
