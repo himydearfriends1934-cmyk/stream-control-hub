@@ -102,30 +102,30 @@ HTML = r"""
         linear-gradient(135deg, #08100d, #111917 45%, #090d0c);
       font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
     }
-    .wrap { max-width: 1500px; margin: 0 auto; padding: 18px; }
+    .wrap { max-width: 1680px; margin: 0 auto; padding: 12px; }
     .hero {
       border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 18px;
+      border-radius: 14px;
+      padding: 12px 14px;
       background: rgba(19, 32, 28, 0.88);
       display: grid;
       grid-template-columns: 1fr auto;
-      gap: 16px;
+      gap: 12px;
       align-items: center;
     }
-    h1 { margin: 0; font-size: 30px; letter-spacing: -0.03em; }
-    p { color: var(--muted); margin: 8px 0 0; line-height: 1.6; }
-    .grid { display: grid; grid-template-columns: minmax(620px, 1fr) minmax(390px, 420px); gap: 12px; margin-top: 12px; align-items: start; }
-    .side-stack { display: grid; gap: 12px; align-content: start; }
-    .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    h1 { margin: 0; font-size: 26px; letter-spacing: 0; }
+    p { color: var(--muted); margin: 5px 0 0; line-height: 1.45; }
+    .grid { display: grid; grid-template-columns: minmax(700px, 1fr) minmax(360px, 400px); gap: 10px; margin-top: 10px; align-items: start; }
+    .side-stack { display: grid; gap: 10px; align-content: start; }
+    .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 0.9fr 1.15fr 1.35fr; gap: 10px; }
     .card {
       border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 12px;
+      border-radius: 12px;
+      padding: 10px;
       background: rgba(19, 32, 28, 0.9);
       box-shadow: 0 18px 60px rgba(0,0,0,0.18);
     }
-    .card h2 { margin: 0 0 12px; font-size: 18px; }
+    .card h2 { margin: 0 0 8px; font-size: 16px; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; }
     button, input, select {
       border: 1px solid var(--line);
@@ -141,14 +141,14 @@ HTML = r"""
     button.tiny { padding: 7px 8px; font-size: 12px; border-radius: 8px; white-space: nowrap; }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
     input[type=file] { width: 100%; }
-    .media-list, .log { display: grid; gap: 10px; }
+    .media-list, .log { display: grid; gap: 8px; }
     .node, .media {
       display: grid;
       grid-template-columns: auto 1fr auto;
       gap: 10px;
       align-items: center;
-      padding: 10px;
-      border-radius: 12px;
+      padding: 8px;
+      border-radius: 10px;
       border: 1px solid rgba(49, 89, 76, 0.8);
       background: rgba(25, 43, 37, 0.78);
     }
@@ -168,7 +168,7 @@ HTML = r"""
     .media-window {
       border: 1px solid rgba(49, 89, 76, 0.85);
       border-radius: 8px;
-      max-height: 340px;
+      max-height: 400px;
       overflow: auto;
       background: rgba(7, 18, 14, 0.66);
     }
@@ -183,7 +183,7 @@ HTML = r"""
       position: sticky;
       top: 0;
       z-index: 1;
-      padding: 8px 10px;
+      padding: 7px 9px;
       color: var(--muted);
       font-size: 12px;
       font-weight: 900;
@@ -192,7 +192,7 @@ HTML = r"""
     }
     .media-file-row {
       width: 100%;
-      padding: 8px 10px;
+      padding: 7px 9px;
       border: 0;
       border-bottom: 1px solid rgba(49, 89, 76, 0.42);
       border-radius: 0;
@@ -244,8 +244,8 @@ HTML = r"""
       flex-wrap: wrap;
       gap: 7px;
       align-items: center;
-      margin: -2px 0 10px;
-      padding: 7px 9px;
+      margin: 0;
+      padding: 6px 8px;
       border: 1px solid rgba(49, 89, 76, 0.7);
       border-radius: 10px;
       background: rgba(8, 17, 14, 0.38);
@@ -256,18 +256,15 @@ HTML = r"""
     .agent-compact span,
     .network-compact span {
       display: inline-flex;
-      min-height: 24px;
+      min-height: 22px;
       align-items: center;
-      padding: 3px 7px;
+      padding: 2px 7px;
       border-radius: 999px;
       background: rgba(54, 211, 153, 0.08);
     }
     .agent-compact strong,
     .network-compact strong { color: #d6fff0; }
-    .network-compact {
-      margin-top: -4px;
-      margin-bottom: 10px;
-    }
+    .monitor-compact-row { display: grid; grid-template-columns: 0.95fr 1.2fr; gap: 8px; margin-bottom: 8px; }
     .network-compact .compact-title {
       background: transparent;
       color: #d6fff0;
@@ -275,7 +272,8 @@ HTML = r"""
       font-size: 13px;
     }
     .command-strip {
-      margin-top: 12px;
+      margin-top: 10px;
+      padding: 10px;
       border-color: rgba(251, 191, 36, 0.45);
       background:
         radial-gradient(circle at 8% 0%, rgba(251, 191, 36, 0.14), transparent 24%),
@@ -286,14 +284,14 @@ HTML = r"""
       justify-content: space-between;
       gap: 12px;
       align-items: flex-start;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
     }
-    .command-head h2 { margin: 0 0 4px; font-size: 18px; }
-    .command-head p { margin: 0; font-size: 13px; }
+    .command-head h2 { margin: 0 0 3px; font-size: 17px; }
+    .command-head p { margin: 0; font-size: 12px; }
     .command-grid {
       display: grid;
-      grid-template-columns: 1.1fr 1.35fr 1.45fr 1.25fr auto;
-      gap: 10px;
+      grid-template-columns: minmax(150px, 1fr) minmax(190px, 1.05fr) minmax(250px, 1.35fr) minmax(210px, 1.1fr) 136px;
+      gap: 8px;
       align-items: end;
     }
     .command-field { display: grid; gap: 5px; min-width: 0; }
@@ -305,27 +303,52 @@ HTML = r"""
       display: grid;
       grid-template-columns: 1fr;
       gap: 7px;
-      min-width: 136px;
+      min-width: 0;
     }
-    .command-actions button { padding: 8px 10px; }
+    .command-actions button { padding: 8px 9px; }
+    .command-advanced {
+      grid-column: 1 / -1;
+      margin-top: 2px;
+      border: 1px solid rgba(49, 89, 76, 0.7);
+      border-radius: 10px;
+      background: rgba(7, 18, 14, 0.48);
+    }
+    .command-advanced summary {
+      cursor: pointer;
+      padding: 8px 10px;
+      color: #d6fff0;
+      font-size: 12px;
+      font-weight: 900;
+      list-style-position: inside;
+    }
+    .command-advanced[open] summary {
+      border-bottom: 1px solid rgba(49, 89, 76, 0.55);
+    }
+    .command-advanced-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1.15fr 1fr 126px;
+      gap: 8px;
+      padding: 8px;
+      align-items: end;
+    }
     .tune-output {
       grid-column: 1 / -1;
-      min-height: 70px;
-      max-height: 140px;
+      min-height: 54px;
+      max-height: 96px;
       margin-top: 2px;
     }
-    .monitor-card { min-height: 620px; }
+    .monitor-card { min-height: 0; }
     .monitor-heading {
       display: flex;
       justify-content: space-between;
       gap: 12px;
       align-items: flex-start;
     }
-    .monitor-heading p { margin: 0; font-size: 13px; }
+    .monitor-heading p { margin: 0; font-size: 12px; }
     .node-monitor {
-      min-height: 540px;
-      border-radius: 16px;
-      padding: 12px;
+      min-height: 0;
+      border-radius: 12px;
+      padding: 10px;
       border: 1px solid rgba(54, 211, 153, 0.35);
       background:
         linear-gradient(rgba(54, 211, 153, 0.035) 1px, transparent 1px),
@@ -339,25 +362,25 @@ HTML = r"""
     .monitor-hero {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
-      gap: 10px;
+      gap: 8px;
       align-items: start;
-      margin-bottom: 10px;
-      padding-bottom: 10px;
+      margin-bottom: 8px;
+      padding-bottom: 8px;
       border-bottom: 1px solid rgba(49, 89, 76, 0.55);
     }
-    .monitor-hero h3 { margin: 0; font-size: 24px; letter-spacing: -0.03em; }
-    .monitor-hero small { color: var(--muted); display: block; margin-top: 4px; }
+    .monitor-hero h3 { margin: 0; font-size: 21px; letter-spacing: 0; }
+    .monitor-hero small { color: var(--muted); display: block; margin-top: 3px; }
     .machine-compact {
       display: flex;
       flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 7px;
+      gap: 5px;
+      margin-top: 6px;
     }
     .machine-compact span {
       display: inline-flex;
-      min-height: 22px;
+      min-height: 20px;
       align-items: center;
-      padding: 2px 7px;
+      padding: 2px 6px;
       border-radius: 999px;
       background: rgba(54, 211, 153, 0.08);
       color: var(--muted);
@@ -365,21 +388,21 @@ HTML = r"""
       font-weight: 800;
     }
     .machine-compact strong { color: #d6fff0; }
-    .health-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+    .health-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; margin-bottom: 8px; }
     .health-donut {
       display: grid;
-      grid-template-columns: 58px minmax(0, 1fr);
-      gap: 8px;
+      grid-template-columns: 46px minmax(0, 1fr);
+      gap: 7px;
       align-items: center;
-      padding: 8px;
+      padding: 6px;
       border: 1px solid rgba(49, 89, 76, 0.75);
-      border-radius: 12px;
+      border-radius: 10px;
       background: rgba(8, 17, 14, 0.38);
       min-width: 0;
     }
     .donut {
-      width: 54px;
-      height: 54px;
+      width: 44px;
+      height: 44px;
       border-radius: 50%;
       display: grid;
       place-items: center;
@@ -387,57 +410,57 @@ HTML = r"""
         radial-gradient(circle at center, #07110e 0 54%, transparent 55%),
         conic-gradient(var(--donut-color, var(--accent)) var(--value, 0%), rgba(255,255,255,0.08) 0);
       box-shadow: inset 0 0 14px rgba(0,0,0,0.24);
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 900;
     }
-    .donut-info small { color: var(--muted); display: block; font-size: 12px; }
-    .donut-info strong { display: block; font-size: 16px; line-height: 1.2; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .donut-info small { color: var(--muted); display: block; font-size: 11px; }
+    .donut-info strong { display: block; font-size: 14px; line-height: 1.15; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .monitor-panel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .monitor-panel {
       border: 1px solid rgba(49, 89, 76, 0.75);
-      border-radius: 12px;
-      padding: 9px;
+      border-radius: 10px;
+      padding: 8px;
       background: rgba(9, 17, 14, 0.58);
     }
-    .monitor-panel h4 { margin: 0 0 6px; font-size: 14px; color: #d6fff0; }
+    .monitor-panel h4 { margin: 0 0 5px; font-size: 13px; color: #d6fff0; }
     .node-table-card { min-height: 0; }
     .node-table-toolbar {
       display: flex;
       justify-content: space-between;
       gap: 10px;
       align-items: center;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
     }
     .node-table-toolbar p { margin: 0; font-size: 13px; }
     .node-table {
       display: grid;
-      gap: 7px;
-      max-height: 430px;
+      gap: 6px;
+      max-height: 320px;
       overflow: auto;
       padding-right: 3px;
     }
     .node-table-head,
     .node-row {
       display: grid;
-      grid-template-columns: 26px minmax(0, 1fr) 58px 72px 136px;
-      gap: 8px;
+      grid-template-columns: 24px minmax(0, 1fr) 52px 64px 126px;
+      gap: 6px;
       align-items: center;
     }
     .node-table-head {
       position: sticky;
       top: 0;
       z-index: 1;
-      padding: 7px 10px;
+      padding: 6px 8px;
       color: var(--muted);
       font-size: 12px;
       background: rgba(19, 32, 28, 0.96);
       border-bottom: 1px solid rgba(49, 89, 76, 0.55);
     }
     .node-row {
-      min-height: 50px;
-      padding: 7px 9px;
+      min-height: 44px;
+      padding: 6px 8px;
       border: 1px solid rgba(49, 89, 76, 0.75);
-      border-radius: 12px;
+      border-radius: 10px;
       background: rgba(25, 43, 37, 0.72);
       cursor: pointer;
       transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease;
@@ -454,15 +477,15 @@ HTML = r"""
     .dot { width: 9px; height: 9px; border-radius: 999px; background: #fbbf24; box-shadow: 0 0 16px rgba(251, 191, 36, 0.35); }
     .dot.ok { background: var(--accent); box-shadow: 0 0 16px rgba(54, 211, 153, 0.45); }
     .dot.bad { background: var(--danger); box-shadow: 0 0 16px rgba(251, 113, 133, 0.4); }
-    .row-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .row-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
     .empty-state {
-      min-height: 220px;
+      min-height: 180px;
       display: grid;
       place-items: center;
       color: var(--muted);
       text-align: center;
       border: 1px dashed rgba(49, 89, 76, 0.8);
-      border-radius: 14px;
+      border-radius: 10px;
     }
     .node-detail {
       display: grid;
@@ -482,15 +505,15 @@ HTML = r"""
     }
     .node-title strong { display: block; font-size: 18px; }
     .node-title small { color: var(--muted); display: block; margin-top: 3px; }
-    .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
     .metric {
       border: 1px solid rgba(49, 89, 76, 0.75);
-      border-radius: 10px;
-      padding: 8px;
+      border-radius: 8px;
+      padding: 6px;
       background: rgba(8, 17, 14, 0.35);
     }
     .metric small, .mini-table small { color: var(--muted); display: block; font-size: 12px; }
-    .metric strong { display: block; font-size: 20px; margin-top: 2px; }
+    .metric strong { display: block; font-size: 17px; margin-top: 2px; }
     .bar {
       height: 8px;
       border-radius: 999px;
@@ -508,30 +531,32 @@ HTML = r"""
     .mini-row {
       display: grid;
       grid-template-columns: 112px minmax(0, 1fr);
-      gap: 8px;
-      padding: 5px 0;
+      gap: 7px;
+      padding: 4px 0;
       border-bottom: 1px solid rgba(49, 89, 76, 0.4);
     }
     .mini-row:last-child { border-bottom: none; }
     .mono { font-family: "Cascadia Mono", "Consolas", monospace; word-break: break-word; }
     .compact-card { padding: 10px; }
+    .log-card { display: grid; gap: 8px; }
+    .log-card pre { min-height: 58px; max-height: 120px; }
     .node strong, .media strong { display: block; }
     .node small, .media small { color: var(--muted); }
-    .resource-card { display: grid; gap: 10px; }
-    .resource-card .split { grid-template-columns: 1fr; }
+    .resource-card { display: grid; gap: 8px; }
+    .resource-card .split { grid-template-columns: 1fr; gap: 8px; }
     .resource-card .actions { display: grid; grid-template-columns: 1fr; }
     .resource-card .media-list { overflow: visible; padding-right: 0; }
     .transfer-box {
       border: 1px solid rgba(49, 89, 76, 0.85);
       border-radius: 8px;
-      padding: 10px;
+      padding: 8px;
       background: rgba(7, 18, 14, 0.78);
-      min-height: 122px;
+      min-height: 106px;
       display: grid;
-      gap: 8px;
+      gap: 7px;
     }
     .transfer-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 900; }
-    .progress-track { height: 12px; border-radius: 999px; background: rgba(255,255,255,0.1); overflow: hidden; }
+    .progress-track { height: 10px; border-radius: 999px; background: rgba(255,255,255,0.1); overflow: hidden; }
     .progress-fill { width: var(--value, 0%); height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.25s ease; }
     .transfer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .transfer-grid small { display: block; color: var(--muted); font-size: 11px; }
@@ -554,8 +579,8 @@ HTML = r"""
       white-space: pre-wrap;
       word-break: break-word;
       margin: 0;
-      min-height: 120px;
-      max-height: 360px;
+      min-height: 90px;
+      max-height: 240px;
       overflow: auto;
       padding: 12px;
       border-radius: 12px;
@@ -565,7 +590,7 @@ HTML = r"""
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     @media (max-width: 1080px) {
-      .grid, .split, .hero, .node-detail, .bottom-section, .health-strip, .monitor-panel-grid, .command-grid { grid-template-columns: 1fr; }
+      .grid, .split, .hero, .node-detail, .bottom-section, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .bottom-section { grid-column: auto; }
       .monitor-card, .node-table-card { min-height: auto; }
       .node-monitor { min-height: 420px; }
@@ -633,35 +658,40 @@ HTML = r"""
           <button id="previewTuneBtn">预览调优</button>
           <button class="primary" id="smartStartBtn">Smart Start</button>
         </div>
-        <div class="command-field">
-          <label>RTMP 地址</label>
-          <input id="streamUrlInput" type="text" value="rtmp://a.rtmp.youtube.com/live2">
-        </div>
-        <div class="command-field">
-          <label>分辨率 / FPS</label>
-          <div class="command-pair">
-            <input id="resolutionInput" type="text" value="1280x720" placeholder="分辨率">
-            <input id="fpsInput" type="number" value="30" min="15" max="60" placeholder="FPS">
+        <details class="command-advanced" id="commandAdvanced">
+          <summary>高级参数 / 调优输出</summary>
+          <div class="command-advanced-grid">
+            <div class="command-field">
+              <label>RTMP 地址</label>
+              <input id="streamUrlInput" type="text" value="rtmp://a.rtmp.youtube.com/live2">
+            </div>
+            <div class="command-field">
+              <label>分辨率 / FPS</label>
+              <div class="command-pair">
+                <input id="resolutionInput" type="text" value="1280x720" placeholder="分辨率">
+                <input id="fpsInput" type="number" value="30" min="15" max="60" placeholder="FPS">
+              </div>
+            </div>
+            <div class="command-field">
+              <label>码率</label>
+              <div class="command-pair">
+                <input id="videoBitrateInput" type="number" value="4500" min="800" placeholder="视频 kbps">
+                <input id="audioBitrateInput" type="number" value="192" min="64" placeholder="音频 kbps">
+              </div>
+            </div>
+            <div class="command-field">
+              <label>编码 / 关键帧</label>
+              <div class="command-pair">
+                <input id="presetInput" type="text" value="veryfast" placeholder="preset">
+                <input id="keyframeInput" type="number" value="2" min="1" max="4" placeholder="关键帧秒">
+              </div>
+            </div>
+            <div class="command-actions">
+              <button id="applyTuneBtn">应用推荐</button>
+            </div>
+            <pre id="tuneBox" class="tune-output">选择右侧节点和服务器视频后，可以预览推荐参数；Smart Start 会停止重复推流并启动一个干净 FFmpeg。</pre>
           </div>
-        </div>
-        <div class="command-field">
-          <label>码率</label>
-          <div class="command-pair">
-            <input id="videoBitrateInput" type="number" value="4500" min="800" placeholder="视频 kbps">
-            <input id="audioBitrateInput" type="number" value="192" min="64" placeholder="音频 kbps">
-          </div>
-        </div>
-        <div class="command-field">
-          <label>编码 / 关键帧</label>
-          <div class="command-pair">
-            <input id="presetInput" type="text" value="veryfast" placeholder="preset">
-            <input id="keyframeInput" type="number" value="2" min="1" max="4" placeholder="关键帧秒">
-          </div>
-        </div>
-        <div class="command-actions">
-          <button id="applyTuneBtn">应用推荐</button>
-        </div>
-        <pre id="tuneBox" class="tune-output">选择右侧节点和服务器视频后，可以预览推荐参数；Smart Start 会停止重复推流并启动一个干净 FFmpeg。</pre>
+        </details>
       </div>
     </section>
 
@@ -714,13 +744,6 @@ HTML = r"""
         </div>
       </div>
 
-      <div class="card">
-        <h2>策略 / 审计 / 操作日志</h2>
-        <pre id="updateBox">点击 Upload Policy 或 Push Audit 查看系统规则与最近推送记录。</pre>
-        <div style="height: 10px;"></div>
-        <pre id="logBox">就绪。</pre>
-      </div>
-
       <div class="bottom-section">
         <div class="card compact-card">
           <h2>GitHub 更新</h2>
@@ -746,6 +769,11 @@ HTML = r"""
             <button id="tailscaleStatusBtn">Tailscale 状态</button>
             <button class="primary" id="tailscaleConnectBtn">连接 Tailscale</button>
           </div>
+        </div>
+        <div class="card compact-card log-card">
+          <h2>策略 / 审计 / 操作日志</h2>
+          <pre id="updateBox">点击 Upload Policy 或 Push Audit 查看系统规则与最近推送记录。</pre>
+          <pre id="logBox">就绪。</pre>
         </div>
       </div>
     </section>
@@ -789,6 +817,7 @@ HTML = r"""
       previewTuneBtn: document.getElementById("previewTuneBtn"),
       smartStartBtn: document.getElementById("smartStartBtn"),
       applyTuneBtn: document.getElementById("applyTuneBtn"),
+      commandAdvanced: document.getElementById("commandAdvanced"),
       tuneBox: document.getElementById("tuneBox"),
       updateBox: document.getElementById("updateBox"),
       uploadBox: document.getElementById("uploadBox"),
@@ -1126,24 +1155,26 @@ HTML = r"""
           ${donut("推流", stream.running ? "运行中" : "未推流", stream.running ? 100 : 0, stream.running ? "var(--accent)" : "var(--danger)")}
         </div>
 
-        <div class="agent-compact">
-          <span>Agent <strong>${escapeHtml(agent.mode || "compatible")}</strong></span>
-          <span>版本 <strong>${escapeHtml(agent.version || "--")}</strong></span>
-          <span>${agent.headless ? "Headless" : "兼容模式"}</span>
-          <span>上传 <strong>${publicUpload.supported === false ? "直传" : "票据直传"}</strong></span>
-          <span>最近路由 <strong>${escapeHtml(transfer.last_route || "--")}</strong></span>
-          <span>最近错误 <strong>${escapeHtml(transfer.last_error || "无")}</strong></span>
-        </div>
+        <div class="monitor-compact-row">
+          <div class="agent-compact">
+            <span>Agent <strong>${escapeHtml(agent.mode || "compatible")}</strong></span>
+            <span>版本 <strong>${escapeHtml(agent.version || "--")}</strong></span>
+            <span>${agent.headless ? "Headless" : "兼容模式"}</span>
+            <span>上传 <strong>${publicUpload.supported === false ? "直传" : "票据直传"}</strong></span>
+            <span>路由 <strong>${escapeHtml(transfer.last_route || "--")}</strong></span>
+            <span>错误 <strong>${escapeHtml(transfer.last_error || "无")}</strong></span>
+          </div>
 
-        <div class="network-compact">
-          <span class="compact-title">网络</span>
-          <span>上行 <strong>${escapeHtml(fmtRate(net.current_upload_bps || 0))}</strong></span>
-          <span>下行 <strong>${escapeHtml(fmtRate(net.current_download_bps || 0))}</strong></span>
-          <span>累计发 <strong>${escapeHtml(fmtBytes(net.bytes_sent || 0))}</strong></span>
-          <span>累计收 <strong>${escapeHtml(fmtBytes(net.bytes_recv || 0))}</strong></span>
-          <span>流量 <strong>${escapeHtml(`${Number(quota.total_percent || 0).toFixed(2)}%`)}</strong></span>
-          <span>剩余 <strong>${escapeHtml(fmtBytes(quota.remaining || 0))}</strong></span>
-          <span>线路 <strong>${escapeHtml(net.rate_label || "--")}</strong></span>
+          <div class="network-compact">
+            <span class="compact-title">网络</span>
+            <span>上行 <strong>${escapeHtml(fmtRate(net.current_upload_bps || 0))}</strong></span>
+            <span>下行 <strong>${escapeHtml(fmtRate(net.current_download_bps || 0))}</strong></span>
+            <span>累计发 <strong>${escapeHtml(fmtBytes(net.bytes_sent || 0))}</strong></span>
+            <span>累计收 <strong>${escapeHtml(fmtBytes(net.bytes_recv || 0))}</strong></span>
+            <span>流量 <strong>${escapeHtml(`${Number(quota.total_percent || 0).toFixed(2)}%`)}</strong></span>
+            <span>剩余 <strong>${escapeHtml(fmtBytes(quota.remaining || 0))}</strong></span>
+            <span>线路 <strong>${escapeHtml(net.rate_label || "--")}</strong></span>
+          </div>
         </div>
 
         <div class="monitor-panel-grid">
@@ -1682,6 +1713,7 @@ HTML = r"""
     }
 
     async function previewTune() {
+      if (refs.commandAdvanced) refs.commandAdvanced.open = true;
       const payload = streamPayload({ includeKey: false });
       if (!payload.node_id || !payload.video_path) {
         refs.tuneBox.textContent = "请先选择右侧节点，并选择该节点服务器视频。";
@@ -1703,6 +1735,7 @@ HTML = r"""
     }
 
     function applyLastTune() {
+      if (refs.commandAdvanced) refs.commandAdvanced.open = true;
       if (!lastTuneRecommendation?.ok) {
         refs.tuneBox.textContent = "还没有可应用的推荐参数，请先点“预览智能调优”。";
         return;
