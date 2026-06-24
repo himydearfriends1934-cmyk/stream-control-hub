@@ -1027,6 +1027,7 @@ def api_start_stream():
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=log_file,
+            start_new_session=True,
         )
     finally:
         log_file.close()
