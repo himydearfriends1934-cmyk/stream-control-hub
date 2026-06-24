@@ -116,7 +116,7 @@ HTML = r"""
     }
     h1 { margin: 0; font-size: 26px; letter-spacing: 0; }
     p { color: var(--muted); margin: 5px 0 0; line-height: 1.45; }
-    .grid { display: grid; grid-template-columns: minmax(700px, 1fr) minmax(360px, 400px); gap: 10px; margin-top: 10px; align-items: start; }
+    .grid { display: grid; grid-template-columns: minmax(560px, 1fr) minmax(430px, 520px); gap: 10px; margin-top: 10px; align-items: start; }
     .side-stack { display: grid; gap: 10px; align-content: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 0.9fr 1.15fr 1.35fr; gap: 10px; }
     .card {
@@ -239,6 +239,62 @@ HTML = r"""
     }
     .media-context-menu button:hover { background: rgba(54, 211, 153, 0.12); }
     .media-context-menu button.danger:hover { background: rgba(251, 113, 133, 0.16); }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 90;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(1, 7, 5, 0.78);
+    }
+    .modal-backdrop.open { display: flex; }
+    .wizard-modal {
+      width: min(920px, 100%);
+      max-height: min(760px, calc(100vh - 36px));
+      display: grid;
+      gap: 12px;
+      overflow: auto;
+      border: 1px solid rgba(54, 211, 153, 0.45);
+      border-radius: 12px;
+      padding: 14px;
+      background: #0d1a16;
+      box-shadow: 0 24px 80px rgba(0,0,0,0.45);
+    }
+    .wizard-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .wizard-head h2 { margin: 0 0 4px; }
+    .wizard-head p { margin: 0; font-size: 13px; }
+    .wizard-close { min-width: 42px; padding: 8px 10px; }
+    .wizard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .wizard-field { display: grid; gap: 5px; min-width: 0; }
+    .wizard-field label { color: var(--muted); font-size: 12px; font-weight: 900; }
+    .wizard-step-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .wizard-step {
+      display: grid;
+      gap: 5px;
+      align-content: start;
+      min-height: 92px;
+      padding: 10px;
+      border: 1px solid rgba(49, 89, 76, 0.78);
+      border-radius: 10px;
+      background: rgba(7, 18, 14, 0.58);
+    }
+    .wizard-step strong { font-size: 13px; }
+    .wizard-step small { color: var(--muted); line-height: 1.35; }
+    .wizard-step.done { border-color: rgba(54, 211, 153, 0.9); }
+    .wizard-step.fail { border-color: rgba(251, 113, 133, 0.85); }
+    .wizard-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .wizard-log {
+      min-height: 170px;
+      max-height: 260px;
+      font-size: 12px;
+    }
     .agent-compact,
     .network-compact {
       display: flex;
@@ -389,7 +445,7 @@ HTML = r"""
       font-weight: 800;
     }
     .machine-compact strong { color: #d6fff0; }
-    .health-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; margin-bottom: 8px; }
+    .health-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-bottom: 8px; }
     .health-donut {
       display: grid;
       grid-template-columns: 46px minmax(0, 1fr);
@@ -443,7 +499,7 @@ HTML = r"""
     .node-table-head,
     .node-row {
       display: grid;
-      grid-template-columns: 24px minmax(0, 1fr) 52px 64px 126px;
+      grid-template-columns: 22px minmax(70px, 1fr) 48px 56px 190px;
       gap: 6px;
       align-items: center;
     }
@@ -478,7 +534,8 @@ HTML = r"""
     .dot { width: 9px; height: 9px; border-radius: 999px; background: #fbbf24; box-shadow: 0 0 16px rgba(251, 191, 36, 0.35); }
     .dot.ok { background: var(--accent); box-shadow: 0 0 16px rgba(54, 211, 153, 0.45); }
     .dot.bad { background: var(--danger); box-shadow: 0 0 16px rgba(251, 113, 133, 0.4); }
-    .row-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+    .row-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; }
+    .row-actions button.tiny { padding-left: 6px; padding-right: 6px; font-size: 11px; }
     .empty-state {
       min-height: 180px;
       display: grid;
@@ -601,6 +658,7 @@ HTML = r"""
       .node-state, .row-actions { grid-column: 2; }
       .media-window-head,
       .media-file-row { grid-template-columns: minmax(130px, 1.4fr) 74px 116px minmax(82px, 0.8fr); }
+      .wizard-grid, .wizard-step-grid, .wizard-actions { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -760,15 +818,10 @@ HTML = r"""
         </div>
         <div class="card compact-card">
           <h2>Tailscale 连接</h2>
-          <p>输入一次性 auth key，Hub 会先检查并自动安装/修复 Tailscale，然后接入 tailnet。</p>
-          <div class="split">
-            <input id="tailscaleAuthInput" type="password" autocomplete="off" placeholder="tskey-auth-...">
-            <input id="tailscaleHostInput" type="text" value="stream-control-hub" placeholder="hostname">
-          </div>
-          <div style="height: 10px;"></div>
+          <p>打开向导，按检查、安装/修复、登录、验证四步接入 tailnet。</p>
           <div class="actions">
-            <button id="tailscaleStatusBtn">Tailscale 状态</button>
-            <button class="primary" id="tailscaleConnectBtn">连接 Tailscale</button>
+            <button class="primary" id="tailscaleWizardBtn">打开 Tailscale 向导</button>
+            <button id="tailscaleStatusBtn">快速状态</button>
           </div>
         </div>
         <div class="card compact-card log-card">
@@ -778,6 +831,53 @@ HTML = r"""
         </div>
       </div>
     </section>
+  </div>
+
+  <div class="modal-backdrop" id="tailscaleWizardModal" aria-hidden="true">
+    <div class="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="tailscaleWizardTitle">
+      <div class="wizard-head">
+        <div>
+          <h2 id="tailscaleWizardTitle">Tailscale 安装向导</h2>
+          <p>按步骤检查环境、安装或修复 Tailscale、使用一次性 auth key 登录，然后验证 100.x 地址。</p>
+        </div>
+        <button class="wizard-close" id="tailscaleWizardClose" title="关闭">X</button>
+      </div>
+      <div class="wizard-grid">
+        <div class="wizard-field">
+          <label>一次性 auth key</label>
+          <input id="tailscaleAuthInput" type="password" autocomplete="off" placeholder="tskey-auth-...">
+        </div>
+        <div class="wizard-field">
+          <label>设备名称</label>
+          <input id="tailscaleHostInput" type="text" value="stream-control-hub" placeholder="stream-control-hub">
+        </div>
+      </div>
+      <div class="wizard-step-grid">
+        <div class="wizard-step" data-tailscale-step="precheck">
+          <strong>1. 环境检查</strong>
+          <small>包管理器、权限、TUN、tailscale.com 连通性。</small>
+        </div>
+        <div class="wizard-step" data-tailscale-step="install">
+          <strong>2. 安装 / 修复</strong>
+          <small>缺失时安装 Tailscale，并启用 tailscaled。</small>
+        </div>
+        <div class="wizard-step" data-tailscale-step="connect">
+          <strong>3. 登录连接</strong>
+          <small>使用 auth key 执行 tailscale up。</small>
+        </div>
+        <div class="wizard-step" data-tailscale-step="verify">
+          <strong>4. 验证状态</strong>
+          <small>读取本机 100.x 地址和 tailnet peers。</small>
+        </div>
+      </div>
+      <div class="wizard-actions">
+        <button id="tailscalePrecheckBtn">1. 检查</button>
+        <button id="tailscaleInstallBtn">2. 安装/修复</button>
+        <button class="primary" id="tailscaleConnectBtn">3. 登录连接</button>
+        <button id="tailscaleVerifyBtn">4. 验证</button>
+      </div>
+      <pre class="wizard-log" id="tailscaleWizardLog">打开向导后，先点“1. 检查”。如果显示环境可安装，再继续安装/修复和登录连接。</pre>
+    </div>
   </div>
 
   <script>
@@ -795,10 +895,17 @@ HTML = r"""
       policyBtn: document.getElementById("policyBtn"),
       auditBtn: document.getElementById("auditBtn"),
       upgradeSelectedBtn: document.getElementById("upgradeSelectedBtn"),
+      tailscaleWizardBtn: document.getElementById("tailscaleWizardBtn"),
+      tailscaleWizardModal: document.getElementById("tailscaleWizardModal"),
+      tailscaleWizardClose: document.getElementById("tailscaleWizardClose"),
+      tailscaleWizardLog: document.getElementById("tailscaleWizardLog"),
       tailscaleAuthInput: document.getElementById("tailscaleAuthInput"),
       tailscaleHostInput: document.getElementById("tailscaleHostInput"),
+      tailscalePrecheckBtn: document.getElementById("tailscalePrecheckBtn"),
+      tailscaleInstallBtn: document.getElementById("tailscaleInstallBtn"),
       tailscaleStatusBtn: document.getElementById("tailscaleStatusBtn"),
       tailscaleConnectBtn: document.getElementById("tailscaleConnectBtn"),
+      tailscaleVerifyBtn: document.getElementById("tailscaleVerifyBtn"),
       mediaInput: document.getElementById("mediaInput"),
       uploadBtn: document.getElementById("uploadBtn"),
       pushSelectedBtn: document.getElementById("pushSelectedBtn"),
@@ -1115,9 +1222,7 @@ HTML = r"""
       const transfer = h.transfer || {};
       const publicUpload = h.public_upload || {};
       const videos = h.videos || [];
-      const loadText = Array.isArray(h.load_avg) ? h.load_avg.join(" / ") : (h.load_avg || "--");
-      const loadOne = Array.isArray(h.load_avg) ? Number(h.load_avg[0] || 0) : Number(String(h.load_avg || "0").split("/")[0] || 0);
-      const loadPercent = h.cpu_count ? Math.min(100, (loadOne / Math.max(1, Number(h.cpu_count))) * 100) : 0;
+      const loadText = Array.isArray(h.load_avg) && h.load_avg.length ? h.load_avg.join(" / ") : (h.load_avg || "--");
       const bitrate = stream.current_bitrate_label || (stream.current_bitrate_kbps ? `${stream.current_bitrate_kbps} Kbps` : "未知");
       const processText = stream.processes?.length ? `${stream.processes.length} 个进程` : "未检测到";
       const videoList = videos.length
@@ -1139,6 +1244,7 @@ HTML = r"""
             <small class="mono">${escapeHtml(node.base_url || "")}</small>
             <div class="machine-compact">
               <span>核心 <strong>${escapeHtml(h.cpu_count || "--")}</strong></span>
+              <span>负载 <strong>${escapeHtml(loadText)}</strong></span>
               <span>系统在线 <strong>${escapeHtml(h.uptime || "--")}</strong></span>
               <span>面板在线 <strong>${escapeHtml(h.app_uptime || "--")}</strong></span>
               <span>内存 <strong>${escapeHtml(`${fmtBytes(h.memory?.used || 0)} / ${fmtBytes(h.memory?.total || 0)}`)}</strong></span>
@@ -1152,7 +1258,6 @@ HTML = r"""
           ${donut("CPU", `${Number(h.cpu_percent || 0).toFixed(1)}%`, h.cpu_percent)}
           ${donut("内存", `${Number(h.memory?.percent || 0).toFixed(1)}%`, h.memory?.percent)}
           ${donut("硬盘", `${Number(h.disk?.percent || 0).toFixed(1)}%`, h.disk?.percent)}
-          ${donut("负载", loadText, loadPercent, "#fbbf24")}
           ${donut("推流", stream.running ? "运行中" : "未推流", stream.running ? 100 : 0, stream.running ? "var(--accent)" : "var(--danger)")}
         </div>
 
@@ -1225,6 +1330,7 @@ HTML = r"""
           <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
           <span class="node-state">${stateDot(streaming, online)}${streaming ? "推流中" : "未推流"}</span>
           <span class="row-actions">
+            <button class="tiny" data-node-action="stop-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>停止推流</button>
             <button class="tiny" data-node-action="restart-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启推流</button>
             <button class="tiny danger" data-node-action="reboot-vps" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启 VPS</button>
           </span>
@@ -1597,33 +1703,101 @@ HTML = r"""
     }
 
     async function showTailscaleStatus() {
-      refs.updateBox.textContent = "Loading Tailscale status...";
+      setTailscaleWizardOpen(true);
+      setTailscaleStep("verify", "running");
+      setTailscaleLog("正在读取 Tailscale 状态...");
       const resp = await fetch("/api/tailscale/status");
       const data = await resp.json();
+      setTailscaleStep("verify", data.ok ? "done" : "fail");
+      setTailscaleLog(data);
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
+    }
+
+    function setTailscaleWizardOpen(open) {
+      refs.tailscaleWizardModal.classList.toggle("open", open);
+      refs.tailscaleWizardModal.setAttribute("aria-hidden", open ? "false" : "true");
+    }
+
+    function setTailscaleLog(value) {
+      refs.tailscaleWizardLog.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    }
+
+    function setTailscaleStep(step, state) {
+      const el = refs.tailscaleWizardModal.querySelector(`[data-tailscale-step="${step}"]`);
+      if (!el) return;
+      el.classList.remove("done", "fail");
+      if (state === "done" || state === "fail") el.classList.add(state);
+    }
+
+    function setTailscaleBusy(busy) {
+      [refs.tailscalePrecheckBtn, refs.tailscaleInstallBtn, refs.tailscaleConnectBtn, refs.tailscaleVerifyBtn]
+        .forEach((button) => { button.disabled = busy; });
+    }
+
+    async function runTailscaleStep(step, label, action) {
+      setTailscaleWizardOpen(true);
+      setTailscaleBusy(true);
+      setTailscaleStep(step, "running");
+      setTailscaleLog(`${label}...`);
+      try {
+        const data = await action();
+        setTailscaleStep(step, data.ok ? "done" : "fail");
+        setTailscaleLog(data);
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        return data;
+      } catch (error) {
+        const data = { ok: false, message: friendlyError(error, `${label}失败`) };
+        setTailscaleStep(step, "fail");
+        setTailscaleLog(data);
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        return data;
+      } finally {
+        setTailscaleBusy(false);
+      }
+    }
+
+    async function precheckTailscale() {
+      return runTailscaleStep("precheck", "正在检查 Tailscale 安装环境", async () => {
+        const resp = await fetch("/api/tailscale/precheck");
+        return resp.json();
+      });
+    }
+
+    async function installTailscale() {
+      return runTailscaleStep("install", "正在安装或修复 Tailscale", async () => {
+        const resp = await fetch("/api/tailscale/install", {
+          method: "POST",
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({}),
+        });
+        return resp.json();
+      });
     }
 
     async function connectTailscale() {
       const auth_key = refs.tailscaleAuthInput.value.trim();
       const hostname = refs.tailscaleHostInput.value.trim() || "stream-control-hub";
       if (!auth_key) {
-        refs.updateBox.textContent = "请输入一次性 Tailscale auth key。";
+        setTailscaleWizardOpen(true);
+        setTailscaleLog("请输入一次性 Tailscale auth key。");
         return;
       }
-      refs.tailscaleConnectBtn.disabled = true;
-      refs.updateBox.textContent = "Connecting Tailscale...";
-      try {
+      const data = await runTailscaleStep("connect", "正在使用 auth key 登录 Tailscale", async () => {
         const resp = await fetch("/api/tailscale/connect", {
           method: "POST",
           headers: authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ auth_key, hostname, ssh: false, accept_routes: true }),
         });
-        const data = await resp.json();
+        return resp.json();
+      });
+      if (data.ok) {
         refs.tailscaleAuthInput.value = "";
-        refs.updateBox.textContent = JSON.stringify(data, null, 2);
-      } finally {
-        refs.tailscaleConnectBtn.disabled = false;
+        setTailscaleStep("verify", data.status?.ok ? "done" : "fail");
       }
+    }
+
+    async function verifyTailscale() {
+      return showTailscaleStatus();
     }
 
     async function pushSelectedMedia() {
@@ -1911,6 +2085,16 @@ HTML = r"""
     async function handleNodeAction(action, nodeId) {
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const nodeName = node?.name || nodeId;
+      if (action === "stop-stream") {
+        if (!confirm(`确认停止 ${nodeName} 的推流？`)) {
+          return;
+        }
+        log(`请求停止推流：${nodeName}`);
+        const data = await postNodeAction("/api/nodes/stop-stream", { node_id: nodeId });
+        log(data.ok ? `推流已停止：${nodeName}` : `停止推流失败：${data.message || nodeName}`);
+        await refreshAll();
+        return;
+      }
       if (action === "restart-stream") {
         if (!confirm(`确认请求重启 ${nodeName} 的推流？\n\n保护规则：不会清空直播码；如果节点没有安全重启接口，总控台会拒绝执行。`)) {
           return;
@@ -2020,8 +2204,16 @@ HTML = r"""
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
     refs.policyBtn.addEventListener("click", showPolicy);
     refs.auditBtn.addEventListener("click", showAudit);
+    refs.tailscaleWizardBtn.addEventListener("click", () => setTailscaleWizardOpen(true));
+    refs.tailscaleWizardClose.addEventListener("click", () => setTailscaleWizardOpen(false));
+    refs.tailscaleWizardModal.addEventListener("click", (event) => {
+      if (event.target === refs.tailscaleWizardModal) setTailscaleWizardOpen(false);
+    });
+    refs.tailscalePrecheckBtn.addEventListener("click", precheckTailscale);
+    refs.tailscaleInstallBtn.addEventListener("click", installTailscale);
     refs.tailscaleStatusBtn.addEventListener("click", showTailscaleStatus);
     refs.tailscaleConnectBtn.addEventListener("click", connectTailscale);
+    refs.tailscaleVerifyBtn.addEventListener("click", verifyTailscale);
     if (refs.pushSelectedBtn) refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
     refs.previewTuneBtn.addEventListener("click", previewTune);
     refs.applyTuneBtn.addEventListener("click", applyLastTune);
@@ -2217,6 +2409,18 @@ def tailscale_precheck() -> dict[str, Any]:
         payload = json.loads(result.get("stdout") or "{}")
     payload["result"] = result
     return payload
+
+
+def tailscale_install() -> dict[str, Any]:
+    precheck = tailscale_precheck()
+    result = run_helper_script(TAILSCALE_HELPER, ["install"], timeout=600)
+    return {
+        "ok": bool(result.get("ok")),
+        "message": "Tailscale install/fix complete" if result.get("ok") else "Tailscale install/fix failed",
+        "precheck": precheck,
+        "result": result,
+        "status": tailscale_status() if result.get("ok") else None,
+    }
 
 
 def tailscale_connect(auth_key: str, hostname: str, *, accept_routes: bool = True, ssh: bool = False) -> dict[str, Any]:
@@ -3125,6 +3329,14 @@ def api_tailscale_precheck():
     return jsonify(tailscale_precheck())
 
 
+@APP.post("/api/tailscale/install")
+def api_tailscale_install():
+    if not dangerous_local_action_allowed():
+        return reject_forbidden("Tailscale install requires localhost, trusted network, or STREAM_HUB_CONTROL_TOKEN")
+    result = tailscale_install()
+    return jsonify(result), 200 if result.get("ok") else 500
+
+
 @APP.post("/api/tailscale/connect")
 def api_tailscale_connect():
     if not dangerous_local_action_allowed():
@@ -3379,6 +3591,26 @@ def api_nodes_stream_start():
         return jsonify({"ok": False, "message": "missing stream key"}), 400
     result = post_node_json(node, "/api/start-stream", node_payload, timeout=60)
     status_code = 200 if result.get("ok") else 502
+    return jsonify({
+        "node_id": node_id,
+        **redacted_stream_result(result),
+    }), status_code
+
+
+@APP.post("/api/nodes/stop-stream")
+def api_nodes_stop_stream():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "")
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    if not node.get("enabled", True):
+        return jsonify({"ok": False, "message": "node disabled"}), 409
+    stop_api = str(node.get("stop_stream_api") or "/api/stop-stream").strip() or "/api/stop-stream"
+    if not stop_api.startswith("/"):
+        stop_api = f"/{stop_api}"
+    result = post_node_json(node, stop_api, {}, timeout=30)
+    status_code = 200 if result.get("ok") else int(result.get("status_code") or 502)
     return jsonify({
         "node_id": node_id,
         **redacted_stream_result(result),

@@ -526,6 +526,9 @@ def api_status():
     processes = ffmpeg_processes()
     if stream_running and not any(item.get("pid") == stream_pid for item in processes):
         processes.insert(0, {"pid": stream_pid, "cpu_percent": 0.0})
+    elif not stream_running and processes:
+        stream_pid = int(processes[0].get("pid") or 0)
+        stream_running = stream_pid > 0
     load_avg = list(os.getloadavg()) if hasattr(os, "getloadavg") else []
     memory = memory_status()
     boot_time = 0.0
@@ -1047,6 +1050,38 @@ def api_start_stream():
             "duplicate_processes": 1 if previous_pid and stop_result.get("ok") and not stop_result.get("skipped") else 0,
             "log_path": str(log_path),
         },
+    })
+
+
+@APP.post("/api/stop-stream")
+def api_stop_stream():
+    state = load_state()
+    stream_pid = int(state.get("stream_pid") or 0)
+    candidate_pids: list[int] = []
+    if process_running(stream_pid):
+        candidate_pids.append(stream_pid)
+    for item in ffmpeg_processes():
+        pid = int(item.get("pid") or 0)
+        if pid > 0 and pid not in candidate_pids:
+            candidate_pids.append(pid)
+
+    results = [stop_process(pid) for pid in candidate_pids]
+    failed = [item for item in results if not item.get("ok")]
+    if failed:
+        return jsonify({
+            "ok": False,
+            "message": "failed to stop one or more stream processes",
+            "result": {"pids": candidate_pids, "results": results},
+        }), 500
+
+    state["stream_pid"] = 0
+    state["last_stopped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    state["last_stop_result"] = {"pids": candidate_pids, "results": results}
+    save_state(state)
+    return jsonify({
+        "ok": True,
+        "message": "stream stopped" if candidate_pids else "stream was not running",
+        "result": {"pids": candidate_pids, "results": results},
     })
 
 
