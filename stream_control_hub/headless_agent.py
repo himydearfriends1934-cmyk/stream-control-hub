@@ -48,6 +48,7 @@ CONTROL_HUB = os.environ.get("STREAM_AGENT_CONTROL_HUB", "")
 AGENT_NAME = os.environ.get("STREAM_AGENT_NAME", platform.node() or "stream-agent")
 MAX_CHUNK_BYTES = int(os.environ.get("STREAM_AGENT_MAX_CHUNK_BYTES", str(64 * 1024 ** 2)))
 CONTROL_TOKEN = os.environ.get("STREAM_AGENT_CONTROL_TOKEN", "").strip()
+PUBLIC_ORIGIN = os.environ.get("STREAM_AGENT_PUBLIC_ORIGIN", "").strip()
 TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_AGENT_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
 FFMPEG_BIN = os.environ.get("STREAM_AGENT_FFMPEG_BIN", "ffmpeg")
 APP_STARTED_AT = time.time()
@@ -59,6 +60,9 @@ UPLOAD_TICKETS: dict[str, dict[str, Any]] = {}
 UPLOAD_TICKETS_LOCK = threading.Lock()
 UPLOAD_TICKET_PATHS = {"/api/upload-probe", "/api/upload-chunk", "/api/upload-chunk/cancel"}
 TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+PUBLIC_IP_SERVICES = ("https://api.ipify.org", "https://ifconfig.me/ip")
+PUBLIC_ORIGIN_CACHE: dict[str, Any] = {"value": "", "checked_at": 0.0}
+PUBLIC_ORIGIN_LOCK = threading.Lock()
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = MAX_CHUNK_BYTES + 1024 * 1024
@@ -66,6 +70,64 @@ APP.config["MAX_CONTENT_LENGTH"] = MAX_CHUNK_BYTES + 1024 * 1024
 
 def ensure_dirs() -> None:
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def public_origin_from_ip(value: str) -> str:
+    try:
+        ip = ipaddress.ip_address(str(value or "").strip())
+    except ValueError:
+        return ""
+    if ip.version != 4 or not ip.is_global:
+        return ""
+    return f"http://{ip}:{PORT}"
+
+
+def normalize_public_origin(value: str) -> str:
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    origin = public_origin_from_ip(parsed.hostname)
+    if not origin:
+        return ""
+    try:
+        port = parsed.port or PORT
+    except ValueError:
+        return ""
+    return f"{parsed.scheme}://{parsed.hostname}:{port}"
+
+
+def discover_public_origin(*, force: bool = False) -> str:
+    configured = normalize_public_origin(PUBLIC_ORIGIN)
+    if configured:
+        return configured
+
+    now = time.time()
+    with PUBLIC_ORIGIN_LOCK:
+        cached = str(PUBLIC_ORIGIN_CACHE.get("value") or "")
+        checked_at = float(PUBLIC_ORIGIN_CACHE.get("checked_at") or 0)
+        ttl = 3600 if cached else 300
+        if not force and now - checked_at < ttl:
+            return cached
+
+        discovered = ""
+        for service_url in PUBLIC_IP_SERVICES:
+            try:
+                response = requests.get(
+                    service_url,
+                    timeout=4,
+                    headers={"User-Agent": "stream-control-headless-agent/1.0"},
+                )
+                response.raise_for_status()
+                discovered = public_origin_from_ip(response.text)
+            except requests.RequestException:
+                discovered = ""
+            if discovered:
+                break
+        PUBLIC_ORIGIN_CACHE.update({"value": discovered, "checked_at": now})
+        return discovered
 
 
 def request_control_token() -> str:
@@ -570,6 +632,7 @@ def api_status():
         boot_time = 0.0
     quota_limit = int(os.environ.get("STREAM_AGENT_TRAFFIC_QUOTA_BYTES", "0") or 0)
     total_used = net["bytes_recv"] + net["bytes_sent"]
+    public_origin = discover_public_origin()
     return jsonify({
         "ok": True,
         "hostname": platform.node(),
@@ -617,10 +680,13 @@ def api_status():
         },
         "transfer": upload_transfer_status(state),
         "public_upload": {
-            "enabled": False,
-            "supported": False,
-            "public_origin": "",
-            "last_reason": "direct-agent-upload",
+            "enabled": bool(public_origin),
+            "supported": bool(public_origin),
+            "window_supported": False,
+            "public_origin": public_origin,
+            "restrict_public_to_upload": True,
+            "ticket_required": True,
+            "last_reason": "auto-public-origin" if public_origin else "public-ip-discovery-unavailable",
         },
         "videos": list_media(),
         "tailscale": tailscale_status(),
@@ -681,13 +747,20 @@ def api_upload_ticket():
 
 @APP.get("/api/public-upload")
 def api_public_upload():
+    public_origin = discover_public_origin()
     return jsonify({
         "ok": True,
-        "supported": True,
+        "supported": bool(public_origin),
+        "window_supported": False,
+        "public_origin": public_origin,
         "restrict_public_to_upload": True,
         "ticket_required": True,
         "ticket_ttl_seconds": UPLOAD_TICKET_TTL_SECONDS,
-        "message": "public browser uploads require a short-lived Hub-issued ticket",
+        "message": (
+            "public browser uploads require a short-lived Hub-issued ticket"
+            if public_origin
+            else "public IPv4 discovery is unavailable; use the Tailscale fallback"
+        ),
     })
 
 

@@ -112,6 +112,8 @@ The Hub has a Tailscale panel at the bottom of the page. Paste a one-time Tailsc
 
 The Linux Hub and Headless Agent one-line installers use the same helper when `TAILSCALE_AUTH_KEY=...` is supplied, so a fresh VPS does not need Tailscale preinstalled.
 
+The Agent automatically discovers its public IPv4 during install and update. It uses `api.ipify.org` first and falls back to `ifconfig.me/ip`, validates that the response is a global IPv4 address, and publishes `http://<public-ip>:8787` to the Hub. Browser uploads probe that public route first and automatically fall back to the Agent Tailscale address when the public port is unavailable. Users do not need to enter `upload_base_url` manually.
+
 The app does not write the Tailscale auth key to repo config or audit logs. The intended deployment model is local or trusted-network use, preferably behind Tailscale.
 
 ## Operational Safety
