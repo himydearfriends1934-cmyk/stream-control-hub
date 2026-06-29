@@ -42,7 +42,7 @@ Menu options:
 One-line Headless Agent install/update/uninstall menu on a VPS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install-agent.sh | sudo env TAILSCALE_AUTH_KEY=tskey-auth-xxx sh
+curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install-agent.sh | sudo env STREAM_AGENT_CONTROL_HUB=http://100.64.0.1:8788 TAILSCALE_AUTH_KEY=tskey-auth-xxx sh
 ```
 
 Menu options:
@@ -52,6 +52,12 @@ Menu options:
 - `3` uninstall and remove media/local env
 
 For non-interactive automation, pass `CHOICE=2` or `CHOICE=3`.
+
+Before an Agent install or update, the installer stops the managed Agent service and scans for known legacy dashboards, services, project directories, and listeners on port `8787`. It prints the complete cleanup report and requires the exact confirmation `DELETE` before removing recognized legacy projects. For explicitly approved unattended replacement, pass `CONFIRM_REMOVE_CONFLICTS=1`. An unknown process that still occupies the Agent port is never killed automatically; installation stops with its listener details.
+
+After installation, the service must pass an authenticated `/api/status` check before the script reports success. The generated fallback node registration, including its control token, is stored at `/opt/stream-control-hub-agent/node-registration.json` with mode `600` instead of being printed to terminal logs.
+
+When `STREAM_AGENT_CONTROL_HUB` points to the Hub's Tailscale URL, the Agent trusts API traffic only from that exact Tailscale source IP. In the Hub Tailscale wizard, choose `新增 Agent（仅输入 IP）`, enter the Agent's `100.x` address, and connect. Other tailnet peers still need the per-Agent control token.
 
 The installers generate a local control token and keep node secrets outside git. The Hub prints a URL like `http://127.0.0.1:8788/?token=...`; use that URL for remote write actions when `STREAM_HUB_CONTROL_TOKEN` is enabled.
 
