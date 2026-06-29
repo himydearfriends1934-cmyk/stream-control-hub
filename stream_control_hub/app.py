@@ -45,7 +45,7 @@ NODES_FILE = Path(os.environ.get("STREAM_HUB_NODES_FILE", str(CONFIG_DIR / "node
 PORT = int(os.environ.get("STREAM_HUB_PORT", "8788"))
 SOURCE_REPO = os.environ.get(
     "STREAM_HUB_SOURCE_REPO",
-    "https://github.com/himydearfriends1934-cmyk/istanbul-stream-dashboard.git",
+    "https://github.com/himydearfriends1934-cmyk/stream-control-hub.git",
 )
 SOURCE_BRANCH = os.environ.get("STREAM_HUB_SOURCE_BRANCH", "main")
 ALLOWED_MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
@@ -3890,25 +3890,51 @@ def run_git(args: list[str], cwd: Path | None = None, timeout: int = 60) -> dict
 @APP.post("/api/github/check")
 def api_github_check():
     ensure_dirs()
-    repo_dir = WORK_DIR / "istanbul-stream-dashboard"
-    if not repo_dir.exists():
-        clone = run_git(["clone", "--branch", SOURCE_BRANCH, "--depth", "1", SOURCE_REPO, str(repo_dir)], timeout=180)
-        if not clone["ok"]:
-            return jsonify({"ok": False, "step": "clone", **clone}), 500
-    fetch = run_git(["fetch", "origin", SOURCE_BRANCH], cwd=repo_dir, timeout=120)
-    local = run_git(["rev-parse", "HEAD"], cwd=repo_dir)
-    remote = run_git(["rev-parse", f"origin/{SOURCE_BRANCH}"], cwd=repo_dir)
-    diff = run_git(["diff", "--stat", "HEAD", f"origin/{SOURCE_BRANCH}"], cwd=repo_dir)
+    if not (ROOT / ".git").exists():
+        return jsonify({
+            "ok": False,
+            "step": "checkout",
+            "message": "Hub checkout has no git metadata; reinstall from the official repository before checking updates",
+            "repo": SOURCE_REPO,
+            "branch": SOURCE_BRANCH,
+        }), 409
+
+    fetch = run_git(["fetch", "--quiet", "--no-tags", SOURCE_REPO, SOURCE_BRANCH], cwd=ROOT, timeout=120)
+    if not fetch["ok"]:
+        safe_fetch = dict(fetch)
+        safe_fetch["stderr"] = redact_secret(str(fetch.get("stderr") or ""), SOURCE_REPO)
+        return jsonify({
+            "ok": False,
+            "step": "fetch",
+            "repo": SOURCE_REPO,
+            "branch": SOURCE_BRANCH,
+            "fetch": safe_fetch,
+        }), 502
+
+    local = run_git(["rev-parse", "HEAD"], cwd=ROOT)
+    remote = run_git(["rev-parse", "FETCH_HEAD"], cwd=ROOT)
+    behind = run_git(["rev-list", "--count", "HEAD..FETCH_HEAD"], cwd=ROOT)
+    ahead = run_git(["rev-list", "--count", "FETCH_HEAD..HEAD"], cwd=ROOT)
+    diff = run_git(["diff", "--stat", "HEAD", "FETCH_HEAD"], cwd=ROOT)
+    local_label = run_git(["log", "-1", "--format=%h %s", "HEAD"], cwd=ROOT)
+    remote_label = run_git(["log", "-1", "--format=%h %s", "FETCH_HEAD"], cwd=ROOT)
+    checks = (local, remote, behind, ahead, diff, local_label, remote_label)
+    ok = all(item["ok"] for item in checks)
+    behind_count = int(behind.get("stdout") or 0) if behind["ok"] else None
+    ahead_count = int(ahead.get("stdout") or 0) if ahead["ok"] else None
     return jsonify({
-        "ok": fetch["ok"] and local["ok"] and remote["ok"],
+        "ok": ok,
         "repo": SOURCE_REPO,
         "branch": SOURCE_BRANCH,
         "local": local.get("stdout"),
         "remote": remote.get("stdout"),
-        "has_updates": local.get("stdout") != remote.get("stdout"),
+        "local_label": local_label.get("stdout"),
+        "remote_label": remote_label.get("stdout"),
+        "behind_count": behind_count,
+        "ahead_count": ahead_count,
+        "has_updates": bool(behind_count) if behind_count is not None else None,
         "diff_stat": diff.get("stdout"),
-        "fetch": fetch,
-    })
+    }), 200 if ok else 500
 
 
 @APP.post("/api/nodes/upgrade")
