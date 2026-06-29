@@ -8,6 +8,7 @@ STREAM_AGENT_HOST="${STREAM_AGENT_HOST:-0.0.0.0}"
 STREAM_AGENT_PORT="${STREAM_AGENT_PORT:-8787}"
 STREAM_AGENT_NAME="${STREAM_AGENT_NAME:-$(hostname)}"
 STREAM_AGENT_CONTROL_HUB="${STREAM_AGENT_CONTROL_HUB:-}"
+STREAM_AGENT_PUBLIC_ORIGIN="${STREAM_AGENT_PUBLIC_ORIGIN:-}"
 TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 TAILSCALE_HOSTNAME="${TAILSCALE_HOSTNAME:-$STREAM_AGENT_NAME}"
 ACTION="${ACTION:-${STREAM_AGENT_ACTION:-install}}"
@@ -61,8 +62,8 @@ tailscale_ip() {
 }
 
 public_ip() {
-  curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || \
-    curl -fsS --max-time 8 https://ifconfig.me 2>/dev/null || true
+  curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || \
+    curl -4 -fsS --max-time 8 https://ifconfig.me/ip 2>/dev/null || true
 }
 
 remove_legacy_conflicts() {
@@ -270,10 +271,31 @@ python3 -m venv "$INSTALL_DIR/.venv"
 
 ENV_FILE="$INSTALL_DIR/.agent.env"
 TOKEN=""
+EXISTING_PUBLIC_ORIGIN=""
+PUBLIC_IP_RAW="$(public_ip | tr -d '\r\n')"
+PUBLIC_IP="$(PUBLIC_IP_RAW="$PUBLIC_IP_RAW" python3 - <<'PY'
+import ipaddress
+import os
+
+try:
+    value = ipaddress.ip_address(os.environ.get("PUBLIC_IP_RAW", "").strip())
+except ValueError:
+    value = None
+print(value if value and value.version == 4 and value.is_global else "")
+PY
+)"
 if [ -f "$ENV_FILE" ]; then
   TOKEN="$(sed -n 's/^STREAM_AGENT_CONTROL_TOKEN=//p' "$ENV_FILE" | head -n 1)"
+  EXISTING_PUBLIC_ORIGIN="$(sed -n 's/^STREAM_AGENT_PUBLIC_ORIGIN=//p' "$ENV_FILE" | head -n 1)"
 fi
 [ -n "$TOKEN" ] || TOKEN="$(new_token)"
+if [ -z "$STREAM_AGENT_PUBLIC_ORIGIN" ]; then
+  if [ -n "$PUBLIC_IP" ]; then
+    STREAM_AGENT_PUBLIC_ORIGIN="http://$PUBLIC_IP:$STREAM_AGENT_PORT"
+  else
+    STREAM_AGENT_PUBLIC_ORIGIN="$EXISTING_PUBLIC_ORIGIN"
+  fi
+fi
 
 cat > "$ENV_FILE" <<EOF
 STREAM_AGENT_CONTROL_TOKEN=$TOKEN
@@ -281,6 +303,7 @@ STREAM_AGENT_HOST=$STREAM_AGENT_HOST
 STREAM_AGENT_PORT=$STREAM_AGENT_PORT
 STREAM_AGENT_NAME=$STREAM_AGENT_NAME
 STREAM_AGENT_CONTROL_HUB=$STREAM_AGENT_CONTROL_HUB
+STREAM_AGENT_PUBLIC_ORIGIN=$STREAM_AGENT_PUBLIC_ORIGIN
 STREAM_AGENT_DATA_DIR=$INSTALL_DIR/agent_data
 EOF
 chmod 600 "$ENV_FILE"
@@ -356,7 +379,6 @@ fi
 
 NODE_IP="$(tailscale_ip)"
 [ -n "$NODE_IP" ] || NODE_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-PUBLIC_IP="$(public_ip)"
 
 echo "Stream Control Headless Agent installed."
 REGISTRATION_FILE="$INSTALL_DIR/node-registration.json"

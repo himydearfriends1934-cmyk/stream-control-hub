@@ -12,6 +12,8 @@ class AgentTrustTests(unittest.TestCase):
         client = headless_agent.APP.test_client()
         with patch.object(headless_agent, "CONTROL_HUB", "http://100.85.233.24:8788"), patch.object(
             headless_agent, "CONTROL_TOKEN", "configured-token"
+        ), patch.object(
+            headless_agent, "discover_public_origin", return_value="http://165.99.42.174:8787"
         ):
             response = client.get("/api/status", environ_base={"REMOTE_ADDR": "100.85.233.24"})
 
@@ -23,6 +25,8 @@ class AgentTrustTests(unittest.TestCase):
         client = headless_agent.APP.test_client()
         with patch.object(headless_agent, "CONTROL_HUB", "http://100.85.233.24:8788"), patch.object(
             headless_agent, "CONTROL_TOKEN", "configured-token"
+        ), patch.object(
+            headless_agent, "discover_public_origin", return_value="http://165.99.42.174:8787"
         ):
             response = client.get("/api/status", environ_base={"REMOTE_ADDR": "100.118.47.126"})
 
@@ -34,6 +38,8 @@ class AgentTrustTests(unittest.TestCase):
         client = headless_agent.APP.test_client()
         with patch.object(headless_agent, "CONTROL_HUB", "http://203.0.113.10:8788"), patch.object(
             headless_agent, "CONTROL_TOKEN", "configured-token"
+        ), patch.object(
+            headless_agent, "discover_public_origin", return_value="http://165.99.42.174:8787"
         ):
             response = client.get("/api/status", environ_base={"REMOTE_ADDR": "203.0.113.10"})
 

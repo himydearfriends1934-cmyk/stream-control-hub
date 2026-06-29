@@ -2951,7 +2951,7 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
 
     public_origin = str(status.get("public_origin") or "").rstrip("/")
     restrict_public = bool(status.get("restrict_public_to_upload"))
-    supports_window = bool(status.get("supported"))
+    supports_window = bool(status.get("window_supported"))
     route["decision_log"].append(
         f"public status ok; supported={supports_window}; restricted={restrict_public}; origin={public_origin or '-'}"
     )
@@ -3002,8 +3002,12 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
         route["warnings"].append(opened.get("message") or "failed to open public upload window")
         route["decision_log"].append("failed to open public window; considering direct public or internal route")
 
-    if public_origin and not restrict_public:
-        route["decision_log"].append("public origin is unrestricted; probing direct public route")
+    if public_origin:
+        route["decision_log"].append(
+            "probing discovered public route with Hub control authentication"
+            if restrict_public
+            else "public origin is unrestricted; probing direct public route"
+        )
         route.update({
             "upload_base_url": public_origin,
             "route": "public-direct",
@@ -3373,8 +3377,18 @@ def api_node_upload_target():
         "X-Upload-Route": "direct-browser",
         "X-Upload-Ticket": str(ticket.get("ticket") or ""),
     }
+    public_status = request_node_json(node, "/api/public-upload", timeout=10)
+    discovered_public_url = (
+        str(public_status.get("public_origin") or "").rstrip("/")
+        if public_status.get("ok") and public_status.get("supported")
+        else ""
+    )
+    upload_urls = []
+    for url in [discovered_public_url, *node_upload_base_urls(node)]:
+        if url and url not in upload_urls:
+            upload_urls.append(url)
     candidates = []
-    for url in node_upload_base_urls(node):
+    for url in upload_urls:
         candidates.append({
             "url": url,
             "label": upload_route_label(url, base_url),
@@ -3396,6 +3410,7 @@ def api_node_upload_target():
         "chunk_bytes": DIRECT_AGENT_UPLOAD_CHUNK_BYTES,
         "headers": headers,
         "ticket_expires_in": ticket.get("expires_in"),
+        "public_status": public_upload_summary(public_status),
     })
 
 
