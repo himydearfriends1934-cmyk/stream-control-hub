@@ -14,6 +14,7 @@ ACTION="${ACTION:-${STREAM_AGENT_ACTION:-install}}"
 UNINSTALL="${UNINSTALL:-0}"
 REMOVE_DATA="${REMOVE_DATA:-${STREAM_AGENT_REMOVE_DATA:-0}}"
 CHOICE="${CHOICE:-${STREAM_AGENT_CHOICE:-}}"
+CONFIRM_REMOVE_CONFLICTS="${CONFIRM_REMOVE_CONFLICTS:-0}"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -62,6 +63,122 @@ tailscale_ip() {
 public_ip() {
   curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || \
     curl -fsS --max-time 8 https://ifconfig.me 2>/dev/null || true
+}
+
+remove_legacy_conflicts() {
+  legacy_services=""
+  legacy_paths=""
+
+  systemctl stop stream-control-headless-agent.service >/dev/null 2>&1 || true
+  sleep 1
+
+  for service in \
+    lightcone-stream-dashboard.service \
+    stream-control-node-agent.service \
+    stream-dashboard.service \
+    istanbul-stream-dashboard.service; do
+    if systemctl cat "$service" >/dev/null 2>&1; then
+      legacy_services="$legacy_services $service"
+    fi
+  done
+
+  for service in $(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '(stream.*(agent|dashboard)|(agent|dashboard).*stream)' || true); do
+    [ "$service" = "stream-control-headless-agent.service" ] && continue
+    case " $legacy_services " in
+      *" $service "*) ;;
+      *) legacy_services="$legacy_services $service" ;;
+    esac
+  done
+
+  for path in \
+    /opt/lightcone-stream-dashboard \
+    /opt/stream-control-node-agent \
+    /opt/stream-dashboard \
+    /opt/istanbul-stream-dashboard \
+    /etc/lightcone-stream-dashboard \
+    /etc/stream-dashboard \
+    /etc/istanbul-stream-dashboard \
+    /var/lib/lightcone-stream-dashboard \
+    /var/lib/stream-dashboard \
+    /var/lib/istanbul-stream-dashboard \
+    /var/log/lightcone-stream-dashboard \
+    /var/log/stream-dashboard \
+    /var/log/istanbul-stream-dashboard; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      legacy_paths="$legacy_paths $path"
+    fi
+  done
+
+  for service in $legacy_services; do
+    path="$(systemctl show "$service" -p WorkingDirectory --value 2>/dev/null || true)"
+    case "$path" in
+      /opt/*)
+        if [ "$path" != "$INSTALL_DIR" ]; then
+          case " $legacy_paths " in
+            *" $path "*) ;;
+            *) legacy_paths="$legacy_paths $path" ;;
+          esac
+        fi
+        ;;
+    esac
+  done
+
+  port_conflicts=""
+  if command -v ss >/dev/null 2>&1; then
+    port_conflicts="$(ss -H -ltnp "sport = :$STREAM_AGENT_PORT" 2>/dev/null || true)"
+  fi
+
+  if [ -n "$legacy_services$legacy_paths" ]; then
+    echo "Legacy or conflicting stream installations were found."
+    service_count=$(set -- $legacy_services; echo "$#")
+    path_count=$(set -- $legacy_paths; echo "$#")
+    port_count=$(printf '%s\n' "$port_conflicts" | grep -c . || true)
+    echo "Summary: services=$service_count paths=$path_count port_listeners=$port_count"
+    echo "Services to permanently stop and remove:"
+    for service in $legacy_services; do echo "  - $service"; done
+    echo "Project paths to permanently delete:"
+    for path in $legacy_paths; do echo "  - $path"; done
+    if [ -n "$port_conflicts" ]; then
+      echo "Current listeners on port $STREAM_AGENT_PORT:"
+      printf '%s\n' "$port_conflicts"
+    fi
+
+    if [ "$CONFIRM_REMOVE_CONFLICTS" != "1" ]; then
+      if [ ! -r /dev/tty ]; then
+        echo "A terminal confirmation is required. Re-run with CONFIRM_REMOVE_CONFLICTS=1 for unattended cleanup." >&2
+        exit 3
+      fi
+      printf "Type DELETE to remove every listed legacy project and continue: " > /dev/tty
+      read -r answer < /dev/tty || answer=""
+      if [ "$answer" != "DELETE" ]; then
+        echo "Install cancelled. No legacy project content was deleted."
+        exit 4
+      fi
+    fi
+
+    for service in $legacy_services; do
+      systemctl disable --now "$service" >/dev/null 2>&1 || true
+      rm -f \
+        "/etc/systemd/system/$service" \
+        "/lib/systemd/system/$service" \
+        "/usr/lib/systemd/system/$service"
+    done
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    for path in $legacy_paths; do
+      rm -rf -- "$path"
+    done
+    echo "Legacy stream projects removed."
+  fi
+
+  if command -v ss >/dev/null 2>&1; then
+    remaining="$(ss -H -ltnp "sport = :$STREAM_AGENT_PORT" 2>/dev/null || true)"
+    if [ -n "$remaining" ]; then
+      echo "Port $STREAM_AGENT_PORT is still occupied after legacy cleanup:" >&2
+      printf '%s\n' "$remaining" >&2
+      echo "Stop the unrelated listener or choose another STREAM_AGENT_PORT." >&2
+      exit 5
+    fi
+  fi
 }
 
 show_menu() {
@@ -133,6 +250,8 @@ need_root
 install_packages
 need_cmd git
 need_cmd python3
+need_cmd systemctl
+remove_legacy_conflicts
 
 if [ -d "$INSTALL_DIR/.git" ]; then
   git -C "$INSTALL_DIR" fetch origin "$BRANCH"
@@ -178,6 +297,8 @@ cat > /etc/systemd/system/stream-control-headless-agent.service <<EOF
 Description=Stream Control Hub Headless Agent
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 WorkingDirectory=$INSTALL_DIR
@@ -191,16 +312,56 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now stream-control-headless-agent.service
+systemctl enable stream-control-headless-agent.service
+systemctl reset-failed stream-control-headless-agent.service >/dev/null 2>&1 || true
+systemctl restart stream-control-headless-agent.service
+
+case "$STREAM_AGENT_HOST" in
+  0.0.0.0) PROBE_HOST="127.0.0.1" ;;
+  ::) PROBE_HOST="[::1]" ;;
+  *) PROBE_HOST="$STREAM_AGENT_HOST" ;;
+esac
+PROBE_URL="http://$PROBE_HOST:$STREAM_AGENT_PORT/api/status"
+HEALTHY="0"
+for _ in $(seq 1 20); do
+  if systemctl is-active --quiet stream-control-headless-agent.service && \
+    ENV_FILE="$ENV_FILE" PROBE_URL="$PROBE_URL" "$INSTALL_DIR/.venv/bin/python" - <<'PY' >/dev/null 2>&1
+import os
+import urllib.request
+
+token = ""
+with open(os.environ["ENV_FILE"], encoding="utf-8") as env_file:
+    for line in env_file:
+        if line.startswith("STREAM_AGENT_CONTROL_TOKEN="):
+            token = line.split("=", 1)[1].strip()
+            break
+request = urllib.request.Request(os.environ["PROBE_URL"], headers={"X-Control-Token": token})
+with urllib.request.urlopen(request, timeout=3) as response:
+    if response.status != 200:
+        raise SystemExit(1)
+PY
+  then
+    HEALTHY="1"
+    break
+  fi
+  sleep 1
+done
+
+if [ "$HEALTHY" != "1" ]; then
+  echo "Headless Agent failed its authenticated health check." >&2
+  systemctl status stream-control-headless-agent.service --no-pager -l >&2 || true
+  journalctl -u stream-control-headless-agent.service -n 40 --no-pager >&2 || true
+  exit 6
+fi
 
 NODE_IP="$(tailscale_ip)"
 [ -n "$NODE_IP" ] || NODE_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 PUBLIC_IP="$(public_ip)"
 
 echo "Stream Control Headless Agent installed."
-echo "Add this node to the Hub nodes file:"
+REGISTRATION_FILE="$INSTALL_DIR/node-registration.json"
 if [ -n "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "$NODE_IP" ]; then
-cat <<EOF
+cat > "$REGISTRATION_FILE" <<EOF
 {
   "id": "$STREAM_AGENT_NAME",
   "name": "$STREAM_AGENT_NAME",
@@ -212,7 +373,7 @@ cat <<EOF
 }
 EOF
 else
-cat <<EOF
+cat > "$REGISTRATION_FILE" <<EOF
 {
   "id": "$STREAM_AGENT_NAME",
   "name": "$STREAM_AGENT_NAME",
@@ -223,3 +384,11 @@ cat <<EOF
 }
 EOF
 fi
+chmod 600 "$REGISTRATION_FILE"
+echo "Agent health check passed at http://$NODE_IP:$STREAM_AGENT_PORT/api/status"
+if [ -n "$STREAM_AGENT_CONTROL_HUB" ]; then
+  echo "IP-only Hub pairing enabled for: $STREAM_AGENT_CONTROL_HUB"
+else
+  echo "Set STREAM_AGENT_CONTROL_HUB to the Hub Tailscale URL to enable secure IP-only pairing."
+fi
+echo "Fallback node registration was saved with mode 600 at: $REGISTRATION_FILE"

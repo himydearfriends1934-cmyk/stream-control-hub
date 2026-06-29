@@ -1790,14 +1790,19 @@ HTML = r"""
     }
 
     function renderTailscaleNodeOptions() {
-      const current = refs.tailscaleNodeSelect.value || String(selectedNodeId || "");
-      refs.tailscaleNodeSelect.innerHTML = nodes.length
-        ? nodes.map((node) => {
+      const current = refs.tailscaleNodeSelect.dataset.initialized === "1"
+        ? refs.tailscaleNodeSelect.value
+        : "";
+      const existingOptions = nodes.map((node) => {
             const id = String(node.id || "");
             const label = `${node.name || id} (${node.base_url || "未配置地址"})`;
             return `<option value="${escapeHtml(id)}" ${id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
-          }).join("")
-        : `<option value="">暂无 Agent</option>`;
+          }).join("");
+      refs.tailscaleNodeSelect.innerHTML = `
+        <option value="" ${current ? "" : "selected"}>新增 Agent（仅输入 IP）</option>
+        ${existingOptions}
+      `;
+      refs.tailscaleNodeSelect.dataset.initialized = "1";
     }
 
     async function runTailscaleStep(step, label, action) {
@@ -1867,13 +1872,8 @@ HTML = r"""
     }
 
     async function connectExistingTailscaleIp() {
-      const node_id = refs.tailscaleNodeSelect.value || selectedNode()?.id || "";
+      const node_id = refs.tailscaleNodeSelect.value || "";
       const tailscale_ip = refs.tailscaleExistingIpInput.value.trim();
-      if (!node_id) {
-        setTailscaleWizardOpen(true);
-        setTailscaleLog("请选择要接入的 Agent。");
-        return;
-      }
       if (!tailscale_ip) {
         setTailscaleWizardOpen(true);
         setTailscaleLog("请输入已有的 Tailscale IP，例如 100.x.x.x。");
@@ -1888,6 +1888,7 @@ HTML = r"""
         return resp.json();
       });
       if (data.ok) {
+        selectedNodeId = String(data.node_id || selectedNodeId || "");
         log(`已连接 ${data.node_id} 到 ${data.base_url}`);
         await refreshAll();
       }
@@ -3461,8 +3462,6 @@ def api_tailscale_connect_existing_ip():
     payload = request.get_json(silent=True) or {}
     node_id = str(payload.get("node_id") or "").strip()
     raw_ip = str(payload.get("tailscale_ip") or payload.get("ip") or "").strip()
-    if not node_id:
-        return jsonify({"ok": False, "message": "请选择要接入的 Agent"}), 400
     try:
         ip = ipaddress.ip_address(raw_ip.split("%", 1)[0])
     except ValueError:
@@ -3472,10 +3471,20 @@ def api_tailscale_connect_existing_ip():
 
     base_url = f"http://{ip}:8787"
     nodes = load_nodes()
-    target_index = next((index for index, item in enumerate(nodes) if str(item.get("id")) == node_id), -1)
-    if target_index < 0:
+    target_index = next((index for index, item in enumerate(nodes) if str(item.get("id")) == node_id), -1) if node_id else -1
+    creating = not node_id
+    if node_id and target_index < 0:
         return jsonify({"ok": False, "message": "Agent 不存在"}), 404
-    node = dict(nodes[target_index])
+    if creating:
+        node_id = f"agent-{str(ip).replace('.', '-')}"
+        target_index = next((index for index, item in enumerate(nodes) if str(item.get("id")) == node_id), -1)
+        creating = target_index < 0
+    node = dict(nodes[target_index]) if target_index >= 0 else {
+        "id": node_id,
+        "name": node_id,
+        "role": "stream-node",
+        "enabled": True,
+    }
     previous_base_url = node_base_url(node)
     probe_node = dict(node)
     probe_node["base_url"] = base_url
@@ -3484,7 +3493,7 @@ def api_tailscale_connect_existing_ip():
         status_code = int(status.get("status_code") or 502)
         message = status.get("message") or "无法连接到这个 Tailscale IP 上的 Agent"
         if status_code == 403:
-            message = "Agent 已响应，但控制 token 不匹配或未授权"
+            message = "Agent 已响应但未授权；请把 STREAM_AGENT_CONTROL_HUB 设置为当前 Hub 的 Tailscale URL"
         return jsonify({
             "ok": False,
             "message": message,
@@ -3496,9 +3505,15 @@ def api_tailscale_connect_existing_ip():
     if previous_base_url and previous_base_url != base_url and not node.get("public_base_url"):
         node["public_base_url"] = previous_base_url
     node["base_url"] = base_url
+    agent = status.get("agent") if isinstance(status.get("agent"), dict) else {}
+    if creating:
+        node["name"] = str(agent.get("name") or status.get("hostname") or node_id)
     node["tailscale_ip"] = str(ip)
     node["tailscale_connected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    nodes[target_index] = node
+    if target_index >= 0:
+        nodes[target_index] = node
+    else:
+        nodes.append(node)
     save_nodes(nodes)
     return jsonify({
         "ok": True,
@@ -3508,6 +3523,7 @@ def api_tailscale_connect_existing_ip():
         "previous_base_url": previous_base_url,
         "hostname": status.get("hostname"),
         "platform": status.get("platform"),
+        "created": creating,
     })
 
 

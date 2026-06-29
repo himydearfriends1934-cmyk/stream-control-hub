@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hmac
+import ipaddress
 import os
 import platform
 import secrets
@@ -14,6 +15,7 @@ import uuid
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, jsonify, request
@@ -56,6 +58,7 @@ UPLOAD_TICKET_TTL_SECONDS = int(os.environ.get("STREAM_AGENT_UPLOAD_TICKET_TTL_S
 UPLOAD_TICKETS: dict[str, dict[str, Any]] = {}
 UPLOAD_TICKETS_LOCK = threading.Lock()
 UPLOAD_TICKET_PATHS = {"/api/upload-probe", "/api/upload-chunk", "/api/upload-chunk/cancel"}
+TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = MAX_CHUNK_BYTES + 1024 * 1024
@@ -127,11 +130,37 @@ def request_is_local() -> bool:
     return (request.remote_addr or "") in {"127.0.0.1", "::1"}
 
 
+def configured_control_hub_ip() -> str:
+    raw = CONTROL_HUB.strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    hostname = parsed.hostname or ""
+    try:
+        ip = ipaddress.ip_address(hostname.split("%", 1)[0])
+    except ValueError:
+        return ""
+    return str(ip) if ip in TAILSCALE_CGNAT else ""
+
+
+def request_is_control_hub() -> bool:
+    control_hub_ip = configured_control_hub_ip()
+    if not control_hub_ip:
+        return False
+    try:
+        remote_ip = ipaddress.ip_address((request.remote_addr or "").split("%", 1)[0])
+    except ValueError:
+        return False
+    return str(remote_ip) == control_hub_ip
+
+
 @APP.before_request
 def protect_agent_api():
     if not request.path.startswith("/api"):
         return None
     if request.method == "OPTIONS":
+        return None
+    if request_is_control_hub():
         return None
     if CONTROL_TOKEN:
         if has_valid_control_token():
