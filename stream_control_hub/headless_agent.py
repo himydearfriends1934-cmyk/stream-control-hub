@@ -59,6 +59,7 @@ SHARE_CHUNK_BYTES = int(os.environ.get("STREAM_AGENT_SHARE_CHUNK_BYTES", str(32 
 SHARE_TIMEOUT_SECONDS = int(os.environ.get("STREAM_AGENT_SHARE_TIMEOUT_SECONDS", "300"))
 SHARE_RETRIES = int(os.environ.get("STREAM_AGENT_SHARE_RETRIES", "2"))
 UPLOAD_TICKET_TTL_SECONDS = int(os.environ.get("STREAM_AGENT_UPLOAD_TICKET_TTL_SECONDS", "3600"))
+UPLOAD_STALE_STATE_SECONDS = max(300, int(os.environ.get("STREAM_AGENT_UPLOAD_STALE_STATE_SECONDS", "3600")))
 UPLOAD_TICKETS: dict[str, dict[str, Any]] = {}
 UPLOAD_TICKETS_LOCK = threading.Lock()
 UPLOAD_TICKET_PATHS = {"/api/upload-probe", "/api/upload-chunk", "/api/upload-chunk/cancel"}
@@ -431,6 +432,28 @@ def upload_transfer_status(state: dict[str, Any]) -> dict[str, Any]:
         "last_event_at_label": state.get("last_event_at_label") or "--",
         "last_probe": state.get("last_probe") or {},
     }
+
+
+def prune_stale_upload_state(state: dict[str, Any], *, now: float | None = None) -> int:
+    active_uploads = dict(state.get("active_uploads") or {})
+    current_time = time.time() if now is None else now
+    removed = 0
+    for raw_upload_id, raw_item in list(active_uploads.items()):
+        item = raw_item if isinstance(raw_item, dict) else {}
+        updated_at = float(item.get("updated_at") or 0)
+        if current_time - updated_at < UPLOAD_STALE_STATE_SECONDS:
+            continue
+        upload_id = secure_filename(str(raw_upload_id or ""))
+        filename = Path(str(item.get("filename") or "")).name
+        part_path = MEDIA_DIR / f".{upload_id}.{filename}.part"
+        if part_path.exists():
+            continue
+        active_uploads.pop(raw_upload_id, None)
+        removed += 1
+    if removed:
+        state["active_uploads"] = active_uploads
+        state["stale_uploads_pruned_total"] = int(state.get("stale_uploads_pruned_total") or 0) + removed
+    return removed
 
 
 def ffmpeg_processes() -> list[dict[str, Any]]:
@@ -876,6 +899,7 @@ def api_status():
     usage = shutil.disk_usage(MEDIA_DIR)
     with STREAM_LIFECYCLE_LOCK:
         state = load_state()
+        prune_stale_upload_state(state)
         net = network_status(state)
         stream_pid = int(state.get("stream_pid") or 0)
         stream_running = stream_process_owned(stream_pid)
