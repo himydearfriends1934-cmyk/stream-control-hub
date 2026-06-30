@@ -3824,31 +3824,23 @@ def api_nodes_restart_stream():
         }), 502
 
     stream_config = status.get("stream_config") or {}
-    if not stream_config.get("has_stream_key"):
+    if not stream_config.get("restart_ready"):
         return jsonify({
             "ok": False,
             "node_id": node_id,
-            "message": "node has no saved stream key; blocked to avoid starting a broken stream",
+            "message": "node has no active stream recovery configuration",
         }), 409
 
-    restart_api = str(node.get("restart_stream_api") or "").strip()
-    if restart_api:
-        result = post_node_json(node, restart_api, {}, timeout=30)
-        return jsonify({
-            "ok": bool(result.get("ok")),
-            "node_id": node_id,
-            "message": result.get("message") or ("restart request accepted" if result.get("ok") else "restart request failed"),
-            "result": result,
-        }), 200 if result.get("ok") else 502
-
+    restart_api = str(node.get("restart_stream_api") or "/api/restart-stream").strip() or "/api/restart-stream"
+    if not restart_api.startswith("/"):
+        restart_api = f"/{restart_api}"
+    result = post_node_json(node, restart_api, {}, timeout=30)
     return jsonify({
-        "ok": False,
+        "ok": bool(result.get("ok")),
         "node_id": node_id,
-        "message": (
-            "node does not expose a safe restart-stream API yet; blocked to protect current stream config. "
-            "Configure restart_stream_api on this node when the node agent supports cached restart."
-        ),
-    }), 501
+        "message": result.get("message") or ("restart request accepted" if result.get("ok") else "restart request failed"),
+        "result": result,
+    }), 200 if result.get("ok") else int(result.get("status_code") or 502)
 
 
 @APP.post("/api/nodes/reboot")

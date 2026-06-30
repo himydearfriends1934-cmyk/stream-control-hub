@@ -43,6 +43,7 @@ load_env_file(ROOT / ".agent.env")
 DATA_DIR = Path(os.environ.get("STREAM_AGENT_DATA_DIR", str(ROOT / "agent_data")))
 MEDIA_DIR = DATA_DIR / "media"
 STATE_FILE = DATA_DIR / "state.json"
+STREAM_RESTART_FILE = Path(os.environ.get("STREAM_AGENT_RESTART_FILE", str(DATA_DIR / "stream_restart.json")))
 PORT = int(os.environ.get("STREAM_AGENT_PORT", "8787"))
 CONTROL_HUB = os.environ.get("STREAM_AGENT_CONTROL_HUB", "")
 AGENT_NAME = os.environ.get("STREAM_AGENT_NAME", platform.node() or "stream-agent")
@@ -63,6 +64,14 @@ TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 PUBLIC_IP_SERVICES = ("https://api.ipify.org", "https://ifconfig.me/ip")
 PUBLIC_ORIGIN_CACHE: dict[str, Any] = {"value": "", "checked_at": 0.0}
 PUBLIC_ORIGIN_LOCK = threading.Lock()
+STREAM_LIFECYCLE_LOCK = threading.RLock()
+STREAM_WATCHDOG_STOP = threading.Event()
+STREAM_WATCHDOG_THREAD: threading.Thread | None = None
+STREAM_AUTO_RESTART_ENABLED = os.environ.get("STREAM_AUTO_RESTART_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+STREAM_WATCHDOG_INTERVAL_SECONDS = max(2, int(os.environ.get("STREAM_WATCHDOG_INTERVAL_SECONDS", "5")))
+STREAM_RESTART_BASE_SECONDS = max(2, int(os.environ.get("STREAM_RESTART_BASE_SECONDS", "5")))
+STREAM_RESTART_MAX_SECONDS = max(STREAM_RESTART_BASE_SECONDS, int(os.environ.get("STREAM_RESTART_MAX_SECONDS", "60")))
+STREAM_RESTART_STABLE_SECONDS = max(15, int(os.environ.get("STREAM_RESTART_STABLE_SECONDS", "60")))
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = MAX_CHUNK_BYTES + 1024 * 1024
@@ -255,9 +264,54 @@ def load_state() -> dict[str, Any]:
         return {}
 
 
+def write_private_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def save_state(state: dict[str, Any]) -> None:
     ensure_dirs()
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_private_json(STATE_FILE, state)
+
+
+def save_stream_restart_payload(payload: dict[str, Any], video_path: Path) -> None:
+    allowed = {
+        "stream_url",
+        "stream_key",
+        "copy_mode",
+        "adaptive_mode",
+        "stream_output_mode",
+        "preset",
+        "video_bitrate",
+        "audio_bitrate",
+        "fps",
+        "resolution",
+        "keyframe_seconds",
+    }
+    recovery = {key: payload.get(key) for key in allowed if key in payload}
+    recovery["video_path"] = str(video_path)
+    write_private_json(STREAM_RESTART_FILE, recovery)
+
+
+def load_stream_restart_payload() -> dict[str, Any] | None:
+    if not STREAM_RESTART_FILE.exists():
+        return None
+    try:
+        payload = json.loads(STREAM_RESTART_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def remove_stream_restart_payload() -> None:
+    STREAM_RESTART_FILE.unlink(missing_ok=True)
 
 
 def format_duration(seconds: float) -> str:
@@ -377,7 +431,9 @@ def ffmpeg_processes() -> list[dict[str, Any]]:
             cpu = float(parts[1])
         except ValueError:
             cpu = 0.0
-        processes.append({"pid": int(parts[0]), "cpu_percent": cpu})
+        pid = int(parts[0])
+        if stream_process_owned(pid):
+            processes.append({"pid": pid, "cpu_percent": cpu})
     return processes
 
 
@@ -400,8 +456,28 @@ def process_running(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
     try:
+        stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+        if len(stat_fields) > 2 and stat_fields[2] == "Z":
+            with suppress(ChildProcessError, OSError):
+                os.waitpid(pid, os.WNOHANG)
+            return False
+    except OSError:
+        pass
+    try:
         os.kill(pid, 0)
         return True
+    except OSError:
+        return False
+
+
+def stream_process_owned(pid: int | None) -> bool:
+    if not process_running(pid):
+        return False
+    assert pid is not None
+    try:
+        executable = Path(os.readlink(f"/proc/{pid}/exe")).name.lower()
+        working_directory = Path(os.readlink(f"/proc/{pid}/cwd")).resolve()
+        return "ffmpeg" in executable and working_directory == DATA_DIR.resolve()
     except OSError:
         return False
 
@@ -410,14 +486,16 @@ def stop_process(pid: int | None, timeout: int = 8) -> dict[str, Any]:
     if not process_running(pid):
         return {"ok": True, "skipped": True}
     assert pid is not None
+    if not stream_process_owned(pid):
+        return {"ok": True, "pid": pid, "skipped": True, "message": "pid is not owned by this Agent"}
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.killpg(pid, signal.SIGTERM)
         deadline = time.time() + timeout
         while time.time() < deadline:
             if not process_running(pid):
                 return {"ok": True, "pid": pid}
             time.sleep(0.2)
-        os.kill(pid, signal.SIGKILL)
+        os.killpg(pid, signal.SIGKILL)
         return {"ok": True, "pid": pid, "forced": True}
     except Exception as exc:
         return {"ok": False, "pid": pid, "message": str(exc)}
@@ -596,6 +674,166 @@ def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -
     ]
 
 
+def stream_restart_backoff(consecutive_failures: int) -> int:
+    multiplier = 2 ** min(max(0, consecutive_failures - 1), 6)
+    return min(STREAM_RESTART_MAX_SECONDS, STREAM_RESTART_BASE_SECONDS * multiplier)
+
+
+def launch_stream_process(payload: dict[str, Any], *, reason: str, persist_recovery: bool) -> dict[str, Any]:
+    video_path = resolve_media_path(str(payload.get("video_path") or ""))
+    output_url = stream_output_url(payload)
+    command = ffmpeg_command(payload, video_path, output_url)
+    if persist_recovery:
+        save_stream_restart_payload(payload, video_path)
+
+    log_path = DATA_DIR / "ffmpeg.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("ab")
+    log_path.chmod(0o600)
+    try:
+        try:
+            proc = subprocess.Popen(
+                command,
+                cwd=str(DATA_DIR),
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=log_file,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            if persist_recovery:
+                state = load_state()
+                auto_restart = dict(state.get("auto_restart") or {})
+                auto_restart.update({
+                    "enabled": STREAM_AUTO_RESTART_ENABLED,
+                    "desired": True,
+                    "status": "waiting",
+                    "next_retry_at": time.time() + STREAM_RESTART_BASE_SECONDS,
+                    "last_error": str(exc),
+                })
+                state["stream_desired"] = True
+                state["stream_pid"] = 0
+                state["auto_restart"] = auto_restart
+                save_state(state)
+            raise
+    finally:
+        log_file.close()
+
+    now = time.time()
+    state = load_state()
+    auto_restart = dict(state.get("auto_restart") or {})
+    if reason == "auto-recovery":
+        consecutive_failures = int(auto_restart.get("consecutive_failures") or 0) + 1
+        auto_restart["restart_count"] = int(auto_restart.get("restart_count") or 0) + 1
+        auto_restart["consecutive_failures"] = consecutive_failures
+        auto_restart["next_retry_at"] = now + stream_restart_backoff(consecutive_failures)
+    else:
+        auto_restart["consecutive_failures"] = 0
+        auto_restart["next_retry_at"] = 0
+        if reason == "manual-start":
+            auto_restart["restart_count"] = 0
+    auto_restart.update({
+        "enabled": STREAM_AUTO_RESTART_ENABLED,
+        "desired": True,
+        "status": "restarted" if reason == "auto-recovery" else "running",
+        "last_reason": reason,
+        "last_error": "",
+        "last_started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+    })
+    state["has_stream_key"] = bool(payload.get("stream_key"))
+    state["stream_desired"] = True
+    state["stream_pid"] = proc.pid
+    state["stream_started_at_epoch"] = now
+    state["stream_config"] = {key: value for key, value in payload.items() if key != "stream_key"}
+    state["stream_config"]["video_path"] = str(video_path)
+    state["stream_config"]["stream_url"] = str(
+        payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2"
+    ).strip().rstrip("/")
+    state["auto_restart"] = auto_restart
+    state["last_started_at"] = auto_restart["last_started_at"]
+    save_state(state)
+    return {"pid": proc.pid, "log_path": str(log_path), "video_path": str(video_path)}
+
+
+def stream_watchdog_tick() -> dict[str, Any]:
+    if not STREAM_AUTO_RESTART_ENABLED:
+        return {"ok": True, "skipped": True, "reason": "disabled"}
+    with STREAM_LIFECYCLE_LOCK:
+        state = load_state()
+        if not state.get("stream_desired"):
+            return {"ok": True, "skipped": True, "reason": "not desired"}
+
+        now = time.time()
+        pid = int(state.get("stream_pid") or 0)
+        auto_restart = dict(state.get("auto_restart") or {})
+        if stream_process_owned(pid):
+            started_at = float(state.get("stream_started_at_epoch") or now)
+            if now - started_at >= STREAM_RESTART_STABLE_SECONDS and int(auto_restart.get("consecutive_failures") or 0):
+                auto_restart.update({
+                    "status": "running",
+                    "consecutive_failures": 0,
+                    "next_retry_at": 0,
+                    "last_error": "",
+                })
+                state["auto_restart"] = auto_restart
+                save_state(state)
+            return {"ok": True, "running": True, "pid": pid}
+
+        next_retry_at = float(auto_restart.get("next_retry_at") or 0)
+        if now < next_retry_at:
+            return {"ok": True, "waiting": True, "next_retry_at": next_retry_at}
+
+        payload = load_stream_restart_payload()
+        if not payload:
+            auto_restart.update({
+                "enabled": True,
+                "desired": True,
+                "status": "blocked",
+                "last_error": "stream recovery payload is missing or unreadable",
+            })
+            state["auto_restart"] = auto_restart
+            save_state(state)
+            return {"ok": False, "message": auto_restart["last_error"]}
+
+        try:
+            result = launch_stream_process(payload, reason="auto-recovery", persist_recovery=False)
+            return {"ok": True, "restarted": True, **result}
+        except Exception as exc:
+            consecutive_failures = int(auto_restart.get("consecutive_failures") or 0) + 1
+            auto_restart.update({
+                "enabled": True,
+                "desired": True,
+                "status": "waiting",
+                "consecutive_failures": consecutive_failures,
+                "next_retry_at": now + stream_restart_backoff(consecutive_failures),
+                "last_error": str(exc),
+                "last_failure_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            })
+            state["stream_pid"] = 0
+            state["auto_restart"] = auto_restart
+            save_state(state)
+            return {"ok": False, "message": str(exc)}
+
+
+def stream_watchdog_loop() -> None:
+    while not STREAM_WATCHDOG_STOP.wait(STREAM_WATCHDOG_INTERVAL_SECONDS):
+        with suppress(Exception):
+            stream_watchdog_tick()
+
+
+def start_stream_watchdog() -> None:
+    global STREAM_WATCHDOG_THREAD
+    if STREAM_WATCHDOG_THREAD and STREAM_WATCHDOG_THREAD.is_alive():
+        return
+    STREAM_WATCHDOG_STOP.clear()
+    STREAM_WATCHDOG_THREAD = threading.Thread(
+        target=stream_watchdog_loop,
+        name="stream-auto-restart",
+        daemon=True,
+    )
+    STREAM_WATCHDOG_THREAD.start()
+
+
 @APP.get("/")
 def index():
     return jsonify({
@@ -608,18 +846,25 @@ def index():
 
 @APP.get("/api/status")
 def api_status():
-    state = load_state()
     usage = shutil.disk_usage(MEDIA_DIR)
-    net = network_status(state)
-    save_state(state)
-    stream_pid = int(state.get("stream_pid") or 0)
-    stream_running = process_running(stream_pid)
-    processes = ffmpeg_processes()
-    if stream_running and not any(item.get("pid") == stream_pid for item in processes):
-        processes.insert(0, {"pid": stream_pid, "cpu_percent": 0.0})
-    elif not stream_running and processes:
-        stream_pid = int(processes[0].get("pid") or 0)
-        stream_running = stream_pid > 0
+    with STREAM_LIFECYCLE_LOCK:
+        state = load_state()
+        net = network_status(state)
+        stream_pid = int(state.get("stream_pid") or 0)
+        stream_running = stream_process_owned(stream_pid)
+        processes = ffmpeg_processes()
+        if not stream_running and processes:
+            stream_pid = int(processes[0].get("pid") or 0)
+            stream_running = stream_pid > 0
+            state["stream_pid"] = stream_pid
+        auto_restart = dict(state.get("auto_restart") or {})
+        auto_restart.setdefault("enabled", STREAM_AUTO_RESTART_ENABLED)
+        auto_restart.setdefault("desired", bool(state.get("stream_desired")))
+        auto_restart.setdefault("status", "running" if stream_running else "idle")
+        auto_restart.setdefault("restart_count", 0)
+        auto_restart.setdefault("consecutive_failures", 0)
+        auto_restart.setdefault("last_error", "")
+        save_state(state)
     load_avg = list(os.getloadavg()) if hasattr(os, "getloadavg") else []
     memory = memory_status()
     boot_time = 0.0
@@ -670,12 +915,13 @@ def api_status():
             "current_bitrate_kbps": 0,
             "current_bitrate_label": "待开播后校正",
             "adaptive": {"enabled": False, "status": "off"},
-            "auto_restart": {"enabled": False},
+            "auto_restart": auto_restart,
             "relay": {"enabled": False},
             "tuning": {"fifo_enabled": False},
         },
         "stream_config": {
-            "has_stream_key": bool(state.get("has_stream_key")),
+            "has_stream_key": bool(state.get("has_stream_key")) and STREAM_RESTART_FILE.exists(),
+            "restart_ready": STREAM_RESTART_FILE.exists(),
             **(state.get("stream_config") or {}),
         },
         "transfer": upload_transfer_status(state),
@@ -700,14 +946,15 @@ def api_upload_probe():
     started_at = time.time()
     size = len(request.get_data(cache=False))
     elapsed = max(0.001, time.time() - started_at)
-    state = load_state()
-    state["last_probe"] = {
-        "size": size,
-        "elapsed_ms": int(elapsed * 1000),
-        "bytes_per_second": int(size / elapsed),
-        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-    }
-    save_state(state)
+    with STREAM_LIFECYCLE_LOCK:
+        state = load_state()
+        state["last_probe"] = {
+            "size": size,
+            "elapsed_ms": int(elapsed * 1000),
+            "bytes_per_second": int(size / elapsed),
+            "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        }
+        save_state(state)
     return jsonify({"ok": True, "received": size, "bytes_per_second": int(size / elapsed)})
 
 
@@ -808,26 +1055,27 @@ def api_upload_chunk():
         expire_upload_ticket(ticket_value)
     elapsed = max(0.001, time.time() - started_at)
     chunk_bytes = int(received_size - offset) if received_size >= offset else 0
-    state = load_state()
-    active_uploads = dict(state.get("active_uploads") or {})
-    if complete:
-        active_uploads.pop(upload_id, None)
-        state["completed_uploads_total"] = int(state.get("completed_uploads_total") or 0) + 1
-    else:
-        active_uploads[upload_id] = {
-            "filename": filename,
-            "received_size": received_size,
-            "total_size": total_size,
-            "updated_at": time.time(),
-        }
-    state["active_uploads"] = active_uploads
-    state["bytes_received_total"] = int(state.get("bytes_received_total") or 0) + max(0, chunk_bytes)
-    state["chunks_received_total"] = int(state.get("chunks_received_total") or 0) + 1
-    state["last_event"] = "upload-complete" if complete else "upload-chunk"
-    state["last_route"] = str(request.headers.get("X-Upload-Route") or "direct-agent")
-    state["last_error"] = ""
-    state["last_event_at_label"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    save_state(state)
+    with STREAM_LIFECYCLE_LOCK:
+        state = load_state()
+        active_uploads = dict(state.get("active_uploads") or {})
+        if complete:
+            active_uploads.pop(upload_id, None)
+            state["completed_uploads_total"] = int(state.get("completed_uploads_total") or 0) + 1
+        else:
+            active_uploads[upload_id] = {
+                "filename": filename,
+                "received_size": received_size,
+                "total_size": total_size,
+                "updated_at": time.time(),
+            }
+        state["active_uploads"] = active_uploads
+        state["bytes_received_total"] = int(state.get("bytes_received_total") or 0) + max(0, chunk_bytes)
+        state["chunks_received_total"] = int(state.get("chunks_received_total") or 0) + 1
+        state["last_event"] = "upload-complete" if complete else "upload-chunk"
+        state["last_route"] = str(request.headers.get("X-Upload-Route") or "direct-agent")
+        state["last_error"] = ""
+        state["last_event_at_label"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        save_state(state)
     return jsonify({
         "ok": True,
         "complete": complete,
@@ -1073,11 +1321,12 @@ def api_share_media():
                 headers=headers,
                 timeout=30,
             )
-        state = load_state()
-        state["last_error"] = str(exc)
-        state["last_event"] = "share-failed"
-        state["last_event_at_label"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        save_state(state)
+        with STREAM_LIFECYCLE_LOCK:
+            state = load_state()
+            state["last_error"] = str(exc)
+            state["last_event"] = "share-failed"
+            state["last_event_at_label"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            save_state(state)
         return jsonify({
             "ok": False,
             "message": str(exc),
@@ -1107,97 +1356,97 @@ def api_stream_recommend():
 @APP.post("/api/start-stream")
 def api_start_stream():
     payload = request.get_json(silent=True) or {}
-    state = load_state()
     try:
         video_path = resolve_media_path(str(payload.get("video_path") or ""))
-        output_url = stream_output_url(payload)
-        command = ffmpeg_command(payload, video_path, output_url)
+        ffmpeg_command(payload, video_path, stream_output_url(payload))
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
 
-    previous_pid = int(state.get("stream_pid") or 0)
-    stop_result = stop_process(previous_pid)
-    if not stop_result.get("ok"):
-        return jsonify({"ok": False, "message": "failed to stop previous stream", "stop": stop_result}), 500
-
-    log_path = DATA_DIR / "ffmpeg.log"
-    log_file = log_path.open("ab")
-    try:
-        proc = subprocess.Popen(
-            command,
-            cwd=str(DATA_DIR),
-            stdin=subprocess.DEVNULL,
-            stdout=log_file,
-            stderr=log_file,
-            start_new_session=True,
-        )
-    finally:
-        log_file.close()
-
-    state["has_stream_key"] = bool(payload.get("stream_key")) or bool(state.get("has_stream_key"))
-    state["stream_pid"] = proc.pid
-    state["stream_config"] = {
-        key: value
-        for key, value in payload.items()
-        if key not in {"stream_key"}
-    }
-    state["stream_config"]["video_path"] = str(video_path)
-    state["stream_config"]["stream_url"] = str(payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2").strip().rstrip("/")
-    state["last_started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    save_state(state)
+    with STREAM_LIFECYCLE_LOCK:
+        state = load_state()
+        previous_pid = int(state.get("stream_pid") or 0)
+        stop_result = stop_process(previous_pid)
+        if not stop_result.get("ok"):
+            return jsonify({"ok": False, "message": "failed to stop previous stream", "stop": stop_result}), 500
+        try:
+            result = launch_stream_process(payload, reason="manual-start", persist_recovery=True)
+        except Exception as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 500
     return jsonify({
         "ok": True,
         "message": "stream started",
         "result": {
-            "started_pid": proc.pid,
+            "started_pid": result["pid"],
             "duplicate_processes": 1 if previous_pid and stop_result.get("ok") and not stop_result.get("skipped") else 0,
-            "log_path": str(log_path),
+            "log_path": result["log_path"],
+            "auto_restart": STREAM_AUTO_RESTART_ENABLED,
         },
     })
 
 
 @APP.post("/api/stop-stream")
 def api_stop_stream():
-    state = load_state()
-    stream_pid = int(state.get("stream_pid") or 0)
-    candidate_pids: list[int] = []
-    if process_running(stream_pid):
-        candidate_pids.append(stream_pid)
-    for item in ffmpeg_processes():
-        pid = int(item.get("pid") or 0)
-        if pid > 0 and pid not in candidate_pids:
-            candidate_pids.append(pid)
+    with STREAM_LIFECYCLE_LOCK:
+        state = load_state()
+        stream_pid = int(state.get("stream_pid") or 0)
+        auto_restart = dict(state.get("auto_restart") or {})
+        auto_restart.update({"desired": False, "status": "stopping", "next_retry_at": 0})
+        state["stream_desired"] = False
+        state["auto_restart"] = auto_restart
+        save_state(state)
+        remove_stream_restart_payload()
+        stop_result = stop_process(stream_pid)
+        if not stop_result.get("ok"):
+            return jsonify({
+                "ok": False,
+                "message": "failed to stop the Agent-owned stream process",
+                "result": stop_result,
+            }), 500
 
-    results = [stop_process(pid) for pid in candidate_pids]
-    failed = [item for item in results if not item.get("ok")]
-    if failed:
-        return jsonify({
-            "ok": False,
-            "message": "failed to stop one or more stream processes",
-            "result": {"pids": candidate_pids, "results": results},
-        }), 500
-
-    state["stream_pid"] = 0
-    state["last_stopped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    state["last_stop_result"] = {"pids": candidate_pids, "results": results}
-    save_state(state)
+        state = load_state()
+        state["has_stream_key"] = False
+        state["stream_pid"] = 0
+        state["stream_desired"] = False
+        auto_restart = dict(state.get("auto_restart") or {})
+        auto_restart.update({"desired": False, "status": "stopped", "next_retry_at": 0, "last_error": ""})
+        state["auto_restart"] = auto_restart
+        state["last_stopped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        state["last_stop_result"] = stop_result
+        save_state(state)
     return jsonify({
         "ok": True,
-        "message": "stream stopped" if candidate_pids else "stream was not running",
-        "result": {"pids": candidate_pids, "results": results},
+        "message": "stream stopped" if not stop_result.get("skipped") else "stream was not running",
+        "result": stop_result,
     })
 
 
 @APP.post("/api/restart-stream")
 def api_restart_stream():
+    with STREAM_LIFECYCLE_LOCK:
+        payload = load_stream_restart_payload()
+        if not payload:
+            return jsonify({"ok": False, "message": "no active stream recovery configuration"}), 409
+        state = load_state()
+        previous_pid = int(state.get("stream_pid") or 0)
+        state["stream_desired"] = True
+        save_state(state)
+        stop_result = stop_process(previous_pid)
+        if not stop_result.get("ok"):
+            return jsonify({"ok": False, "message": "failed to stop current stream", "stop": stop_result}), 500
+        try:
+            result = launch_stream_process(payload, reason="manual-restart", persist_recovery=False)
+        except Exception as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 500
     return jsonify({
-        "ok": False,
-        "message": "cached restart is disabled because the headless agent does not persist stream keys",
-    }), 501
+        "ok": True,
+        "message": "stream restarted",
+        "result": {"previous_pid": previous_pid, "started_pid": result["pid"], "auto_restart": STREAM_AUTO_RESTART_ENABLED},
+    })
 
 
 def main() -> None:
     ensure_dirs()
+    start_stream_watchdog()
     try:
         from waitress import serve
 
