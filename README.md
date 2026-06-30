@@ -27,11 +27,13 @@ One-line Hub uninstall on Windows, preserving saved data:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:STREAM_HUB_ACTION='uninstall'; iwr https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install-hub.ps1 -UseBasicParsing | iex"
 ```
 
-One-line Hub install/update/uninstall menu on Linux:
+One-line system Hub install/update/uninstall menu on Linux (recommended for a VPS):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install-hub.sh | sh
+curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install-hub.sh | sudo sh
 ```
+
+This installs a root-run Hub at `/opt/stream-control-hub` with a system service. For an unprivileged per-user install, omit `sudo`; it uses `$HOME/stream-control-hub` and a user service. Updates auto-detect an existing installation in either location, preserve its host, port, nodes-file path, and control token, and retain the matching systemd service scope. You can override this explicitly with `INSTALL_DIR=...` and `STREAM_HUB_SERVICE_MODE=system|user`.
 
 Menu options:
 
