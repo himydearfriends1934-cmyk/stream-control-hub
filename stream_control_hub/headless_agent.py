@@ -872,6 +872,7 @@ def index():
 
 @APP.get("/api/status")
 def api_status():
+    ensure_dirs()
     usage = shutil.disk_usage(MEDIA_DIR)
     with STREAM_LIFECYCLE_LOCK:
         state = load_state()
