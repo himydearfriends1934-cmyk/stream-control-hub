@@ -21,6 +21,8 @@ import requests
 from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
 
+from .youtube_api import YouTubeAPIClient, YouTubeAPIError
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,6 +74,14 @@ STREAM_WATCHDOG_INTERVAL_SECONDS = max(2, int(os.environ.get("STREAM_WATCHDOG_IN
 STREAM_RESTART_BASE_SECONDS = max(2, int(os.environ.get("STREAM_RESTART_BASE_SECONDS", "5")))
 STREAM_RESTART_MAX_SECONDS = max(STREAM_RESTART_BASE_SECONDS, int(os.environ.get("STREAM_RESTART_MAX_SECONDS", "60")))
 STREAM_RESTART_STABLE_SECONDS = max(15, int(os.environ.get("STREAM_RESTART_STABLE_SECONDS", "60")))
+YOUTUBE_CREDENTIAL_FILE = Path(
+    os.environ.get("YOUTUBE_CREDENTIAL_FILE", str(DATA_DIR / "youtube_credentials.json"))
+)
+YOUTUBE_CLIENT = YouTubeAPIClient(
+    client_id=os.environ.get("YOUTUBE_CLIENT_ID", ""),
+    client_secret=os.environ.get("YOUTUBE_CLIENT_SECRET", ""),
+    credential_path=YOUTUBE_CREDENTIAL_FILE,
+)
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = MAX_CHUNK_BYTES + 1024 * 1024
@@ -285,6 +295,7 @@ def save_stream_restart_payload(payload: dict[str, Any], video_path: Path) -> No
     allowed = {
         "stream_url",
         "stream_key",
+        "youtube_stream_id",
         "copy_mode",
         "adaptive_mode",
         "stream_output_mode",
@@ -295,7 +306,11 @@ def save_stream_restart_payload(payload: dict[str, Any], video_path: Path) -> No
         "resolution",
         "keyframe_seconds",
     }
-    recovery = {key: payload.get(key) for key in allowed if key in payload}
+    recovery = {
+        key: payload.get(key)
+        for key in allowed
+        if key in payload and not (key == "stream_key" and not payload.get(key))
+    }
     recovery["video_path"] = str(video_path)
     write_private_json(STREAM_RESTART_FILE, recovery)
 
@@ -601,8 +616,11 @@ def resolve_media_path(value: str) -> Path:
 def stream_output_url(payload: dict[str, Any]) -> str:
     stream_url = str(payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2").strip().rstrip("/")
     stream_key = str(payload.get("stream_key") or "").strip()
-    if str(payload.get("stream_output_mode") or "direct").strip().lower() == "local_relay":
+    output_mode = str(payload.get("stream_output_mode") or "direct").strip().lower()
+    if output_mode == "local_relay":
         return stream_url
+    if output_mode == "youtube_api":
+        return YOUTUBE_CLIENT.ingestion_target(str(payload.get("youtube_stream_id") or ""))
     if not stream_key:
         raise ValueError("missing stream key")
     return f"{stream_url}/{stream_key}"
@@ -679,9 +697,15 @@ def stream_restart_backoff(consecutive_failures: int) -> int:
     return min(STREAM_RESTART_MAX_SECONDS, STREAM_RESTART_BASE_SECONDS * multiplier)
 
 
-def launch_stream_process(payload: dict[str, Any], *, reason: str, persist_recovery: bool) -> dict[str, Any]:
+def launch_stream_process(
+    payload: dict[str, Any],
+    *,
+    reason: str,
+    persist_recovery: bool,
+    resolved_output_url: str = "",
+) -> dict[str, Any]:
     video_path = resolve_media_path(str(payload.get("video_path") or ""))
-    output_url = stream_output_url(payload)
+    output_url = resolved_output_url or stream_output_url(payload)
     command = ffmpeg_command(payload, video_path, output_url)
     if persist_recovery:
         save_stream_restart_payload(payload, video_path)
@@ -744,7 +768,9 @@ def launch_stream_process(payload: dict[str, Any], *, reason: str, persist_recov
     state["stream_desired"] = True
     state["stream_pid"] = proc.pid
     state["stream_started_at_epoch"] = now
-    state["stream_config"] = {key: value for key, value in payload.items() if key != "stream_key"}
+    state["stream_config"] = {
+        key: value for key, value in payload.items() if key != "stream_key" and not key.startswith("_")
+    }
     state["stream_config"]["video_path"] = str(video_path)
     state["stream_config"]["stream_url"] = str(
         payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2"
@@ -899,7 +925,7 @@ def api_status():
             "name": AGENT_NAME,
             "mode": "headless-agent",
             "headless": True,
-            "version": "0.1.0",
+            "version": "0.2.0",
             "control_hub": CONTROL_HUB,
         },
         "disk": {
@@ -924,6 +950,7 @@ def api_status():
             "restart_ready": STREAM_RESTART_FILE.exists(),
             **(state.get("stream_config") or {}),
         },
+        "youtube": YOUTUBE_CLIENT.local_status(),
         "transfer": upload_transfer_status(state),
         "public_upload": {
             "enabled": bool(public_origin),
@@ -1353,13 +1380,95 @@ def api_stream_recommend():
     })
 
 
+def youtube_error_response(exc: Exception):
+    if isinstance(exc, YouTubeAPIError):
+        return jsonify({"ok": False, "message": str(exc), "reason": exc.reason}), exc.status_code
+    return jsonify({"ok": False, "message": str(exc)}), 502
+
+
+@APP.get("/api/youtube/status")
+def api_youtube_status():
+    status = YOUTUBE_CLIENT.local_status()
+    if request.args.get("verify") in {"1", "true", "yes"} and status["authorized"]:
+        try:
+            status["channel"] = YOUTUBE_CLIENT.channel()
+        except Exception as exc:
+            return youtube_error_response(exc)
+    return jsonify({"ok": True, **status})
+
+
+@APP.post("/api/youtube/oauth/start")
+def api_youtube_oauth_start():
+    try:
+        result = YOUTUBE_CLIENT.start_device_authorization()
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({"ok": True, **result})
+
+
+@APP.post("/api/youtube/oauth/poll")
+def api_youtube_oauth_poll():
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = YOUTUBE_CLIENT.poll_device_authorization(str(payload.get("session_id") or ""))
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({"ok": True, **result})
+
+
+@APP.post("/api/youtube/oauth/revoke")
+def api_youtube_oauth_revoke():
+    state = load_state()
+    stream_config = state.get("stream_config") or {}
+    if state.get("stream_desired") and stream_config.get("stream_output_mode") == "youtube_api":
+        return jsonify({
+            "ok": False,
+            "message": "stop the active YouTube API stream before revoking authorization",
+        }), 409
+    try:
+        YOUTUBE_CLIENT.revoke()
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({"ok": True, "message": "YouTube authorization revoked"})
+
+
+@APP.get("/api/youtube/streams")
+def api_youtube_streams():
+    try:
+        streams = YOUTUBE_CLIENT.list_streams()
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({"ok": True, "streams": streams})
+
+
+@APP.get("/api/youtube/broadcasts")
+def api_youtube_broadcasts():
+    try:
+        broadcasts = YOUTUBE_CLIENT.list_broadcasts()
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({"ok": True, "broadcasts": broadcasts})
+
+
+@APP.post("/api/youtube/prepare")
+def api_youtube_prepare():
+    try:
+        result = YOUTUBE_CLIENT.prepare_broadcast(request.get_json(silent=True) or {})
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({"ok": True, "message": "YouTube broadcast prepared and bound", "result": result})
+
+
 @APP.post("/api/start-stream")
 def api_start_stream():
     payload = request.get_json(silent=True) or {}
     try:
         video_path = resolve_media_path(str(payload.get("video_path") or ""))
-        ffmpeg_command(payload, video_path, stream_output_url(payload))
+        output_url = stream_output_url(payload)
+        ffmpeg_command(payload, video_path, output_url)
     except Exception as exc:
+        if isinstance(exc, YouTubeAPIError):
+            return youtube_error_response(exc)
         return jsonify({"ok": False, "message": str(exc)}), 400
 
     with STREAM_LIFECYCLE_LOCK:
@@ -1369,7 +1478,12 @@ def api_start_stream():
         if not stop_result.get("ok"):
             return jsonify({"ok": False, "message": "failed to stop previous stream", "stop": stop_result}), 500
         try:
-            result = launch_stream_process(payload, reason="manual-start", persist_recovery=True)
+            result = launch_stream_process(
+                payload,
+                reason="manual-start",
+                persist_recovery=True,
+                resolved_output_url=output_url,
+            )
         except Exception as exc:
             return jsonify({"ok": False, "message": str(exc)}), 500
     return jsonify({

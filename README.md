@@ -116,6 +116,34 @@ The Agent automatically discovers its public IPv4 during install and update. It 
 
 Active streams are supervised by the Headless Agent. While a stream is desired, the Agent stores a mode `600` recovery payload in its private data directory, restarts an unexpectedly exited FFmpeg process with bounded exponential backoff, and exposes restart status in monitoring. A manual stop disables recovery and immediately removes the recovery payload. Stream keys are never returned by the API or written to the general runtime state file.
 
+## YouTube Live API
+
+The Headless Agent supports the official YouTube Live Streaming API through OAuth 2.0 device authorization. The Hub only coordinates with YouTube stream and broadcast IDs. The Google refresh token and the RTMP stream name stay on the Agent; neither is returned to the Hub. Automatic FFmpeg recovery resolves the ingestion target again from the saved YouTube stream ID, so no YouTube stream key is needed in the recovery payload.
+
+1. Enable YouTube Data API v3 in Google Cloud.
+2. Create an OAuth client with application type `TVs and Limited Input devices`.
+3. Install or update the Agent with its client ID. The client secret is optional for clients that do not issue one:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install-agent.sh | sudo env STREAM_AGENT_CONTROL_HUB='http://100.64.0.1:8788' YOUTUBE_CLIENT_ID='your-client-id' YOUTUBE_CLIENT_SECRET='your-optional-client-secret' sh
+```
+
+The installer preserves these values on later updates and stores `.agent.env` with mode `600`. In the Hub, select the Agent, open `YouTube API`, click `连接 YouTube`, enter the displayed device code on Google's authorization page, then create or bind a broadcast. The Agent stores the resulting refresh token at `agent_data/youtube_credentials.json` with mode `600`.
+
+Agent endpoints:
+
+```text
+GET  /api/youtube/status
+POST /api/youtube/oauth/start
+POST /api/youtube/oauth/poll
+POST /api/youtube/oauth/revoke
+GET  /api/youtube/streams
+GET  /api/youtube/broadcasts
+POST /api/youtube/prepare
+```
+
+Official references: [OAuth 2.0 for TV and limited-input devices](https://developers.google.com/youtube/v3/guides/auth/devices) and [YouTube Live Streaming API](https://developers.google.com/youtube/v3/live/getting-started).
+
 The app does not write the Tailscale auth key to repo config or audit logs. The intended deployment model is local or trusted-network use, preferably behind Tailscale.
 
 ## Operational Safety
@@ -266,9 +294,9 @@ Linux Hub 和 Headless Agent 一键安装脚本在传入 `TAILSCALE_AUTH_KEY=...
 
 ### 推流说明
 
-Headless Agent 支持接收浏览器直传的视频，也支持把已有视频直接共享到其他 Agent，并用 FFmpeg 启动推流。Smart Start 支持在 Hub 页面选择节点、选择服务器视频、填写 YouTube Stream Key，然后一键启动。
+Headless Agent 支持接收浏览器直传的视频，也支持把已有视频直接共享到其他 Agent，并用 FFmpeg 启动推流。Smart Start 支持手动填写 YouTube Stream Key，也支持从 YouTube API 向导选择已授权的直播流后一键启动。
 
-直播码只在启动请求里临时转发，不会写入 Hub 的仓库配置。为了方便操作，页面保留直播码输入框；建议只在本机、Tailscale 或可信内网里使用。
+手动直播码不会写入 Hub 的仓库配置；推流期间只保存在 Agent 的 `0600` 恢复文件中，停止推流立即删除。YouTube API 模式下，refresh token 和 RTMP stream name 只留在 Agent，Hub 只传递 stream ID。建议只在本机、Tailscale 或可信内网里使用。
 
 ### 本地开发
 
