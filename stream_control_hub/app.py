@@ -693,7 +693,7 @@ HTML = r"""
       <div class="command-head">
         <div>
           <h2>开播指挥条 / Smart Start</h2>
-          <p>和右侧 VPS 节点表联动：右侧选中哪台，这里就控制哪台。先核对目标节点，再填直播码、选视频、调优、开播。</p>
+          <p>和右侧 VPS 节点表联动：先核对目标节点，再选择手动直播码或 YouTube API、选视频、调优、开播。</p>
         </div>
         <span class="pill warn">核对节点后再开播</span>
       </div>
@@ -710,14 +710,20 @@ HTML = r"""
           </select>
         </div>
         <div class="command-field">
-          <label>YouTube Stream Key</label>
-          <input id="streamKeyInput" type="password" autocomplete="off" placeholder="粘贴直播码，只会转发到当前节点">
+          <label>YouTube 目标</label>
+          <div class="command-pair">
+            <input id="streamKeyInput" type="password" autocomplete="off" placeholder="手动直播码">
+            <select id="youtubeStreamSelect" disabled>
+              <option value="">先连接 YouTube API</option>
+            </select>
+          </div>
         </div>
         <div class="command-field">
           <label>输出 / 自适应</label>
           <div class="command-pair">
             <select id="streamOutputModeInput">
               <option value="direct">直接推 YouTube</option>
+              <option value="youtube_api">YouTube API</option>
               <option value="local_relay">本地中继</option>
             </select>
             <select id="adaptiveModeInput">
@@ -826,8 +832,11 @@ HTML = r"""
           </div>
         </div>
         <div class="card compact-card">
-          <h2>当前策略</h2>
-          <p>上传链路固定为 safe-stable-fast：公网 probe、速度阈值、失败切内网、审计脱敏。</p>
+          <h2>YouTube API</h2>
+          <p>在选中 Agent 上授权频道、创建直播并绑定可复用推流。</p>
+          <div class="actions">
+            <button class="primary" id="youtubeWizardBtn">打开 YouTube 向导</button>
+          </div>
         </div>
         <div class="card compact-card">
           <h2>Tailscale 连接</h2>
@@ -906,6 +915,54 @@ HTML = r"""
     </div>
   </div>
 
+  <div class="modal-backdrop" id="youtubeWizardModal" aria-hidden="true">
+    <div class="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="youtubeWizardTitle">
+      <div class="wizard-head">
+        <div>
+          <h2 id="youtubeWizardTitle">YouTube Live API</h2>
+          <p>授权和直播码都留在当前 Agent；Hub 只保存 YouTube stream ID。</p>
+        </div>
+        <button class="wizard-close" id="youtubeWizardClose" title="关闭">X</button>
+      </div>
+      <div class="wizard-grid">
+        <div class="wizard-field">
+          <label>当前 Agent</label>
+          <input id="youtubeNodeInput" type="text" readonly value="先选择 Agent">
+        </div>
+        <div class="wizard-field">
+          <label>已有可复用直播流</label>
+          <select id="youtubePrepareStreamSelect">
+            <option value="">创建新的可复用直播流</option>
+          </select>
+        </div>
+        <div class="wizard-field">
+          <label>直播标题</label>
+          <input id="youtubeTitleInput" type="text" maxlength="100" placeholder="直播标题">
+        </div>
+        <div class="wizard-field">
+          <label>可见范围 / 计划时间</label>
+          <div class="command-pair">
+            <select id="youtubePrivacyInput">
+              <option value="private">私享</option>
+              <option value="unlisted">不公开</option>
+              <option value="public">公开</option>
+            </select>
+            <input id="youtubeScheduleInput" type="datetime-local">
+          </div>
+        </div>
+      </div>
+      <div class="wizard-actions">
+        <button id="youtubeRefreshBtn">检查 / 刷新</button>
+        <button class="primary" id="youtubeAuthorizeBtn">连接 YouTube</button>
+        <button id="youtubePrepareBtn">创建并绑定直播</button>
+        <button class="danger" id="youtubeRevokeBtn">断开授权</button>
+      </div>
+      <div class="wizard-status" id="youtubeWizardLog">
+        <div class="wizard-status-line">选择 Agent 后检查状态。首次使用需要在 Agent 的 .agent.env 配置 YOUTUBE_CLIENT_ID。</div>
+      </div>
+    </div>
+  </div>
+
   <script>
     const CONTROL_TOKEN = new URLSearchParams(window.location.search).get("token") || localStorage.getItem("streamHubControlToken") || "";
     function authHeaders(extra = {}) {
@@ -942,6 +999,7 @@ HTML = r"""
       streamNodeHint: document.getElementById("streamNodeHint"),
       streamVideoSelect: document.getElementById("streamVideoSelect"),
       streamKeyInput: document.getElementById("streamKeyInput"),
+      youtubeStreamSelect: document.getElementById("youtubeStreamSelect"),
       streamUrlInput: document.getElementById("streamUrlInput"),
       streamOutputModeInput: document.getElementById("streamOutputModeInput"),
       adaptiveModeInput: document.getElementById("adaptiveModeInput"),
@@ -956,6 +1014,19 @@ HTML = r"""
       applyTuneBtn: document.getElementById("applyTuneBtn"),
       commandAdvanced: document.getElementById("commandAdvanced"),
       tuneBox: document.getElementById("tuneBox"),
+      youtubeWizardBtn: document.getElementById("youtubeWizardBtn"),
+      youtubeWizardModal: document.getElementById("youtubeWizardModal"),
+      youtubeWizardClose: document.getElementById("youtubeWizardClose"),
+      youtubeWizardLog: document.getElementById("youtubeWizardLog"),
+      youtubeNodeInput: document.getElementById("youtubeNodeInput"),
+      youtubePrepareStreamSelect: document.getElementById("youtubePrepareStreamSelect"),
+      youtubeTitleInput: document.getElementById("youtubeTitleInput"),
+      youtubePrivacyInput: document.getElementById("youtubePrivacyInput"),
+      youtubeScheduleInput: document.getElementById("youtubeScheduleInput"),
+      youtubeRefreshBtn: document.getElementById("youtubeRefreshBtn"),
+      youtubeAuthorizeBtn: document.getElementById("youtubeAuthorizeBtn"),
+      youtubePrepareBtn: document.getElementById("youtubePrepareBtn"),
+      youtubeRevokeBtn: document.getElementById("youtubeRevokeBtn"),
       updateBox: document.getElementById("updateBox"),
       uploadBox: document.getElementById("uploadBox"),
       logBox: document.getElementById("logBox"),
@@ -966,6 +1037,8 @@ HTML = r"""
     let lastTuneRecommendation = null;
     let activeUpload = null;
     let contextMediaRow = null;
+    let youtubeOauthSession = "";
+    let youtubeOauthPollTimer = null;
 
     renderTransfer({
       title: "传输状态",
@@ -1319,7 +1392,7 @@ HTML = r"""
               ${metric("FFmpeg", stream.running ? "运行中" : "未运行")}
               ${metric("进程", processText)}
               ${metric("视频数", `${videos.length}`)}
-              ${metric("直播码", config.has_stream_key ? "已保存" : "未保存")}
+              ${metric("推流目标", config.stream_output_mode === "youtube_api" ? "YouTube API" : (config.has_stream_key ? "直播码" : "未配置"))}
             </div>
             <div class="mini-table" style="margin-top: 10px;">
               ${miniRow("自动重启", autoRestart.enabled ? `开启 · ${autoRestart.last_error || "正常"}` : "关闭")}
@@ -1432,6 +1505,205 @@ HTML = r"""
       `;
     }
 
+    function syncStreamOutputMode() {
+      const mode = refs.streamOutputModeInput.value || "direct";
+      refs.streamKeyInput.disabled = mode !== "direct";
+      refs.youtubeStreamSelect.disabled = mode !== "youtube_api";
+    }
+
+    function setYouTubeModalOpen(open) {
+      refs.youtubeWizardModal.classList.toggle("open", open);
+      refs.youtubeWizardModal.setAttribute("aria-hidden", open ? "false" : "true");
+      if (!open && youtubeOauthPollTimer) {
+        clearTimeout(youtubeOauthPollTimer);
+        youtubeOauthPollTimer = null;
+      }
+      if (open) {
+        const node = selectedNode();
+        refs.youtubeNodeInput.value = node ? `${node.name || node.id} (${node.id})` : "先选择 Agent";
+        if (!refs.youtubeScheduleInput.value) {
+          const planned = new Date(Date.now() + 5 * 60 * 1000);
+          const local = new Date(planned.getTime() - planned.getTimezoneOffset() * 60 * 1000);
+          refs.youtubeScheduleInput.value = local.toISOString().slice(0, 16);
+        }
+        refreshYouTubeResources();
+      }
+    }
+
+    function renderYouTubeStreams(streams = [], selectedStreamId = "") {
+      const previousMain = selectedStreamId || refs.youtubeStreamSelect.value;
+      const previousPrepare = refs.youtubePrepareStreamSelect.value;
+      const streamOptions = streams.map((item) => {
+        const status = item.stream_status || "ready";
+        return `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title || item.id)} (${escapeHtml(status)})</option>`;
+      }).join("");
+      refs.youtubeStreamSelect.innerHTML = streams.length
+        ? streamOptions
+        : `<option value="">没有可用 YouTube 直播流</option>`;
+      refs.youtubePrepareStreamSelect.innerHTML = `<option value="">创建新的可复用直播流</option>${streamOptions}`;
+      if (streams.some((item) => item.id === previousMain)) refs.youtubeStreamSelect.value = previousMain;
+      if (streams.some((item) => item.id === previousPrepare)) refs.youtubePrepareStreamSelect.value = previousPrepare;
+      syncStreamOutputMode();
+    }
+
+    async function refreshYouTubeResources() {
+      const node = selectedNode();
+      if (!node) {
+        refs.youtubeWizardLog.textContent = "请先选择一个 Agent。";
+        return null;
+      }
+      refs.youtubeRefreshBtn.disabled = true;
+      refs.youtubeNodeInput.value = `${node.name || node.id} (${node.id})`;
+      refs.youtubeWizardLog.textContent = "正在从 Agent 读取 YouTube 授权和直播资源...";
+      try {
+        const data = await postNodeAction("/api/nodes/youtube/resources", { node_id: selectedNodeId });
+        if (!data.ok && data.configured === undefined) {
+          renderYouTubeStreams([]);
+          refs.youtubeWizardLog.textContent = data.message || "YouTube API 读取失败";
+          return data;
+        }
+        if (!data.configured) {
+          renderYouTubeStreams([]);
+          refs.youtubeWizardLog.textContent = "当前 Agent 尚未配置 YOUTUBE_CLIENT_ID。请先在 Agent 的 .agent.env 配置 Google TV / Limited Input OAuth client ID，再更新或重启 Agent。";
+          return data;
+        }
+        if (!data.authorized) {
+          renderYouTubeStreams([]);
+          refs.youtubeWizardLog.textContent = "Client ID 已配置，频道尚未授权。点击“连接 YouTube”获取设备验证码。";
+          return data;
+        }
+        if (!data.ok) {
+          refs.youtubeWizardLog.textContent = data.message || "YouTube API 读取失败";
+          return data;
+        }
+        const selectedId = selectedNode()?.health?.stream_config?.youtube_stream_id || "";
+        renderYouTubeStreams(data.streams || [], selectedId);
+        const lines = [
+          `频道：${data.channel?.title || "--"}`,
+          `直播流：${(data.streams || []).length} 个`,
+          `直播活动：${(data.broadcasts || []).length} 个`,
+        ];
+        (data.broadcasts || []).slice(0, 5).forEach((item) => {
+          lines.push(`${item.title || item.id} / ${item.life_cycle_status || "--"} / ${item.privacy_status || "--"}`);
+        });
+        refs.youtubeWizardLog.textContent = lines.join("\n");
+        return data;
+      } catch (error) {
+        refs.youtubeWizardLog.textContent = friendlyError(error, "YouTube API 读取失败");
+        return null;
+      } finally {
+        refs.youtubeRefreshBtn.disabled = false;
+      }
+    }
+
+    async function pollYouTubeAuthorization(delaySeconds = 5) {
+      if (!youtubeOauthSession) return;
+      if (youtubeOauthPollTimer) clearTimeout(youtubeOauthPollTimer);
+      youtubeOauthPollTimer = setTimeout(async () => {
+        try {
+          const data = await postNodeAction("/api/nodes/youtube/oauth/poll", {
+            node_id: selectedNodeId,
+            session_id: youtubeOauthSession,
+          });
+          if (data.ok && data.authorized) {
+            youtubeOauthSession = "";
+            youtubeOauthPollTimer = null;
+            refs.youtubeWizardLog.textContent = "YouTube 授权成功，正在读取频道资源...";
+            await refreshYouTubeResources();
+            return;
+          }
+          if (data.ok && data.pending) {
+            pollYouTubeAuthorization(Number(data.retry_after || 5));
+            return;
+          }
+          youtubeOauthSession = "";
+          youtubeOauthPollTimer = null;
+          refs.youtubeWizardLog.textContent = data.message || "YouTube 授权失败";
+        } catch (error) {
+          youtubeOauthSession = "";
+          youtubeOauthPollTimer = null;
+          refs.youtubeWizardLog.textContent = friendlyError(error, "YouTube 授权状态读取失败");
+        }
+      }, Math.max(1, Number(delaySeconds || 5)) * 1000);
+    }
+
+    async function startYouTubeAuthorization() {
+      if (!selectedNodeId) {
+        refs.youtubeWizardLog.textContent = "请先选择一个 Agent。";
+        return;
+      }
+      refs.youtubeAuthorizeBtn.disabled = true;
+      try {
+        const data = await postNodeAction("/api/nodes/youtube/oauth/start", { node_id: selectedNodeId });
+        if (!data.ok) {
+          refs.youtubeWizardLog.textContent = data.message || "无法启动 YouTube 授权";
+          return;
+        }
+        youtubeOauthSession = data.session_id;
+        refs.youtubeWizardLog.innerHTML = `
+          <div class="wizard-status-line done"><strong>设备验证码：${escapeHtml(data.user_code)}</strong></div>
+          <div class="wizard-status-line"><a href="${escapeHtml(data.verification_url)}" target="_blank" rel="noopener">打开 Google 设备授权页面</a></div>
+          <div class="wizard-status-line">完成授权后本页会自动刷新。</div>
+        `;
+        window.open(data.verification_url, "_blank", "noopener");
+        pollYouTubeAuthorization(Number(data.interval || 5));
+      } catch (error) {
+        refs.youtubeWizardLog.textContent = friendlyError(error, "无法启动 YouTube 授权");
+      } finally {
+        refs.youtubeAuthorizeBtn.disabled = false;
+      }
+    }
+
+    async function prepareYouTubeBroadcast() {
+      const title = refs.youtubeTitleInput.value.trim();
+      if (!selectedNodeId || !title) {
+        refs.youtubeWizardLog.textContent = "请选择 Agent 并填写直播标题。";
+        return;
+      }
+      refs.youtubePrepareBtn.disabled = true;
+      try {
+        const resolutionMatch = refs.resolutionInput.value.match(/x(\d+)$/i);
+        const scheduled = refs.youtubeScheduleInput.value
+          ? new Date(refs.youtubeScheduleInput.value).toISOString()
+          : "";
+        const data = await postNodeAction("/api/nodes/youtube/prepare", {
+          node_id: selectedNodeId,
+          title,
+          privacy_status: refs.youtubePrivacyInput.value,
+          scheduled_start_time: scheduled,
+          stream_id: refs.youtubePrepareStreamSelect.value,
+          resolution: resolutionMatch ? `${resolutionMatch[1]}p` : "720p",
+          frame_rate: Number(refs.fpsInput.value || 30) >= 50 ? "60fps" : "30fps",
+          enable_auto_start: true,
+          enable_auto_stop: true,
+        });
+        if (!data.ok) {
+          refs.youtubeWizardLog.textContent = data.message || "创建 YouTube 直播失败";
+          return;
+        }
+        refs.youtubeWizardLog.textContent = `直播已创建并绑定。\n${data.result?.title || title}\n${data.result?.watch_url || ""}`;
+        await refreshYouTubeResources();
+        refs.youtubeStreamSelect.value = data.result?.stream_id || "";
+        refs.streamOutputModeInput.value = "youtube_api";
+        syncStreamOutputMode();
+      } catch (error) {
+        refs.youtubeWizardLog.textContent = friendlyError(error, "创建 YouTube 直播失败");
+      } finally {
+        refs.youtubePrepareBtn.disabled = false;
+      }
+    }
+
+    async function revokeYouTubeAuthorization() {
+      if (!selectedNodeId || !window.confirm("确认断开当前 Agent 的 YouTube 授权？")) return;
+      try {
+        const data = await postNodeAction("/api/nodes/youtube/oauth/revoke", { node_id: selectedNodeId });
+        refs.youtubeWizardLog.textContent = data.ok ? "YouTube 授权已断开。" : (data.message || "断开授权失败");
+        if (data.ok) renderYouTubeStreams([]);
+      } catch (error) {
+        refs.youtubeWizardLog.textContent = friendlyError(error, "断开授权失败");
+      }
+    }
+
     function renderStreamControls() {
       const node = selectedNode();
       const h = node?.health || {};
@@ -1453,6 +1725,8 @@ HTML = r"""
       if (config.audio_bitrate) refs.audioBitrateInput.value = config.audio_bitrate;
       if (config.preset && config.preset !== "copy") refs.presetInput.value = config.preset;
       if (config.keyframe_seconds) refs.keyframeInput.value = config.keyframe_seconds;
+      if (config.youtube_stream_id) refs.youtubeStreamSelect.value = config.youtube_stream_id;
+      syncStreamOutputMode();
     }
 
     function streamPayload({ includeKey = true } = {}) {
@@ -1460,6 +1734,7 @@ HTML = r"""
         node_id: selectedNodeId,
         stream_url: refs.streamUrlInput.value.trim(),
         stream_key: includeKey ? refs.streamKeyInput.value.trim() : "",
+        youtube_stream_id: refs.youtubeStreamSelect.value,
         video_path: refs.streamVideoSelect.value,
         copy_mode: refs.tuneBox.dataset.copyMode === "1",
         adaptive_mode: refs.adaptiveModeInput.value || "auto",
@@ -2017,10 +2292,15 @@ HTML = r"""
     async function smartStart() {
       const payload = streamPayload({ includeKey: true });
       const relayMode = payload.stream_output_mode === "local_relay";
-      if (!payload.node_id || !payload.video_path || (!relayMode && !payload.stream_key)) {
+      const youtubeApiMode = payload.stream_output_mode === "youtube_api";
+      const targetMissing = (!relayMode && !youtubeApiMode && !payload.stream_key)
+        || (youtubeApiMode && !payload.youtube_stream_id);
+      if (!payload.node_id || !payload.video_path || targetMissing) {
         refs.tuneBox.textContent = relayMode
           ? "请先选择节点和服务器视频，并确认本地中继可用。"
-          : "请先选择节点、服务器视频，并粘贴 YouTube 直播码。";
+          : youtubeApiMode
+            ? "请先通过 YouTube 向导授权频道并选择直播流。"
+            : "请先选择节点、服务器视频，并粘贴 YouTube 直播码。";
         return;
       }
       refs.smartStartBtn.disabled = true;
@@ -2038,6 +2318,7 @@ HTML = r"""
           Object.assign(startPayload, lastTuneRecommendation.recommendation);
         }
         const data = await postNodeAction("/api/nodes/stream/start", startPayload);
+        if (data.ok) refs.streamKeyInput.value = "";
         refs.tuneBox.textContent = JSON.stringify({
           ok: data.ok,
           node_id: data.node_id,
@@ -2303,6 +2584,15 @@ HTML = r"""
     refs.tailscaleWizardModal.addEventListener("click", (event) => {
       if (event.target === refs.tailscaleWizardModal) setTailscaleWizardOpen(false);
     });
+    refs.youtubeWizardBtn.addEventListener("click", () => setYouTubeModalOpen(true));
+    refs.youtubeWizardClose.addEventListener("click", () => setYouTubeModalOpen(false));
+    refs.youtubeWizardModal.addEventListener("click", (event) => {
+      if (event.target === refs.youtubeWizardModal) setYouTubeModalOpen(false);
+    });
+    refs.youtubeRefreshBtn.addEventListener("click", refreshYouTubeResources);
+    refs.youtubeAuthorizeBtn.addEventListener("click", startYouTubeAuthorization);
+    refs.youtubePrepareBtn.addEventListener("click", prepareYouTubeBroadcast);
+    refs.youtubeRevokeBtn.addEventListener("click", revokeYouTubeAuthorization);
     refs.tailscalePrecheckBtn.addEventListener("click", precheckTailscale);
     refs.tailscaleInstallBtn.addEventListener("click", installTailscale);
     refs.tailscaleStatusBtn.addEventListener("click", showTailscaleStatus);
@@ -2313,6 +2603,7 @@ HTML = r"""
     refs.previewTuneBtn.addEventListener("click", previewTune);
     refs.applyTuneBtn.addEventListener("click", applyLastTune);
     refs.smartStartBtn.addEventListener("click", smartStart);
+    refs.streamOutputModeInput.addEventListener("change", syncStreamOutputMode);
     refs.streamUrlInput.addEventListener("input", () => { refs.streamUrlInput.dataset.userEdited = "1"; });
     [refs.presetInput, refs.videoBitrateInput, refs.audioBitrateInput, refs.fpsInput, refs.resolutionInput, refs.keyframeInput].forEach((el) => {
       el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
@@ -3723,6 +4014,7 @@ def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "stream_url": str(payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2").strip().rstrip("/"),
         "stream_key": str(payload.get("stream_key") or "").strip(),
+        "youtube_stream_id": str(payload.get("youtube_stream_id") or "").strip(),
         "video_path": str(payload.get("video_path") or "").strip(),
         "copy_mode": bool(payload.get("copy_mode")),
         "adaptive_mode": str(payload.get("adaptive_mode") or "auto").strip().lower() or "auto",
@@ -3774,8 +4066,10 @@ def api_nodes_stream_start():
     node_payload = stream_payload_for_node(payload)
     if not node_payload["video_path"]:
         return jsonify({"ok": False, "message": "missing node video_path"}), 400
-    if node_payload["stream_output_mode"] != "local_relay" and not node_payload["stream_key"]:
+    if node_payload["stream_output_mode"] == "direct" and not node_payload["stream_key"]:
         return jsonify({"ok": False, "message": "missing stream key"}), 400
+    if node_payload["stream_output_mode"] == "youtube_api" and not node_payload["youtube_stream_id"]:
+        return jsonify({"ok": False, "message": "missing YouTube API stream ID"}), 400
     result = post_node_json(node, "/api/start-stream", node_payload, timeout=60)
     status_code = 200 if result.get("ok") else 502
     return jsonify({
@@ -3841,6 +4135,115 @@ def api_nodes_restart_stream():
         "message": result.get("message") or ("restart request accepted" if result.get("ok") else "restart request failed"),
         "result": result,
     }), 200 if result.get("ok") else int(result.get("status_code") or 502)
+
+
+def youtube_node_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, tuple[Any, int] | None]:
+    node_id = str(payload.get("node_id") or "").strip()
+    node = node_by_id(node_id)
+    if not node:
+        return None, (jsonify({"ok": False, "message": "node not found"}), 404)
+    if not node.get("enabled", True):
+        return None, (jsonify({"ok": False, "message": "node disabled"}), 409)
+    return node, None
+
+
+@APP.post("/api/nodes/youtube/resources")
+def api_nodes_youtube_resources():
+    payload = request.get_json(silent=True) or {}
+    node, error = youtube_node_from_payload(payload)
+    if error:
+        return error
+    assert node is not None
+    status = request_node_json(node, "/api/youtube/status?verify=1", timeout=30)
+    if not status.get("ok") or not status.get("authorized"):
+        return jsonify({"node_id": str(payload.get("node_id") or ""), **status}), int(status.get("status_code") or 200)
+    streams = request_node_json(node, "/api/youtube/streams", timeout=30)
+    broadcasts = request_node_json(node, "/api/youtube/broadcasts", timeout=30)
+    ok = bool(streams.get("ok") and broadcasts.get("ok"))
+    result = {
+        "ok": ok,
+        "node_id": str(payload.get("node_id") or ""),
+        "configured": bool(status.get("configured")),
+        "authorized": bool(status.get("authorized")),
+        "channel": status.get("channel") or {},
+        "streams": streams.get("streams") or [],
+        "broadcasts": broadcasts.get("broadcasts") or [],
+    }
+    if not ok:
+        result["message"] = streams.get("message") or broadcasts.get("message") or "YouTube resources unavailable"
+    return jsonify(result), 200 if ok else 502
+
+
+@APP.post("/api/nodes/youtube/oauth/start")
+def api_nodes_youtube_oauth_start():
+    payload = request.get_json(silent=True) or {}
+    node, error = youtube_node_from_payload(payload)
+    if error:
+        return error
+    assert node is not None
+    result = post_node_json(node, "/api/youtube/oauth/start", {}, timeout=30)
+    return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
+        result.get("status_code") or (200 if result.get("ok") else 502)
+    )
+
+
+@APP.post("/api/nodes/youtube/oauth/poll")
+def api_nodes_youtube_oauth_poll():
+    payload = request.get_json(silent=True) or {}
+    node, error = youtube_node_from_payload(payload)
+    if error:
+        return error
+    assert node is not None
+    result = post_node_json(
+        node,
+        "/api/youtube/oauth/poll",
+        {"session_id": str(payload.get("session_id") or "")},
+        timeout=30,
+    )
+    return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
+        result.get("status_code") or (200 if result.get("ok") else 502)
+    )
+
+
+@APP.post("/api/nodes/youtube/prepare")
+def api_nodes_youtube_prepare():
+    payload = request.get_json(silent=True) or {}
+    node, error = youtube_node_from_payload(payload)
+    if error:
+        return error
+    assert node is not None
+    allowed = {
+        "title",
+        "description",
+        "privacy_status",
+        "scheduled_start_time",
+        "stream_id",
+        "stream_title",
+        "resolution",
+        "frame_rate",
+        "made_for_kids",
+        "enable_auto_start",
+        "enable_auto_stop",
+        "enable_dvr",
+    }
+    node_payload = {key: payload.get(key) for key in allowed if key in payload}
+    result = post_node_json(node, "/api/youtube/prepare", node_payload, timeout=60)
+    return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
+        result.get("status_code") or (200 if result.get("ok") else 502)
+    )
+
+
+@APP.post("/api/nodes/youtube/oauth/revoke")
+def api_nodes_youtube_oauth_revoke():
+    payload = request.get_json(silent=True) or {}
+    node, error = youtube_node_from_payload(payload)
+    if error:
+        return error
+    assert node is not None
+    result = post_node_json(node, "/api/youtube/oauth/revoke", {}, timeout=30)
+    return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
+        result.get("status_code") or (200 if result.get("ok") else 502)
+    )
 
 
 @APP.post("/api/nodes/reboot")
