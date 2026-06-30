@@ -140,6 +140,7 @@ fi
 
 need_cmd git
 need_cmd python3
+need_cmd curl
 
 if [ -d "$INSTALL_DIR/.git" ]; then
   git -C "$INSTALL_DIR" fetch origin "$BRANCH"
@@ -229,9 +230,31 @@ EOF
   $SYSTEMCTL daemon-reload || true
   if ! $SYSTEMCTL enable --now stream-control-hub.service; then
     "$INSTALL_DIR/run-hub.sh" &
+  else
+    $SYSTEMCTL restart stream-control-hub.service
   fi
 else
   "$INSTALL_DIR/run-hub.sh" &
+fi
+
+PROBE_HOST="$STREAM_HUB_HOST"
+case "$PROBE_HOST" in
+  0.0.0.0) PROBE_HOST="127.0.0.1" ;;
+  ::) PROBE_HOST="[::1]" ;;
+esac
+HEALTHY="0"
+ATTEMPT="0"
+while [ "$ATTEMPT" -lt 10 ]; do
+  if curl -fsS --max-time 5 "http://$PROBE_HOST:$STREAM_HUB_PORT/" >/dev/null 2>&1; then
+    HEALTHY="1"
+    break
+  fi
+  ATTEMPT=$((ATTEMPT + 1))
+  sleep 1
+done
+if [ "$HEALTHY" != "1" ]; then
+  echo "Hub health check failed at $PROBE_HOST:$STREAM_HUB_PORT." >&2
+  exit 1
 fi
 
 echo "Stream Control Hub installed."
