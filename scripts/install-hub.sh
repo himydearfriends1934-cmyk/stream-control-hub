@@ -1,17 +1,51 @@
 #!/usr/bin/env sh
 set -eu
 
-INSTALL_DIR="${INSTALL_DIR:-$HOME/stream-control-hub}"
+if [ -z "${INSTALL_DIR:-}" ]; then
+  if [ -d "/opt/stream-control-hub/.git" ]; then
+    INSTALL_DIR="/opt/stream-control-hub"
+  elif [ -d "$HOME/stream-control-hub/.git" ]; then
+    INSTALL_DIR="$HOME/stream-control-hub"
+  elif [ "$(id -u)" -eq 0 ]; then
+    INSTALL_DIR="/opt/stream-control-hub"
+  else
+    INSTALL_DIR="$HOME/stream-control-hub"
+  fi
+fi
 REPO_URL="${REPO_URL:-https://github.com/himydearfriends1934-cmyk/stream-control-hub.git}"
 BRANCH="${BRANCH:-main}"
-STREAM_HUB_HOST="${STREAM_HUB_HOST:-127.0.0.1}"
-STREAM_HUB_PORT="${STREAM_HUB_PORT:-8788}"
+STREAM_HUB_HOST="${STREAM_HUB_HOST:-}"
+STREAM_HUB_PORT="${STREAM_HUB_PORT:-}"
+STREAM_HUB_NODES_FILE="${STREAM_HUB_NODES_FILE:-}"
+STREAM_HUB_SERVICE_MODE="${STREAM_HUB_SERVICE_MODE:-}"
 TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 TAILSCALE_HOSTNAME="${TAILSCALE_HOSTNAME:-stream-control-hub}"
 ACTION="${ACTION:-${STREAM_HUB_ACTION:-install}}"
 UNINSTALL="${UNINSTALL:-0}"
 REMOVE_DATA="${REMOVE_DATA:-${STREAM_HUB_REMOVE_DATA:-0}}"
 CHOICE="${CHOICE:-${STREAM_HUB_CHOICE:-}}"
+
+resolve_service_mode() {
+  if [ -n "$STREAM_HUB_SERVICE_MODE" ]; then
+    case "$STREAM_HUB_SERVICE_MODE" in
+      system|user) return 0 ;;
+      *) echo "STREAM_HUB_SERVICE_MODE must be system or user." >&2; exit 1 ;;
+    esac
+  fi
+  if [ -f /etc/systemd/system/stream-control-hub.service ] \
+    && grep -Fq "WorkingDirectory=$INSTALL_DIR" /etc/systemd/system/stream-control-hub.service; then
+    STREAM_HUB_SERVICE_MODE="system"
+  elif [ -f "$HOME/.config/systemd/user/stream-control-hub.service" ] \
+    && grep -Fq "WorkingDirectory=$INSTALL_DIR" "$HOME/.config/systemd/user/stream-control-hub.service"; then
+    STREAM_HUB_SERVICE_MODE="user"
+  elif [ "$(id -u)" -eq 0 ] && [ "$INSTALL_DIR" = "/opt/stream-control-hub" ]; then
+    STREAM_HUB_SERVICE_MODE="system"
+  else
+    STREAM_HUB_SERVICE_MODE="user"
+  fi
+}
+
+resolve_service_mode
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -62,12 +96,16 @@ resolve_action() {
 }
 
 uninstall_hub() {
-  SERVICE_DIR="$HOME/.config/systemd/user"
-  SERVICE_FILE="$SERVICE_DIR/stream-control-hub.service"
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user disable --now stream-control-hub.service >/dev/null 2>&1 || true
-    rm -f "$SERVICE_FILE"
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    if [ "$STREAM_HUB_SERVICE_MODE" = "system" ]; then
+      systemctl disable --now stream-control-hub.service >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/stream-control-hub.service
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    else
+      systemctl --user disable --now stream-control-hub.service >/dev/null 2>&1 || true
+      rm -f "$HOME/.config/systemd/user/stream-control-hub.service"
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
   fi
   pkill -f "$INSTALL_DIR/.venv/bin/python -m stream_control_hub" >/dev/null 2>&1 || true
   pkill -f "$INSTALL_DIR/run-hub.sh" >/dev/null 2>&1 || true
@@ -118,15 +156,24 @@ python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
 "$INSTALL_DIR/.venv/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
 
-mkdir -p "$INSTALL_DIR/data"
-NODES_FILE="$INSTALL_DIR/data/nodes.local.json"
-[ -f "$NODES_FILE" ] || printf '[]\n' > "$NODES_FILE"
-
 ENV_FILE="$INSTALL_DIR/.env"
 TOKEN=""
+EXISTING_HOST=""
+EXISTING_PORT=""
+EXISTING_NODES_FILE=""
 if [ -f "$ENV_FILE" ]; then
   TOKEN="$(sed -n 's/^STREAM_HUB_CONTROL_TOKEN=//p' "$ENV_FILE" | head -n 1)"
+  EXISTING_HOST="$(sed -n 's/^STREAM_HUB_HOST=//p' "$ENV_FILE" | head -n 1)"
+  EXISTING_PORT="$(sed -n 's/^STREAM_HUB_PORT=//p' "$ENV_FILE" | head -n 1)"
+  EXISTING_NODES_FILE="$(sed -n 's/^STREAM_HUB_NODES_FILE=//p' "$ENV_FILE" | head -n 1)"
 fi
+[ -n "$STREAM_HUB_HOST" ] || STREAM_HUB_HOST="${EXISTING_HOST:-127.0.0.1}"
+[ -n "$STREAM_HUB_PORT" ] || STREAM_HUB_PORT="${EXISTING_PORT:-8788}"
+[ -n "$STREAM_HUB_NODES_FILE" ] || STREAM_HUB_NODES_FILE="${EXISTING_NODES_FILE:-$INSTALL_DIR/data/nodes.local.json}"
+NODES_FILE="$STREAM_HUB_NODES_FILE"
+mkdir -p "$(dirname "$NODES_FILE")"
+[ -f "$NODES_FILE" ] || printf '[]\n' > "$NODES_FILE"
+
 [ -n "$TOKEN" ] || TOKEN="$(new_token)"
 
 cat > "$ENV_FILE" <<EOF
@@ -153,12 +200,22 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
-  SERVICE_DIR="$HOME/.config/systemd/user"
-  mkdir -p "$SERVICE_DIR"
-  cat > "$SERVICE_DIR/stream-control-hub.service" <<EOF
+  if [ "$STREAM_HUB_SERVICE_MODE" = "system" ]; then
+    SERVICE_FILE="/etc/systemd/system/stream-control-hub.service"
+    SERVICE_TARGET="multi-user.target"
+    SYSTEMCTL="systemctl"
+  else
+    SERVICE_DIR="$HOME/.config/systemd/user"
+    mkdir -p "$SERVICE_DIR"
+    SERVICE_FILE="$SERVICE_DIR/stream-control-hub.service"
+    SERVICE_TARGET="default.target"
+    SYSTEMCTL="systemctl --user"
+  fi
+  cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Stream Control Hub
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 WorkingDirectory=$INSTALL_DIR
@@ -167,10 +224,10 @@ Restart=always
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=$SERVICE_TARGET
 EOF
-  systemctl --user daemon-reload || true
-  if ! systemctl --user enable --now stream-control-hub.service; then
+  $SYSTEMCTL daemon-reload || true
+  if ! $SYSTEMCTL enable --now stream-control-hub.service; then
     "$INSTALL_DIR/run-hub.sh" &
   fi
 else
@@ -180,3 +237,4 @@ fi
 echo "Stream Control Hub installed."
 echo "Open: http://127.0.0.1:$STREAM_HUB_PORT/?token=$TOKEN"
 echo "Nodes file: $NODES_FILE"
+echo "Install path: $INSTALL_DIR ($STREAM_HUB_SERVICE_MODE service)"
