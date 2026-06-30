@@ -48,6 +48,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
                 started = client.start_device_authorization()
                 completed = client.poll_device_authorization(started["session_id"])
             saved = json.loads(credential_path.read_text(encoding="utf-8"))
+            credential_mode = stat.S_IMODE(credential_path.stat().st_mode)
             serialized = json.dumps({"started": started, "completed": completed})
 
         self.assertNotIn("private-device-code", serialized)
@@ -55,7 +56,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertNotIn("private-access-token", serialized)
         self.assertEqual(saved["refresh_token"], "private-refresh-token")
         if os.name != "nt":
-            self.assertEqual(stat.S_IMODE(credential_path.stat().st_mode), 0o600)
+            self.assertEqual(credential_mode, 0o600)
 
     def test_stream_list_redacts_ingestion_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
