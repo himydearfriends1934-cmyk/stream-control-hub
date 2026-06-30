@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from io import BytesIO
 
 import requests
 
@@ -104,6 +105,78 @@ class HubPublicUploadRouteTests(unittest.TestCase):
         self.assertEqual(data["candidates"][0]["label"], "公网直连")
         self.assertEqual(data["candidates"][1]["url"], "http://100.118.47.126:8787")
         self.assertEqual(data["headers"]["X-Upload-Ticket"], "short-lived-ticket")
+
+
+class AgentUploadIntegrityTests(unittest.TestCase):
+    def agent_paths(self, module, root):
+        data_dir = Path(root) / "agent_data"
+        media_dir = data_dir / "media"
+        media_dir.mkdir(parents=True)
+        return (
+            patch.object(module, "DATA_DIR", data_dir),
+            patch.object(module, "MEDIA_DIR", media_dir),
+            patch.object(module, "STATE_FILE", data_dir / "state.json"),
+            patch.object(module, "MIN_FREE_AFTER_UPLOAD_BYTES", 0),
+        )
+
+    def test_upload_rejects_non_sequential_chunk_offset(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self.agent_paths(headless_agent, tmp)
+            with patches[0], patches[1], patches[2], patches[3], patch.object(headless_agent, "CONTROL_TOKEN", ""):
+                response = headless_agent.APP.test_client().post(
+                    "/api/upload-chunk",
+                    data={
+                        "upload_id": "upload-1",
+                        "filename": "video.mp4",
+                        "chunk_index": "1",
+                        "total_chunks": "2",
+                        "offset": "4",
+                        "total_size": "8",
+                        "chunk_size": "4",
+                        "chunk": (BytesIO(b"bbbb"), "video.mp4"),
+                    },
+                    content_type="multipart/form-data",
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("previous upload chunk", response.get_json()["message"])
+
+    def test_upload_rejects_wrong_chunk_size(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self.agent_paths(headless_agent, tmp)
+            with patches[0], patches[1], patches[2], patches[3], patch.object(headless_agent, "CONTROL_TOKEN", ""):
+                response = headless_agent.APP.test_client().post(
+                    "/api/upload-chunk",
+                    data={
+                        "upload_id": "upload-1",
+                        "filename": "video.mp4",
+                        "chunk_index": "0",
+                        "total_chunks": "2",
+                        "offset": "0",
+                        "total_size": "8",
+                        "chunk_size": "4",
+                        "chunk": (BytesIO(b"bb"), "video.mp4"),
+                    },
+                    content_type="multipart/form-data",
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("chunk size", response.get_json()["message"])
+
+    def test_cors_headers_are_limited_to_upload_paths(self):
+        from stream_control_hub import headless_agent
+
+        client = headless_agent.APP.test_client()
+        with patch.object(headless_agent, "CONTROL_TOKEN", ""):
+            upload = client.options("/api/upload-chunk", headers={"Origin": "https://example.test"})
+            status = client.get("/api/status", headers={"Origin": "https://example.test"})
+
+        self.assertEqual(upload.headers.get("Access-Control-Allow-Origin"), "*")
+        self.assertIsNone(status.headers.get("Access-Control-Allow-Origin"))
 
 
 if __name__ == "__main__":

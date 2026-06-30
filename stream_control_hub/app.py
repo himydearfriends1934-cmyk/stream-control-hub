@@ -290,7 +290,7 @@ HTML = r"""
     .wizard-step small { color: var(--muted); line-height: 1.35; }
     .wizard-step.done { border-color: rgba(54, 211, 153, 0.9); }
     .wizard-step.fail { border-color: rgba(251, 113, 133, 0.85); }
-    .wizard-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .wizard-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
     .wizard-status {
       min-height: 128px;
       max-height: 240px;
@@ -940,6 +940,14 @@ HTML = r"""
           <input id="youtubeTitleInput" type="text" maxlength="100" placeholder="直播标题">
         </div>
         <div class="wizard-field">
+          <label>OAuth Client ID</label>
+          <input id="youtubeClientIdInput" type="text" autocomplete="off" placeholder="Google TV / Limited Input Client ID">
+        </div>
+        <div class="wizard-field">
+          <label>Client Secret（可选）</label>
+          <input id="youtubeClientSecretInput" type="password" autocomplete="off" placeholder="部分 OAuth 客户端没有 secret">
+        </div>
+        <div class="wizard-field">
           <label>可见范围 / 计划时间</label>
           <div class="command-pair">
             <select id="youtubePrivacyInput">
@@ -953,6 +961,7 @@ HTML = r"""
       </div>
       <div class="wizard-actions">
         <button id="youtubeRefreshBtn">检查 / 刷新</button>
+        <button id="youtubeSaveConfigBtn">保存 API 配置</button>
         <button class="primary" id="youtubeAuthorizeBtn">连接 YouTube</button>
         <button id="youtubePrepareBtn">创建并绑定直播</button>
         <button class="danger" id="youtubeRevokeBtn">断开授权</button>
@@ -964,7 +973,14 @@ HTML = r"""
   </div>
 
   <script>
-    const CONTROL_TOKEN = new URLSearchParams(window.location.search).get("token") || localStorage.getItem("streamHubControlToken") || "";
+    const TOKEN_FROM_URL = new URLSearchParams(window.location.search).get("token") || "";
+    const CONTROL_TOKEN = TOKEN_FROM_URL || sessionStorage.getItem("streamHubControlToken") || localStorage.getItem("streamHubControlToken") || "";
+    if (TOKEN_FROM_URL) {
+      sessionStorage.setItem("streamHubControlToken", TOKEN_FROM_URL);
+      const cleanUrl = new URL(window.location.href);
+      cleanUrl.searchParams.delete("token");
+      window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+    }
     function authHeaders(extra = {}) {
       return CONTROL_TOKEN ? { ...extra, "X-Control-Token": CONTROL_TOKEN } : extra;
     }
@@ -1021,9 +1037,12 @@ HTML = r"""
       youtubeNodeInput: document.getElementById("youtubeNodeInput"),
       youtubePrepareStreamSelect: document.getElementById("youtubePrepareStreamSelect"),
       youtubeTitleInput: document.getElementById("youtubeTitleInput"),
+      youtubeClientIdInput: document.getElementById("youtubeClientIdInput"),
+      youtubeClientSecretInput: document.getElementById("youtubeClientSecretInput"),
       youtubePrivacyInput: document.getElementById("youtubePrivacyInput"),
       youtubeScheduleInput: document.getElementById("youtubeScheduleInput"),
       youtubeRefreshBtn: document.getElementById("youtubeRefreshBtn"),
+      youtubeSaveConfigBtn: document.getElementById("youtubeSaveConfigBtn"),
       youtubeAuthorizeBtn: document.getElementById("youtubeAuthorizeBtn"),
       youtubePrepareBtn: document.getElementById("youtubePrepareBtn"),
       youtubeRevokeBtn: document.getElementById("youtubeRevokeBtn"),
@@ -1178,6 +1197,38 @@ HTML = r"""
         xhr.timeout = 0;
         xhr.send(form);
       });
+    }
+
+    async function sendUploadChunkWithRetry({ route, target, form, onProgress, uploadState, chunkIndex, totalChunks }) {
+      const maxAttempts = 3;
+      let lastError = null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (uploadState?.canceled) throw new Error("上传已取消");
+        try {
+          return await uploadFormWithProgress(
+            route.upload_url,
+            route.headers || target.headers || {},
+            form,
+            onProgress,
+            uploadState,
+          );
+        } catch (error) {
+          lastError = error;
+          if (uploadState?.canceled || attempt >= maxAttempts) break;
+          renderTransfer({
+            status: "running",
+            badge: "重试中",
+            title: "公网分片重试",
+            target: uploadState?.targetLabel || route.label,
+            percent: uploadState?.percent || 0,
+            doneBytes: uploadState?.doneBytes || 0,
+            totalBytes: uploadState?.totalBytes || 0,
+            message: `第 ${chunkIndex + 1}/${totalChunks} 块上传失败，正在第 ${attempt + 1} 次重试：${friendlyError(error)}`,
+          });
+          await new Promise((resolve) => setTimeout(resolve, 800 * attempt));
+        }
+      }
+      throw lastError || new Error("分片上传失败");
     }
 
     async function cancelUploadState(uploadState) {
@@ -1654,6 +1705,39 @@ HTML = r"""
       }
     }
 
+    async function saveYouTubeConfig() {
+      if (!selectedNodeId) {
+        refs.youtubeWizardLog.textContent = "请先选择一个 Agent。";
+        return;
+      }
+      const clientId = refs.youtubeClientIdInput.value.trim();
+      const clientSecret = refs.youtubeClientSecretInput.value.trim();
+      if (!clientId) {
+        refs.youtubeWizardLog.textContent = "请先填写 Google OAuth Client ID。";
+        return;
+      }
+      refs.youtubeSaveConfigBtn.disabled = true;
+      refs.youtubeWizardLog.textContent = "正在把 YouTube API 配置保存到当前 Agent...";
+      try {
+        const data = await postNodeAction("/api/nodes/youtube/config", {
+          node_id: selectedNodeId,
+          client_id: clientId,
+          client_secret: clientSecret,
+        });
+        if (!data.ok) {
+          refs.youtubeWizardLog.textContent = data.message || "YouTube API 配置保存失败";
+          return;
+        }
+        refs.youtubeClientSecretInput.value = "";
+        refs.youtubeWizardLog.textContent = "配置已保存。下一步点击“连接 YouTube”完成频道授权。";
+        await refreshYouTubeResources();
+      } catch (error) {
+        refs.youtubeWizardLog.textContent = friendlyError(error, "YouTube API 配置保存失败");
+      } finally {
+        refs.youtubeSaveConfigBtn.disabled = false;
+      }
+    }
+
     async function prepareYouTubeBroadcast() {
       const title = refs.youtubeTitleInput.value.trim();
       if (!selectedNodeId || !title) {
@@ -1897,7 +1981,14 @@ HTML = r"""
           form.append("chunk_size", String(chunkSize));
           form.append("chunk", blob, uploadFilename);
           const chunkStartedAt = performance.now();
-          lastPayload = await uploadFormWithProgress(uploadRoute.upload_url, uploadRoute.headers || target.headers || {}, form, (loaded) => {
+          lastPayload = await sendUploadChunkWithRetry({
+            route: uploadRoute,
+            target,
+            form,
+            uploadState,
+            chunkIndex,
+            totalChunks,
+            onProgress: (loaded) => {
             const now = performance.now();
             if (now - lastPaintAt < 250 && loaded < blob.size) return;
             lastPaintAt = now;
@@ -1920,7 +2011,8 @@ HTML = r"""
               etaSeconds: averageBps > 0 ? (file.size - uploaded) / averageBps : 0,
               message: `正在通过 ${uploadRoute.label} 上传 ${file.name}${savedNameNote}，第 ${chunkIndex + 1}/${totalChunks} 块。`,
             });
-          }, uploadState);
+            },
+          });
           const chunkSeconds = Math.max(0.001, (performance.now() - chunkStartedAt) / 1000);
           const totalSeconds = Math.max(0.001, (performance.now() - startedAt) / 1000);
           const uploaded = Math.min(file.size, offset + blob.size);
@@ -2590,6 +2682,7 @@ HTML = r"""
       if (event.target === refs.youtubeWizardModal) setYouTubeModalOpen(false);
     });
     refs.youtubeRefreshBtn.addEventListener("click", refreshYouTubeResources);
+    refs.youtubeSaveConfigBtn.addEventListener("click", saveYouTubeConfig);
     refs.youtubeAuthorizeBtn.addEventListener("click", startYouTubeAuthorization);
     refs.youtubePrepareBtn.addEventListener("click", prepareYouTubeBroadcast);
     refs.youtubeRevokeBtn.addEventListener("click", revokeYouTubeAuthorization);
@@ -3675,7 +3768,7 @@ def api_node_upload_target():
         else ""
     )
     upload_urls = []
-    for url in [discovered_public_url, *node_upload_base_urls(node)]:
+    for url in [discovered_public_url, *node_upload_base_urls(node), base_url]:
         if url and url not in upload_urls:
             upload_urls.append(url)
     candidates = []
@@ -4182,6 +4275,28 @@ def api_nodes_youtube_oauth_start():
         return error
     assert node is not None
     result = post_node_json(node, "/api/youtube/oauth/start", {}, timeout=30)
+    return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
+        result.get("status_code") or (200 if result.get("ok") else 502)
+    )
+
+
+@APP.post("/api/nodes/youtube/config")
+def api_nodes_youtube_config():
+    payload = request.get_json(silent=True) or {}
+    node, error = youtube_node_from_payload(payload)
+    if error:
+        return error
+    assert node is not None
+    client_id = str(payload.get("client_id") or "").strip()
+    client_secret = str(payload.get("client_secret") or "").strip()
+    if not client_id:
+        return jsonify({"ok": False, "message": "YOUTUBE_CLIENT_ID is required"}), 400
+    result = post_node_json(
+        node,
+        "/api/youtube/config",
+        {"client_id": client_id, "client_secret": client_secret},
+        timeout=30,
+    )
     return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
         result.get("status_code") or (200 if result.get("ok") else 502)
     )
