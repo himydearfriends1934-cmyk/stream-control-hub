@@ -39,6 +39,28 @@ class PublicOriginDiscoveryTests(unittest.TestCase):
         self.assertEqual(origin, "http://165.99.42.174:8787")
         self.assertEqual(request_get.call_count, 2)
 
+    def test_stale_upload_state_is_pruned_only_when_part_file_is_missing(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            media_dir = Path(tmp) / "media"
+            media_dir.mkdir()
+            state = {
+                "active_uploads": {
+                    "missing-upload": {"filename": "missing.mp4", "updated_at": 100},
+                    "resumable-upload": {"filename": "kept.mp4", "updated_at": 100},
+                }
+            }
+            (media_dir / ".resumable-upload.kept.mp4.part").write_bytes(b"partial")
+            with patch.object(headless_agent, "MEDIA_DIR", media_dir), patch.object(
+                headless_agent, "UPLOAD_STALE_STATE_SECONDS", 3600
+            ):
+                removed = headless_agent.prune_stale_upload_state(state, now=7200)
+
+        self.assertEqual(removed, 1)
+        self.assertNotIn("missing-upload", state["active_uploads"])
+        self.assertIn("resumable-upload", state["active_uploads"])
+
 
 class HubPublicUploadRouteTests(unittest.TestCase):
     def test_upload_target_prefers_agent_discovered_public_origin(self):
