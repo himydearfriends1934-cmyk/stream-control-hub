@@ -161,6 +161,58 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(forwarded["youtube_stream_id"], "stream-1")
         self.assertEqual(forwarded["stream_key"], "")
 
+    def test_agent_saves_youtube_config_and_reloads_client(self):
+        from stream_control_hub import headless_agent
+
+        original_client = headless_agent.YOUTUBE_CLIENT
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".agent.env"
+            credential_file = Path(tmp) / "youtube_credentials.json"
+            try:
+                with patch.object(headless_agent, "AGENT_ENV_FILE", env_file), patch.object(
+                    headless_agent, "YOUTUBE_CREDENTIAL_FILE", credential_file
+                ), patch.object(headless_agent, "CONTROL_TOKEN", ""):
+                    response = headless_agent.APP.test_client().post(
+                        "/api/youtube/config",
+                        json={"client_id": "client-id", "client_secret": "client-secret"},
+                    )
+                    configured_client_id = headless_agent.YOUTUBE_CLIENT.client_id
+            finally:
+                headless_agent.YOUTUBE_CLIENT = original_client
+
+            env_text = env_file.read_text(encoding="utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["configured"])
+        self.assertIn("YOUTUBE_CLIENT_ID=client-id", env_text)
+        self.assertIn("YOUTUBE_CLIENT_SECRET=client-secret", env_text)
+        self.assertEqual(configured_client_id, "client-id")
+
+    def test_hub_forwards_youtube_config_to_agent(self):
+        from stream_control_hub import app
+
+        node = {"id": "node-a", "base_url": "http://100.64.0.10:8787", "enabled": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app,
+                "post_node_json",
+                return_value={"ok": True, "configured": True, "authorized": False},
+            ) as post:
+                response = app.APP.test_client().post(
+                    "/api/nodes/youtube/config",
+                    json={"node_id": "node-a", "client_id": "client-id", "client_secret": "client-secret"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        post.assert_called_once_with(
+            node,
+            "/api/youtube/config",
+            {"client_id": "client-id", "client_secret": "client-secret"},
+            timeout=30,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

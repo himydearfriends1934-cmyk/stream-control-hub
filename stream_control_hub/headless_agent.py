@@ -60,8 +60,11 @@ SHARE_TIMEOUT_SECONDS = int(os.environ.get("STREAM_AGENT_SHARE_TIMEOUT_SECONDS",
 SHARE_RETRIES = int(os.environ.get("STREAM_AGENT_SHARE_RETRIES", "2"))
 UPLOAD_TICKET_TTL_SECONDS = int(os.environ.get("STREAM_AGENT_UPLOAD_TICKET_TTL_SECONDS", "3600"))
 UPLOAD_STALE_STATE_SECONDS = max(300, int(os.environ.get("STREAM_AGENT_UPLOAD_STALE_STATE_SECONDS", "3600")))
+MIN_FREE_AFTER_UPLOAD_BYTES = int(os.environ.get("STREAM_AGENT_MIN_FREE_AFTER_UPLOAD_BYTES", str(2 * 1024 ** 3)))
 UPLOAD_TICKETS: dict[str, dict[str, Any]] = {}
 UPLOAD_TICKETS_LOCK = threading.Lock()
+UPLOAD_LOCKS: dict[str, threading.Lock] = {}
+UPLOAD_LOCKS_LOCK = threading.Lock()
 UPLOAD_TICKET_PATHS = {"/api/upload-probe", "/api/upload-chunk", "/api/upload-chunk/cancel"}
 TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 PUBLIC_IP_SERVICES = ("https://api.ipify.org", "https://ifconfig.me/ip")
@@ -78,6 +81,7 @@ STREAM_RESTART_STABLE_SECONDS = max(15, int(os.environ.get("STREAM_RESTART_STABL
 YOUTUBE_CREDENTIAL_FILE = Path(
     os.environ.get("YOUTUBE_CREDENTIAL_FILE", str(DATA_DIR / "youtube_credentials.json"))
 )
+AGENT_ENV_FILE = ROOT / ".agent.env"
 YOUTUBE_CLIENT = YouTubeAPIClient(
     client_id=os.environ.get("YOUTUBE_CLIENT_ID", ""),
     client_secret=os.environ.get("YOUTUBE_CLIENT_SECRET", ""),
@@ -194,6 +198,17 @@ def expire_upload_ticket(ticket: str) -> None:
         UPLOAD_TICKETS.pop(ticket, None)
 
 
+def complete_upload_ticket(ticket: str, video_path: Path) -> None:
+    if not ticket:
+        return
+    with UPLOAD_TICKETS_LOCK:
+        record = UPLOAD_TICKETS.get(ticket)
+        if record is not None:
+            record["completed"] = True
+            record["completed_at"] = time.time()
+            record["video_path"] = str(video_path)
+
+
 def validate_upload_ticket(record: dict[str, Any] | None, upload_id: str, filename: str, total_size: int) -> str:
     if not record:
         return "upload ticket required"
@@ -206,6 +221,22 @@ def validate_upload_ticket(record: dict[str, Any] | None, upload_id: str, filena
     if expected_size and expected_size != total_size:
         return "upload ticket does not match file size"
     return ""
+
+
+def upload_lock(upload_id: str) -> threading.Lock:
+    with UPLOAD_LOCKS_LOCK:
+        lock = UPLOAD_LOCKS.get(upload_id)
+        if lock is None:
+            lock = threading.Lock()
+            UPLOAD_LOCKS[upload_id] = lock
+        return lock
+
+
+def release_upload_lock(upload_id: str) -> None:
+    if not upload_id:
+        return
+    with UPLOAD_LOCKS_LOCK:
+        UPLOAD_LOCKS.pop(upload_id, None)
 
 
 def request_is_local() -> bool:
@@ -259,9 +290,10 @@ def protect_agent_api():
 
 @APP.after_request
 def add_agent_cors_headers(response):
-    response.headers.setdefault("Access-Control-Allow-Origin", "*")
-    response.headers.setdefault("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-    response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type,X-Control-Token,Authorization,X-Upload-Route,X-Upload-Ticket")
+    if request.path in UPLOAD_TICKET_PATHS:
+        response.headers.setdefault("Access-Control-Allow-Origin", "*")
+        response.headers.setdefault("Access-Control-Allow-Methods", "POST,OPTIONS")
+        response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type,X-Upload-Route,X-Upload-Ticket")
     return response
 
 
@@ -285,6 +317,47 @@ def write_private_json(path: Path, data: dict[str, Any]) -> None:
         path.chmod(0o600)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def update_env_file_values(path: Path, updates: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
+    if path.exists():
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in raw_line:
+                existing.append((raw_line, None))
+                continue
+            key, _ = raw_line.split("=", 1)
+            key = key.strip()
+            if key in updates:
+                existing.append((f"{key}={updates[key]}", key))
+                seen.add(key)
+            else:
+                existing.append((raw_line, key))
+    for key, value in updates.items():
+        if key not in seen:
+            existing.append((f"{key}={value}", key))
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text("\n".join(line for line, _ in existing) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def reload_youtube_client(*, client_id: str, client_secret: str) -> None:
+    global YOUTUBE_CLIENT
+    os.environ["YOUTUBE_CLIENT_ID"] = client_id
+    os.environ["YOUTUBE_CLIENT_SECRET"] = client_secret
+    YOUTUBE_CLIENT = YouTubeAPIClient(
+        client_id=client_id,
+        client_secret=client_secret,
+        credential_path=YOUTUBE_CREDENTIAL_FILE,
+    )
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -1084,29 +1157,88 @@ def api_upload_chunk():
         total_chunks = int(request.form.get("total_chunks") or 1)
         offset = int(request.form.get("offset") or 0)
         total_size = int(request.form.get("total_size") or 0)
+        chunk_size = int(request.form.get("chunk_size") or 0)
     except ValueError:
         return jsonify({"ok": False, "message": "invalid chunk metadata"}), 400
+    if total_size <= 0 or total_chunks <= 0 or chunk_index < 0 or chunk_index >= total_chunks:
+        return jsonify({"ok": False, "message": "invalid chunk metadata"}), 400
+    if chunk_size <= 0 or chunk_size > MAX_CHUNK_BYTES:
+        return jsonify({"ok": False, "message": "invalid chunk size"}), 400
+    expected_total_chunks = (total_size + chunk_size - 1) // chunk_size
+    expected_offset = chunk_index * chunk_size
+    if total_chunks != expected_total_chunks or offset != expected_offset or offset >= total_size:
+        return jsonify({"ok": False, "message": "chunk offset or count does not match upload metadata"}), 409
+    expected_chunk_bytes = min(chunk_size, total_size - offset)
     ticket_value = request_upload_ticket()
-    ticket_error = validate_upload_ticket(upload_ticket_record(), upload_id, filename, total_size)
+    ticket_record = upload_ticket_record()
+    ticket_error = validate_upload_ticket(ticket_record, upload_id, filename, total_size)
     if ticket_value and ticket_error:
         return jsonify({"ok": False, "message": ticket_error}), 403
+    if ticket_record and ticket_record.get("completed"):
+        return jsonify({
+            "ok": True,
+            "complete": True,
+            "received_size": total_size,
+            "chunk_bytes": expected_chunk_bytes,
+            "bytes_per_second": 0,
+            "rate_label": "0 B/s",
+            "video_path": str(ticket_record.get("video_path") or ""),
+            "idempotent": True,
+        })
 
     temp_path = MEDIA_DIR / f".{upload_id}.{filename}.part"
     final_path = MEDIA_DIR / filename
-    with temp_path.open("r+b" if temp_path.exists() else "wb") as target:
-        target.seek(offset)
-        shutil.copyfileobj(chunk.stream, target)
-    received_size = temp_path.stat().st_size
-    complete = chunk_index + 1 >= total_chunks and received_size >= total_size
-    if complete:
-        counter = 1
-        while final_path.exists():
-            final_path = MEDIA_DIR / f"{Path(filename).stem}-{counter}{Path(filename).suffix}"
-            counter += 1
-        temp_path.replace(final_path)
-        expire_upload_ticket(ticket_value)
+    with upload_lock(upload_id):
+        current_size = temp_path.stat().st_size if temp_path.exists() else 0
+        if offset > current_size:
+            return jsonify({"ok": False, "message": "previous upload chunk is missing"}), 409
+        chunk_bytes_payload = chunk.stream.read()
+        if len(chunk_bytes_payload) != expected_chunk_bytes:
+            return jsonify({"ok": False, "message": "chunk size does not match upload metadata"}), 400
+        if offset + expected_chunk_bytes <= current_size:
+            with temp_path.open("rb") as existing:
+                existing.seek(offset)
+                existing_bytes = existing.read(expected_chunk_bytes)
+            if existing_bytes == chunk_bytes_payload:
+                elapsed = max(0.001, time.time() - started_at)
+                return jsonify({
+                    "ok": True,
+                    "complete": current_size == total_size,
+                    "received_size": current_size,
+                    "chunk_bytes": expected_chunk_bytes,
+                    "bytes_per_second": int(expected_chunk_bytes / elapsed),
+                    "rate_label": f"{file_size_label(int(expected_chunk_bytes / elapsed))}/s",
+                    "video_path": str(final_path if current_size == total_size and final_path.exists() else temp_path),
+                    "idempotent": True,
+                })
+            return jsonify({"ok": False, "message": "replayed chunk does not match existing upload data"}), 409
+        additional_bytes = max(0, offset + expected_chunk_bytes - current_size)
+        free_bytes = shutil.disk_usage(MEDIA_DIR).free
+        if free_bytes - additional_bytes < MIN_FREE_AFTER_UPLOAD_BYTES:
+            return jsonify({
+                "ok": False,
+                "message": "not enough free disk space for upload",
+                "free_bytes": free_bytes,
+                "required_free_after_upload_bytes": MIN_FREE_AFTER_UPLOAD_BYTES,
+            }), 507
+
+        with temp_path.open("r+b" if temp_path.exists() else "wb") as target:
+            target.seek(offset)
+            target.write(chunk_bytes_payload)
+            target.truncate(offset + expected_chunk_bytes)
+
+        received_size = temp_path.stat().st_size
+        complete = chunk_index + 1 >= total_chunks and received_size == total_size
+        if complete:
+            counter = 1
+            while final_path.exists():
+                final_path = MEDIA_DIR / f"{Path(filename).stem}-{counter}{Path(filename).suffix}"
+                counter += 1
+            temp_path.replace(final_path)
+            complete_upload_ticket(ticket_value, final_path)
+            release_upload_lock(upload_id)
     elapsed = max(0.001, time.time() - started_at)
-    chunk_bytes = int(received_size - offset) if received_size >= offset else 0
+    chunk_bytes = expected_chunk_bytes
     with STREAM_LIFECYCLE_LOCK:
         state = load_state()
         active_uploads = dict(state.get("active_uploads") or {})
@@ -1151,9 +1283,11 @@ def api_upload_cancel():
         return jsonify({"ok": False, "message": "upload ticket does not match upload id"}), 403
     removed = 0
     if upload_id:
-        for path in MEDIA_DIR.glob(f".{upload_id}.*.part"):
-            path.unlink(missing_ok=True)
-            removed += 1
+        with upload_lock(upload_id):
+            for path in MEDIA_DIR.glob(f".{upload_id}.*.part"):
+                path.unlink(missing_ok=True)
+                removed += 1
+        release_upload_lock(upload_id)
     if expire_ticket_after_cancel:
         expire_upload_ticket(ticket_value)
     return jsonify({"ok": True, "removed": removed})
@@ -1420,6 +1554,29 @@ def api_youtube_status():
         except Exception as exc:
             return youtube_error_response(exc)
     return jsonify({"ok": True, **status})
+
+
+@APP.post("/api/youtube/config")
+def api_youtube_config():
+    payload = request.get_json(silent=True) or {}
+    client_id = str(payload.get("client_id") or "").strip()
+    client_secret = str(payload.get("client_secret") or "").strip()
+    if not client_id:
+        return jsonify({"ok": False, "message": "YOUTUBE_CLIENT_ID is required"}), 400
+    update_env_file_values(
+        AGENT_ENV_FILE,
+        {
+            "YOUTUBE_CLIENT_ID": client_id,
+            "YOUTUBE_CLIENT_SECRET": client_secret,
+            "YOUTUBE_CREDENTIAL_FILE": str(YOUTUBE_CREDENTIAL_FILE),
+        },
+    )
+    reload_youtube_client(client_id=client_id, client_secret=client_secret)
+    return jsonify({
+        "ok": True,
+        "message": "YouTube API configuration saved on this Agent",
+        **YOUTUBE_CLIENT.local_status(),
+    })
 
 
 @APP.post("/api/youtube/oauth/start")
