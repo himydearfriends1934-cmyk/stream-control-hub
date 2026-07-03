@@ -8,3 +8,4 @@ data/
 agent_data/
 logs/
 *.log
+node-registration.json

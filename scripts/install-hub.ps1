@@ -2,8 +2,9 @@ param(
   [string]$InstallDir = "$env:USERPROFILE\stream-control-hub",
   [string]$RepoUrl = "https://github.com/himydearfriends1934-cmyk/stream-control-hub.git",
   [string]$Branch = "main",
-  [string]$HostName = "127.0.0.1",
-  [int]$Port = 8788,
+  [string]$HostName = "",
+  [int]$Port = 0,
+  [string]$TrustedRemoteWrites = "",
   [string]$TailscaleAuthKey = "",
   [string]$TailscaleHostname = "stream-control-hub",
   [ValidateSet("install", "uninstall")]
@@ -104,17 +105,39 @@ if (-not (Test-Path $nodesFile)) {
 
 $envFile = Join-Path $InstallDir ".env"
 $token = ""
+$existingHost = ""
+$existingPort = 0
+$existingTrustedRemoteWrites = ""
 if (Test-Path $envFile) {
   $existing = Select-String -LiteralPath $envFile -Pattern "^STREAM_HUB_CONTROL_TOKEN=(.+)$" -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($existing) { $token = $existing.Matches[0].Groups[1].Value }
+  $existing = Select-String -LiteralPath $envFile -Pattern "^STREAM_HUB_HOST=(.+)$" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($existing) { $existingHost = $existing.Matches[0].Groups[1].Value }
+  $existing = Select-String -LiteralPath $envFile -Pattern "^STREAM_HUB_PORT=(\d+)$" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($existing) { $existingPort = [int]$existing.Matches[0].Groups[1].Value }
+  $existing = Select-String -LiteralPath $envFile -Pattern "^STREAM_HUB_TRUSTED_REMOTE_WRITES=(.+)$" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($existing) { $existingTrustedRemoteWrites = $existing.Matches[0].Groups[1].Value }
 }
 if (-not $token) { $token = New-Token }
+if (-not $HostName) { $HostName = if ($existingHost) { $existingHost } else { "127.0.0.1" } }
+if ($Port -le 0) { $Port = if ($existingPort -gt 0) { $existingPort } else { 8788 } }
+if (-not $TrustedRemoteWrites) {
+  $TrustedRemoteWrites = if ($existingTrustedRemoteWrites) { $existingTrustedRemoteWrites } else { "0" }
+}
+if ($TrustedRemoteWrites -match "^(?i:1|true|yes)$") {
+  $TrustedRemoteWrites = "1"
+} elseif ($TrustedRemoteWrites -match "^(?i:0|false|no)$") {
+  $TrustedRemoteWrites = "0"
+} else {
+  throw "TrustedRemoteWrites must be 0 or 1."
+}
 
 @(
   "STREAM_HUB_CONTROL_TOKEN=$token",
   "STREAM_HUB_NODES_FILE=$nodesFile",
   "STREAM_HUB_HOST=$HostName",
-  "STREAM_HUB_PORT=$Port"
+  "STREAM_HUB_PORT=$Port",
+  "STREAM_HUB_TRUSTED_REMOTE_WRITES=$TrustedRemoteWrites"
 ) | Set-Content -LiteralPath $envFile -Encoding UTF8
 
 $runScript = Join-Path $InstallDir "run-hub.ps1"
@@ -143,3 +166,4 @@ if (-not $NoStart) {
 Write-Host "Stream Control Hub installed."
 Write-Host "Open: http://127.0.0.1:$Port/?token=$token"
 Write-Host "Nodes file: $nodesFile"
+Write-Host "Trusted remote writes: $TrustedRemoteWrites"

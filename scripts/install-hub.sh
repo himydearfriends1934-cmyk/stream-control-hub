@@ -17,6 +17,7 @@ BRANCH="${BRANCH:-main}"
 STREAM_HUB_HOST="${STREAM_HUB_HOST:-}"
 STREAM_HUB_PORT="${STREAM_HUB_PORT:-}"
 STREAM_HUB_NODES_FILE="${STREAM_HUB_NODES_FILE:-}"
+STREAM_HUB_TRUSTED_REMOTE_WRITES="${STREAM_HUB_TRUSTED_REMOTE_WRITES:-}"
 STREAM_HUB_SERVICE_MODE="${STREAM_HUB_SERVICE_MODE:-}"
 TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 TAILSCALE_HOSTNAME="${TAILSCALE_HOSTNAME:-stream-control-hub}"
@@ -162,15 +163,23 @@ TOKEN=""
 EXISTING_HOST=""
 EXISTING_PORT=""
 EXISTING_NODES_FILE=""
+EXISTING_TRUSTED_REMOTE_WRITES=""
 if [ -f "$ENV_FILE" ]; then
   TOKEN="$(sed -n 's/^STREAM_HUB_CONTROL_TOKEN=//p' "$ENV_FILE" | head -n 1)"
   EXISTING_HOST="$(sed -n 's/^STREAM_HUB_HOST=//p' "$ENV_FILE" | head -n 1)"
   EXISTING_PORT="$(sed -n 's/^STREAM_HUB_PORT=//p' "$ENV_FILE" | head -n 1)"
   EXISTING_NODES_FILE="$(sed -n 's/^STREAM_HUB_NODES_FILE=//p' "$ENV_FILE" | head -n 1)"
+  EXISTING_TRUSTED_REMOTE_WRITES="$(sed -n 's/^STREAM_HUB_TRUSTED_REMOTE_WRITES=//p' "$ENV_FILE" | head -n 1)"
 fi
 [ -n "$STREAM_HUB_HOST" ] || STREAM_HUB_HOST="${EXISTING_HOST:-127.0.0.1}"
 [ -n "$STREAM_HUB_PORT" ] || STREAM_HUB_PORT="${EXISTING_PORT:-8788}"
 [ -n "$STREAM_HUB_NODES_FILE" ] || STREAM_HUB_NODES_FILE="${EXISTING_NODES_FILE:-$INSTALL_DIR/data/nodes.local.json}"
+[ -n "$STREAM_HUB_TRUSTED_REMOTE_WRITES" ] || STREAM_HUB_TRUSTED_REMOTE_WRITES="${EXISTING_TRUSTED_REMOTE_WRITES:-0}"
+case "$(printf '%s' "$STREAM_HUB_TRUSTED_REMOTE_WRITES" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes) STREAM_HUB_TRUSTED_REMOTE_WRITES="1" ;;
+  0|false|no) STREAM_HUB_TRUSTED_REMOTE_WRITES="0" ;;
+  *) echo "STREAM_HUB_TRUSTED_REMOTE_WRITES must be 0 or 1." >&2; exit 1 ;;
+esac
 NODES_FILE="$STREAM_HUB_NODES_FILE"
 mkdir -p "$(dirname "$NODES_FILE")"
 [ -f "$NODES_FILE" ] || printf '[]\n' > "$NODES_FILE"
@@ -182,6 +191,7 @@ STREAM_HUB_CONTROL_TOKEN=$TOKEN
 STREAM_HUB_NODES_FILE=$NODES_FILE
 STREAM_HUB_HOST=$STREAM_HUB_HOST
 STREAM_HUB_PORT=$STREAM_HUB_PORT
+STREAM_HUB_TRUSTED_REMOTE_WRITES=$STREAM_HUB_TRUSTED_REMOTE_WRITES
 EOF
 chmod 600 "$ENV_FILE"
 
@@ -217,12 +227,18 @@ if command -v systemctl >/dev/null 2>&1; then
 Description=Stream Control Hub
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=$ENV_FILE
 ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub
 Restart=always
-RestartSec=5
+RestartSec=3
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
 
 [Install]
 WantedBy=$SERVICE_TARGET
@@ -261,3 +277,4 @@ echo "Stream Control Hub installed."
 echo "Open: http://127.0.0.1:$STREAM_HUB_PORT/?token=$TOKEN"
 echo "Nodes file: $NODES_FILE"
 echo "Install path: $INSTALL_DIR ($STREAM_HUB_SERVICE_MODE service)"
+echo "Trusted remote writes: $STREAM_HUB_TRUSTED_REMOTE_WRITES"
