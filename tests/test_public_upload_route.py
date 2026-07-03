@@ -106,6 +106,50 @@ class HubPublicUploadRouteTests(unittest.TestCase):
         self.assertEqual(data["candidates"][1]["url"], "http://100.118.47.126:8787")
         self.assertEqual(data["headers"]["X-Upload-Ticket"], "short-lived-ticket")
 
+    def test_hub_media_push_uses_upload_ticket_for_restricted_public_route(self):
+        from stream_control_hub import app
+
+        node = {
+            "id": "LIGHTCONE-NEW",
+            "base_url": "http://100.118.47.126:8787",
+            "token": "agent-token",
+        }
+        public_status = {
+            "ok": True,
+            "supported": True,
+            "public_origin": "http://165.99.42.174:8787",
+            "restrict_public_to_upload": True,
+            "ticket_required": True,
+        }
+        captured_route = {}
+
+        def fake_probe(route):
+            captured_route.update(route)
+            return {"ok": True, "rate_label": "1 MB/s"}
+
+        with patch.object(app, "request_node_json", return_value=public_status), patch.object(
+            app,
+            "request_node_upload_ticket",
+            return_value={"ok": True, "ticket": "short-lived-ticket", "expires_in": 3600},
+        ) as ticket_request, patch.object(app, "probe_upload_route", side_effect=fake_probe):
+            route = app.select_node_upload_route(
+                node,
+                upload_id="hub-upload-1",
+                filename="video.mp4",
+                total_size=1024,
+            )
+
+        ticket_request.assert_called_once_with(
+            node,
+            upload_id="hub-upload-1",
+            filename="video.mp4",
+            total_size=1024,
+        )
+        self.assertEqual(route["route"], "public-direct")
+        self.assertEqual(route["upload_base_url"], "http://165.99.42.174:8787")
+        self.assertEqual(captured_route["headers"], {"X-Upload-Ticket": "short-lived-ticket"})
+        self.assertNotIn("X-Control-Token", captured_route["headers"])
+
 
 class AgentUploadIntegrityTests(unittest.TestCase):
     def agent_paths(self, module, root):

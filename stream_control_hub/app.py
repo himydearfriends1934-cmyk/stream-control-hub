@@ -3320,7 +3320,13 @@ def make_internal_upload_route(node: dict[str, Any], warnings: list[str] | None 
     }
 
 
-def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
+def select_node_upload_route(
+    node: dict[str, Any],
+    *,
+    upload_id: str,
+    filename: str,
+    total_size: int,
+) -> dict[str, Any]:
     base_url = node_base_url(node)
     if not base_url:
         raise ValueError("missing node base_url")
@@ -3387,8 +3393,27 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
         route["decision_log"].append("failed to open public window; considering direct public or internal route")
 
     if public_origin:
+        headers = node_headers(node)
+        if restrict_public or bool(status.get("ticket_required")):
+            ticket = request_node_upload_ticket(node, upload_id=upload_id, filename=filename, total_size=total_size)
+            if not ticket.get("ok"):
+                route["warnings"].append(ticket.get("message") or "failed to issue public upload ticket")
+                route["decision_log"].append("public upload ticket unavailable; using internal route")
+                fallback_route = make_internal_upload_route(node, route["warnings"])
+                fallback_route["decision_log"] = [*route.get("decision_log", []), "internal fallback selected after failed ticket issue"]
+                return fallback_route
+            ticket_value = str(ticket.get("ticket") or "")
+            if not ticket_value:
+                route["warnings"].append("public upload ticket response did not include a ticket")
+                route["decision_log"].append("public upload ticket missing; using internal route")
+                fallback_route = make_internal_upload_route(node, route["warnings"])
+                fallback_route["decision_log"] = [*route.get("decision_log", []), "internal fallback selected after missing ticket"]
+                return fallback_route
+            headers = {"X-Upload-Ticket": ticket_value}
+            route["token"] = ticket_value
+            route["decision_log"].append("public upload ticket issued; probing public route")
         route["decision_log"].append(
-            "probing discovered public route with Hub control authentication"
+            "probing discovered public route with upload ticket"
             if restrict_public
             else "public origin is unrestricted; probing direct public route"
         )
@@ -3396,6 +3421,7 @@ def select_node_upload_route(node: dict[str, Any]) -> dict[str, Any]:
             "upload_base_url": public_origin,
             "route": "public-direct",
             "route_label": "public direct",
+            "headers": headers,
             "chunk_bytes": NODE_PUBLIC_UPLOAD_CHUNK_BYTES,
         })
         probe = probe_upload_route(route)
@@ -3553,7 +3579,7 @@ def push_media_to_node(node: dict[str, Any], media_path: Path) -> dict[str, Any]
     last_payload: dict[str, Any] = {}
     received_size = 0
     try:
-        route = select_node_upload_route(node)
+        route = select_node_upload_route(node, upload_id=upload_id, filename=media_path.name, total_size=total_size)
         chunk_size = int(route.get("chunk_bytes") or NODE_UPLOAD_CHUNK_BYTES)
         total_chunks = (total_size + chunk_size - 1) // chunk_size
 
