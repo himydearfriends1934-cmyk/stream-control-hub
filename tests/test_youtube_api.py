@@ -134,6 +134,17 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(payload["youtube_stream_id"], "stream-1")
         self.assertEqual(payload["stream_key"], "")
 
+    def test_hub_splits_full_rtmp_url_pasted_as_stream_key(self):
+        from stream_control_hub import app
+
+        payload = app.stream_payload_for_node({
+            "video_path": "video.mp4",
+            "stream_key": "rtmp://a.rtmp.youtube.com/live2/private-key",
+        })
+
+        self.assertEqual(payload["stream_url"], "rtmp://a.rtmp.youtube.com/live2")
+        self.assertEqual(payload["stream_key"], "private-key")
+
     def test_hub_starts_youtube_api_mode_without_stream_key(self):
         from stream_control_hub import app
 

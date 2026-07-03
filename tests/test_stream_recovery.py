@@ -34,6 +34,8 @@ class StreamRecoveryTests(unittest.TestCase):
                 "Popen",
                 side_effect=[SimpleNamespace(pid=4101), SimpleNamespace(pid=4102)],
             ), patch.object(
+                headless_agent, "verify_stream_started", return_value={"ok": True}
+            ), patch.object(
                 headless_agent, "stop_process", return_value={"ok": True, "skipped": True}
             ):
                 video = headless_agent.MEDIA_DIR / "video.mp4"
@@ -81,6 +83,39 @@ class StreamRecoveryTests(unittest.TestCase):
         self.assertTrue(result["restarted"])
         launch.assert_called_once()
         self.assertEqual(launch.call_args.kwargs["reason"], "auto-recovery")
+
+    def test_start_stream_reports_immediate_ffmpeg_exit(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self.recovery_paths(headless_agent, tmp)
+            with patches[0], patches[1], patches[2], patches[3], patch.object(
+                headless_agent, "CONTROL_TOKEN", ""
+            ), patch.object(headless_agent, "ffmpeg_command", return_value=["ffmpeg"]), patch.object(
+                headless_agent, "stream_output_url", return_value="rtmp://example/live/private-key"
+            ), patch.object(headless_agent, "stream_process_owned", return_value=False), patch.object(
+                headless_agent, "STREAM_START_VERIFY_SECONDS", 0.1
+            ), patch.object(headless_agent, "STREAM_START_VERIFY_INTERVAL_SECONDS", 0.01), patch.object(
+                headless_agent.subprocess,
+                "Popen",
+                return_value=SimpleNamespace(pid=4101),
+            ):
+                video = headless_agent.MEDIA_DIR / "video.mp4"
+                video.write_bytes(b"video")
+                (headless_agent.DATA_DIR / "ffmpeg.log").write_text(
+                    "Error writing trailer of rtmp://example/live/private-key: Broken pipe\n",
+                    encoding="utf-8",
+                )
+                response = headless_agent.APP.test_client().post(
+                    "/api/start-stream",
+                    json={"video_path": str(video), "stream_key": "private-stream-key"},
+                )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 502)
+        self.assertFalse(data["ok"])
+        self.assertIn("Broken pipe", data["message"])
+        self.assertNotIn("private-key", json.dumps(data))
 
     def test_status_never_returns_recovery_stream_key(self):
         from stream_control_hub import headless_agent

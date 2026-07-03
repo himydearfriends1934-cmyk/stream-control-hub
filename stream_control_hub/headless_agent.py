@@ -5,6 +5,7 @@ import hmac
 import ipaddress
 import os
 import platform
+import re
 import secrets
 import shutil
 import signal
@@ -78,6 +79,11 @@ STREAM_WATCHDOG_INTERVAL_SECONDS = max(2, int(os.environ.get("STREAM_WATCHDOG_IN
 STREAM_RESTART_BASE_SECONDS = max(2, int(os.environ.get("STREAM_RESTART_BASE_SECONDS", "5")))
 STREAM_RESTART_MAX_SECONDS = max(STREAM_RESTART_BASE_SECONDS, int(os.environ.get("STREAM_RESTART_MAX_SECONDS", "60")))
 STREAM_RESTART_STABLE_SECONDS = max(15, int(os.environ.get("STREAM_RESTART_STABLE_SECONDS", "60")))
+STREAM_START_VERIFY_SECONDS = max(0.0, float(os.environ.get("STREAM_AGENT_START_VERIFY_SECONDS", "3")))
+STREAM_START_VERIFY_INTERVAL_SECONDS = max(
+    0.1,
+    float(os.environ.get("STREAM_AGENT_START_VERIFY_INTERVAL_SECONDS", "0.5")),
+)
 YOUTUBE_CREDENTIAL_FILE = Path(
     os.environ.get("YOUTUBE_CREDENTIAL_FILE", str(DATA_DIR / "youtube_credentials.json"))
 )
@@ -788,6 +794,18 @@ def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -
     ]
 
 
+def redact_stream_log_line(line: str) -> str:
+    return re.sub(r"(rtmps?://[^/\s]+/\S+/)[^\s]+", r"\1[redacted]", line)
+
+
+def recent_ffmpeg_log_lines(log_path: Path, *, max_lines: int = 20) -> list[str]:
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return [redact_stream_log_line(line)[-500:] for line in lines[-max_lines:]]
+
+
 def stream_restart_backoff(consecutive_failures: int) -> int:
     multiplier = 2 ** min(max(0, consecutive_failures - 1), 6)
     return min(STREAM_RESTART_MAX_SECONDS, STREAM_RESTART_BASE_SECONDS * multiplier)
@@ -875,6 +893,22 @@ def launch_stream_process(
     state["last_started_at"] = auto_restart["last_started_at"]
     save_state(state)
     return {"pid": proc.pid, "log_path": str(log_path), "video_path": str(video_path)}
+
+
+def verify_stream_started(pid: int, log_path: Path) -> dict[str, Any]:
+    if STREAM_START_VERIFY_SECONDS <= 0:
+        return {"ok": True, "skipped": True}
+    deadline = time.time() + STREAM_START_VERIFY_SECONDS
+    while time.time() < deadline:
+        if not stream_process_owned(pid):
+            lines = recent_ffmpeg_log_lines(log_path)
+            return {
+                "ok": False,
+                "message": lines[-1] if lines else "ffmpeg exited immediately",
+                "log_tail": lines,
+            }
+        time.sleep(STREAM_START_VERIFY_INTERVAL_SECONDS)
+    return {"ok": True}
 
 
 def stream_watchdog_tick() -> dict[str, Any]:
@@ -1666,6 +1700,21 @@ def api_start_stream():
                 persist_recovery=True,
                 resolved_output_url=output_url,
             )
+            verify = verify_stream_started(result["pid"], Path(result["log_path"]))
+            if not verify.get("ok"):
+                state = load_state()
+                auto_restart = dict(state.get("auto_restart") or {})
+                auto_restart.update({"desired": False, "status": "failed", "last_error": verify.get("message") or "ffmpeg exited"})
+                state["stream_desired"] = False
+                state["stream_pid"] = 0
+                state["auto_restart"] = auto_restart
+                save_state(state)
+                remove_stream_restart_payload()
+                return jsonify({
+                    "ok": False,
+                    "message": verify.get("message") or "ffmpeg exited immediately",
+                    "log_tail": verify.get("log_tail") or [],
+                }), 502
         except Exception as exc:
             return jsonify({"ok": False, "message": str(exc)}), 500
     return jsonify({

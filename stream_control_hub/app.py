@@ -4130,9 +4130,17 @@ def api_node_media_delete():
 
 
 def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
+    stream_url = str(payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2").strip().rstrip("/")
+    stream_key = str(payload.get("stream_key") or "").strip()
+    if stream_key.lower().startswith(("rtmp://", "rtmps://")):
+        parsed_key = stream_key.rstrip("/")
+        head, sep, tail = parsed_key.rpartition("/")
+        if sep and head.lower().startswith(("rtmp://", "rtmps://")) and tail:
+            stream_url = head.rstrip("/")
+            stream_key = tail.strip()
     return {
-        "stream_url": str(payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2").strip().rstrip("/"),
-        "stream_key": str(payload.get("stream_key") or "").strip(),
+        "stream_url": stream_url,
+        "stream_key": stream_key,
         "youtube_stream_id": str(payload.get("youtube_stream_id") or "").strip(),
         "video_path": str(payload.get("video_path") or "").strip(),
         "copy_mode": bool(payload.get("copy_mode")),
