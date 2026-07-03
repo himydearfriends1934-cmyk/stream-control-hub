@@ -7,6 +7,7 @@ import os
 import platform
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -55,6 +56,11 @@ CONTROL_TOKEN = os.environ.get("STREAM_AGENT_CONTROL_TOKEN", "").strip()
 PUBLIC_ORIGIN = os.environ.get("STREAM_AGENT_PUBLIC_ORIGIN", "").strip()
 TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_AGENT_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
 FFMPEG_BIN = os.environ.get("STREAM_AGENT_FFMPEG_BIN", "ffmpeg")
+AGENT_SOURCE_REPO = os.environ.get(
+    "STREAM_AGENT_SOURCE_REPO",
+    "https://github.com/himydearfriends1934-cmyk/stream-control-hub.git",
+)
+AGENT_SOURCE_BRANCH = os.environ.get("STREAM_AGENT_SOURCE_BRANCH", "main")
 APP_STARTED_AT = time.time()
 SHARE_CHUNK_BYTES = int(os.environ.get("STREAM_AGENT_SHARE_CHUNK_BYTES", str(32 * 1024 ** 2)))
 SHARE_TIMEOUT_SECONDS = int(os.environ.get("STREAM_AGENT_SHARE_TIMEOUT_SECONDS", "300"))
@@ -93,6 +99,96 @@ YOUTUBE_CLIENT = YouTubeAPIClient(
     client_secret=os.environ.get("YOUTUBE_CLIENT_SECRET", ""),
     credential_path=YOUTUBE_CREDENTIAL_FILE,
 )
+
+
+def agent_version_status() -> dict[str, Any]:
+    revision = ""
+    branch = ""
+    if (ROOT / ".git").exists():
+        try:
+            revision_result = subprocess.run(
+                ["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            branch_result = subprocess.run(
+                ["git", "-C", str(ROOT), "branch", "--show-current"],
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            if revision_result.returncode == 0:
+                revision = revision_result.stdout.strip()
+            if branch_result.returncode == 0:
+                branch = branch_result.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return {
+        "version": revision or "unmanaged",
+        "revision": revision,
+        "branch": branch,
+        "managed_install": bool(revision),
+        "upgrade_supported": bool(shutil.which("systemd-run")),
+    }
+
+
+def current_systemd_service() -> str:
+    try:
+        content = Path("/proc/self/cgroup").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    matches = re.findall(r"([A-Za-z0-9_.@-]+\.service)(?:/|$)", content)
+    return matches[-1] if matches else ""
+
+
+def schedule_agent_upgrade() -> dict[str, Any]:
+    version = agent_version_status()
+    if not shutil.which("systemd-run"):
+        raise RuntimeError("systemd-run is required for safe background upgrades")
+    service = current_systemd_service()
+    if not service:
+        raise RuntimeError("unable to identify the current systemd Agent service")
+    unit = f"stream-control-agent-upgrade-{int(time.time())}"
+    root = shlex.quote(str(ROOT))
+    branch = shlex.quote(AGENT_SOURCE_BRANCH)
+    if version["managed_install"] and service == "stream-control-headless-agent.service":
+        script = (
+            "sleep 2; "
+            f"git -C {root} fetch origin {branch} && "
+            f"git -C {root} checkout {branch} && "
+            f"git -C {root} pull --ff-only origin {branch} && "
+            f"env BRANCH={branch} CHOICE=1 sh {root}/scripts/install-agent.sh"
+        )
+        install_mode = "managed-installer"
+    else:
+        repo = shlex.quote(AGENT_SOURCE_REPO)
+        service_arg = shlex.quote(service)
+        script = (
+            "set -eu; sleep 2; tmp=$(mktemp -d); "
+            "trap 'rm -rf \"$tmp\"' EXIT; "
+            f"git clone --quiet --depth 1 --branch {branch} {repo} \"$tmp/repo\"; "
+            f"cp -a \"$tmp/repo/.git\" \"$tmp/repo/stream_control_hub\" \"$tmp/repo/scripts\" {root}/; "
+            f"cp \"$tmp/repo/requirements.txt\" \"$tmp/repo/README.md\" {root}/; "
+            f"{root}/.venv/bin/python -m pip install -q -r {root}/requirements.txt; "
+            f"systemctl restart {service_arg}"
+        )
+        install_mode = "in-place-bootstrap"
+    result = subprocess.run(
+        ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "failed to schedule upgrade").strip())
+    return {
+        "unit": unit,
+        "from_version": version["version"],
+        "target_branch": AGENT_SOURCE_BRANCH,
+        "install_mode": install_mode,
+        "service": service,
+    }
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = MAX_CHUNK_BYTES + 1024 * 1024
@@ -1057,8 +1153,8 @@ def api_status():
             "name": AGENT_NAME,
             "mode": "headless-agent",
             "headless": True,
-            "version": "0.2.0",
             "control_hub": CONTROL_HUB,
+            **agent_version_status(),
         },
         "disk": {
             "total": usage.total,
@@ -1787,6 +1883,20 @@ def api_restart_stream():
         "message": "stream restarted",
         "result": {"previous_pid": previous_pid, "started_pid": result["pid"], "auto_restart": STREAM_AUTO_RESTART_ENABLED},
     })
+
+
+@APP.post("/api/upgrade")
+def api_upgrade():
+    try:
+        result = schedule_agent_upgrade()
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 409
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "message": "Agent upgrade scheduled; it will restart automatically",
+        "result": result,
+    }), 202
 
 
 def main() -> None:

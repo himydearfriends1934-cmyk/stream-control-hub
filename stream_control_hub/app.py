@@ -547,7 +547,7 @@ HTML = r"""
     .dot { width: 9px; height: 9px; border-radius: 999px; background: #fbbf24; box-shadow: 0 0 16px rgba(251, 191, 36, 0.35); }
     .dot.ok { background: var(--accent); box-shadow: 0 0 16px rgba(54, 211, 153, 0.45); }
     .dot.bad { background: var(--danger); box-shadow: 0 0 16px rgba(251, 113, 133, 0.4); }
-    .row-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; }
+    .row-actions { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 4px; }
     .row-actions button.tiny { padding-left: 6px; padding-right: 6px; font-size: 11px; }
     .empty-state {
       min-height: 180px;
@@ -828,7 +828,6 @@ HTML = r"""
           <p>低频维护功能放在底部，不占用节点监控主视野。</p>
           <div class="actions">
             <button id="checkUpdatesBtn">检查 GitHub 更新</button>
-            <button class="primary" id="upgradeSelectedBtn">更新选中节点</button>
           </div>
         </div>
         <div class="card compact-card">
@@ -993,7 +992,6 @@ HTML = r"""
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
       policyBtn: document.getElementById("policyBtn"),
       auditBtn: document.getElementById("auditBtn"),
-      upgradeSelectedBtn: document.getElementById("upgradeSelectedBtn"),
       tailscaleWizardBtn: document.getElementById("tailscaleWizardBtn"),
       tailscaleWizardModal: document.getElementById("tailscaleWizardModal"),
       tailscaleWizardClose: document.getElementById("tailscaleWizardClose"),
@@ -1052,7 +1050,13 @@ HTML = r"""
     };
     refs.cancelUploadBtn = document.getElementById("cancelUploadBtn");
     let nodes = [];
-    let selectedNodeId = "";
+    const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
+    let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
+    function rememberSelectedNode(nodeId) {
+      selectedNodeId = String(nodeId || "");
+      if (selectedNodeId) localStorage.setItem(LAST_NODE_STORAGE_KEY, selectedNodeId);
+      else localStorage.removeItem(LAST_NODE_STORAGE_KEY);
+    }
     let lastTuneRecommendation = null;
     let activeUpload = null;
     let contextMediaRow = null;
@@ -1478,13 +1482,14 @@ HTML = r"""
           <input data-node-check type="checkbox" value="${escapeHtml(node.id)}" ${checked ? "checked" : ""} ${node.enabled === false ? "disabled" : ""} title="选中后可推送资源或升级">
           <span class="node-name">
             <strong>${escapeHtml(node.name || node.id)}</strong>
-            <small>${escapeHtml(h.hostname || node.id)} · ${escapeHtml(h.platform || "未知")}</small>
+            <small>${escapeHtml(h.hostname || node.id)} · 版本 ${escapeHtml(h.agent?.version || "未识别")}</small>
           </span>
           <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
           <span class="node-state">${stateDot(streaming, online)}${streaming ? "推流中" : "未推流"}</span>
           <span class="row-actions">
             <button class="tiny" data-node-action="stop-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>停止推流</button>
             <button class="tiny" data-node-action="restart-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启推流</button>
+            <button class="tiny primary" data-node-action="upgrade-agent" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>升级 / 安装</button>
             <button class="tiny danger" data-node-action="reboot-vps" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启 VPS</button>
           </span>
         </div>
@@ -1499,7 +1504,7 @@ HTML = r"""
         return;
       }
       if (!nodes.some((node) => String(node.id) === String(selectedNodeId))) {
-        selectedNodeId = String(nodes[0].id || "");
+        rememberSelectedNode(nodes[0].id || "");
       }
       refs.nodeMonitor.innerHTML = renderMonitor(selectedNode());
       refs.nodeList.innerHTML = `
@@ -2255,7 +2260,7 @@ HTML = r"""
         return resp.json();
       });
       if (data.ok) {
-        selectedNodeId = String(data.node_id || selectedNodeId || "");
+        rememberSelectedNode(data.node_id || selectedNodeId || "");
         log(`已连接 ${data.node_id} 到 ${data.base_url}`);
         await refreshAll();
       }
@@ -2468,7 +2473,7 @@ HTML = r"""
         return;
       }
       if (action === "use") {
-        selectedNodeId = nodeId;
+        rememberSelectedNode(nodeId);
         const input = row.querySelector("[data-media-check]");
         if (input) input.checked = true;
         renderTransfer({
@@ -2583,25 +2588,22 @@ HTML = r"""
         const data = await postNodeAction("/api/nodes/reboot", { node_id: nodeId, confirm_text: typed });
         log(data.ok ? `VPS 重启已提交：${nodeName}` : `VPS 重启被保护规则拦截：${data.message || nodeName}`);
         await refreshAll();
-      }
-    }
-
-    async function upgradeSelectedNodes() {
-      const node_ids = selectedNodeIds();
-      if (!node_ids.length) {
-        refs.updateBox.textContent = "请选择至少一个节点。";
         return;
       }
-      refs.upgradeSelectedBtn.disabled = true;
-      try {
-        const resp = await fetch("/api/nodes/upgrade", {
-          method: "POST",
-          headers: authHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ node_ids }),
-        });
-        refs.updateBox.textContent = JSON.stringify(await resp.json(), null, 2);
-      } finally {
-        refs.upgradeSelectedBtn.disabled = false;
+      if (action === "upgrade-agent") {
+        if (!confirm(`确认更新 ${nodeName}？\n\n该 Agent 会从 GitHub main 拉取最新版并自动重启。`)) return;
+        const button = refs.nodeList.querySelector(`[data-node-action="upgrade-agent"][data-node-id="${CSS.escape(String(nodeId))}"]`);
+        if (button) button.disabled = true;
+        log(`开始更新 Agent：${nodeName}`);
+        const data = await postNodeAction("/api/nodes/upgrade", { node_id: nodeId });
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        log(data.ok ? `更新任务已提交：${nodeName}` : `更新提交失败：${data.message || nodeName}`);
+        if (data.ok) {
+          await new Promise((resolve) => setTimeout(resolve, 8000));
+          await refreshAll();
+        } else if (button) {
+          button.disabled = false;
+        }
       }
     }
 
@@ -2618,7 +2620,7 @@ HTML = r"""
       }
       const row = event.target.closest("[data-node-row]");
       if (!row) return;
-      selectedNodeId = row.dataset.nodeId;
+      rememberSelectedNode(row.dataset.nodeId);
       renderNodes();
       renderMedia();
       renderStreamControls();
@@ -2701,7 +2703,6 @@ HTML = r"""
     [refs.presetInput, refs.videoBitrateInput, refs.audioBitrateInput, refs.fpsInput, refs.resolutionInput, refs.keyframeInput].forEach((el) => {
       el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
     });
-    refs.upgradeSelectedBtn.addEventListener("click", upgradeSelectedNodes);
     refreshAll();
   </script>
 </body>
@@ -4499,20 +4500,18 @@ def api_github_check():
 @APP.post("/api/nodes/upgrade")
 def api_nodes_upgrade():
     payload = request.get_json(silent=True) or {}
-    node_ids = [str(item) for item in payload.get("node_ids") or []]
-    plans = []
-    for node_id in node_ids:
-        node = node_by_id(node_id)
-        if not node:
-            plans.append({"node_id": node_id, "ok": False, "message": "node not found"})
-            continue
-        plans.append({
-            "node_id": node_id,
-            "ok": False,
-            "message": "upgrade transport not configured yet; design keeps FFmpeg untouched and restarts panel only",
-            "target": str(node.get("base_url") or ""),
-        })
-    return jsonify({"ok": True, "plans": plans})
+    node_id = str(payload.get("node_id") or "").strip()
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
+    if not node.get("enabled", True):
+        return jsonify({"ok": False, "node_id": node_id, "message": "node disabled"}), 409
+    upgrade_api = str(node.get("upgrade_api") or "/api/upgrade").strip() or "/api/upgrade"
+    if not upgrade_api.startswith("/"):
+        upgrade_api = f"/{upgrade_api}"
+    result = post_node_json(node, upgrade_api, {}, timeout=30)
+    status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
+    return jsonify({"node_id": node_id, **result}), status_code
 
 
 def main() -> None:
