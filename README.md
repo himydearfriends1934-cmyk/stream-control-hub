@@ -63,6 +63,8 @@ After installation, the service must pass an authenticated `/api/status` check b
 
 Agent updates preserve the existing bind host, port, Agent name, Hub pairing URL, public upload origin, auto-restart policy, trusted-write policy, and YouTube OAuth client settings. Both Linux services use a restrictive `0077` umask, bounded restart timing, process-group cleanup, and an explicit environment file so manual systemd drop-ins are not needed.
 
+Each Agent row in the Hub shows its current Git revision and has its own `升级 / 安装` action. The action schedules an independent systemd upgrade job on that Agent, pulls GitHub `main`, runs the standard installer, and restarts only that Agent. The Hub also remembers the last viewed Agent in browser-local storage and restores it on the next visit.
+
 When `STREAM_AGENT_CONTROL_HUB` points to the Hub's Tailscale URL, the Agent trusts API traffic only from that exact Tailscale source IP. In the Hub Tailscale wizard, choose `新增 Agent（仅输入 IP）`, enter the Agent's `100.x` address, and connect. Other tailnet peers still need the per-Agent control token.
 
 The installers generate a local control token and keep node secrets outside git. The Hub prints a URL like `http://127.0.0.1:8788/?token=...`; use that URL for remote write actions when `STREAM_HUB_CONTROL_TOKEN` is enabled.

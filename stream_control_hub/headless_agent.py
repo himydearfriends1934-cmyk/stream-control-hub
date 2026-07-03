@@ -7,6 +7,7 @@ import os
 import platform
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -93,6 +94,64 @@ YOUTUBE_CLIENT = YouTubeAPIClient(
     client_secret=os.environ.get("YOUTUBE_CLIENT_SECRET", ""),
     credential_path=YOUTUBE_CREDENTIAL_FILE,
 )
+
+
+def agent_version_status() -> dict[str, Any]:
+    revision = ""
+    branch = ""
+    if (ROOT / ".git").exists():
+        try:
+            revision_result = subprocess.run(
+                ["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            branch_result = subprocess.run(
+                ["git", "-C", str(ROOT), "branch", "--show-current"],
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            if revision_result.returncode == 0:
+                revision = revision_result.stdout.strip()
+            if branch_result.returncode == 0:
+                branch = branch_result.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return {
+        "version": revision or "unmanaged",
+        "revision": revision,
+        "branch": branch,
+        "managed_install": bool(revision),
+        "upgrade_supported": bool(revision and shutil.which("systemd-run")),
+    }
+
+
+def schedule_agent_upgrade() -> dict[str, Any]:
+    version = agent_version_status()
+    if not version["managed_install"]:
+        raise RuntimeError("Agent is not a Git-managed installation; reinstall it once with install-agent.sh")
+    if not shutil.which("systemd-run"):
+        raise RuntimeError("systemd-run is required for safe background upgrades")
+    unit = f"stream-control-agent-upgrade-{int(time.time())}"
+    root = shlex.quote(str(ROOT))
+    script = (
+        "sleep 2; "
+        f"git -C {root} fetch origin main && "
+        f"git -C {root} checkout main && "
+        f"git -C {root} pull --ff-only origin main && "
+        f"env BRANCH=main CHOICE=1 sh {root}/scripts/install-agent.sh"
+    )
+    result = subprocess.run(
+        ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "failed to schedule upgrade").strip())
+    return {"unit": unit, "from_version": version["version"], "target_branch": "main"}
 
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = MAX_CHUNK_BYTES + 1024 * 1024
@@ -1057,8 +1116,8 @@ def api_status():
             "name": AGENT_NAME,
             "mode": "headless-agent",
             "headless": True,
-            "version": "0.2.0",
             "control_hub": CONTROL_HUB,
+            **agent_version_status(),
         },
         "disk": {
             "total": usage.total,
@@ -1787,6 +1846,20 @@ def api_restart_stream():
         "message": "stream restarted",
         "result": {"previous_pid": previous_pid, "started_pid": result["pid"], "auto_restart": STREAM_AUTO_RESTART_ENABLED},
     })
+
+
+@APP.post("/api/upgrade")
+def api_upgrade():
+    try:
+        result = schedule_agent_upgrade()
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 409
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "message": "Agent upgrade scheduled; it will restart automatically",
+        "result": result,
+    }), 202
 
 
 def main() -> None:
