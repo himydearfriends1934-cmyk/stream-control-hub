@@ -33,7 +33,9 @@ One-line system Hub install/update/uninstall menu on Linux (recommended for a VP
 curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install-hub.sh | sudo sh
 ```
 
-This installs a root-run Hub at `/opt/stream-control-hub` with a system service. For an unprivileged per-user install, omit `sudo`; it uses `$HOME/stream-control-hub` and a user service. Updates auto-detect an existing installation in either location, preserve its host, port, nodes-file path, and control token, and retain the matching systemd service scope. You can override this explicitly with `INSTALL_DIR=...` and `STREAM_HUB_SERVICE_MODE=system|user`.
+This installs a root-run Hub at `/opt/stream-control-hub` with a system service. For an unprivileged per-user install, omit `sudo`; it uses `$HOME/stream-control-hub` and a user service. Updates auto-detect an existing installation in either location, preserve its host, port, nodes-file path, control token, and trusted-write policy, and retain the matching systemd service scope. You can override this explicitly with `INSTALL_DIR=...` and `STREAM_HUB_SERVICE_MODE=system|user`.
+
+For a Hub bound only to a trusted Tailscale address, `STREAM_HUB_TRUSTED_REMOTE_WRITES=1` allows Tailnet clients to use control actions without placing the Hub token in the browser. This broadens control access to every client that can reach the Hub, so leave the default `0` on public or shared networks. The installer persists the selected policy across later updates.
 
 Menu options:
 
@@ -58,6 +60,8 @@ For non-interactive automation, pass `CHOICE=2` or `CHOICE=3`.
 Before an Agent install or update, the installer stops the managed Agent service and scans for known legacy dashboards, services, project directories, and listeners on port `8787`. It prints the complete cleanup report and requires the exact confirmation `DELETE` before removing recognized legacy projects. For explicitly approved unattended replacement, pass `CONFIRM_REMOVE_CONFLICTS=1`. An unknown process that still occupies the Agent port is never killed automatically; installation stops with its listener details.
 
 After installation, the service must pass an authenticated `/api/status` check before the script reports success. The generated fallback node registration, including its control token, is stored at `/opt/stream-control-hub-agent/node-registration.json` with mode `600` instead of being printed to terminal logs.
+
+Agent updates preserve the existing bind host, port, Agent name, Hub pairing URL, public upload origin, auto-restart policy, trusted-write policy, and YouTube OAuth client settings. Both Linux services use a restrictive `0077` umask, bounded restart timing, process-group cleanup, and an explicit environment file so manual systemd drop-ins are not needed.
 
 When `STREAM_AGENT_CONTROL_HUB` points to the Hub's Tailscale URL, the Agent trusts API traffic only from that exact Tailscale source IP. In the Hub Tailscale wizard, choose `新增 Agent（仅输入 IP）`, enter the Agent's `100.x` address, and connect. Other tailnet peers still need the per-Agent control token.
 
