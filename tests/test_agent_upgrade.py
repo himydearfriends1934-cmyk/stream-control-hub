@@ -41,6 +41,28 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertTrue(response.get_json()["accepted"])
         schedule.assert_called_once_with()
 
+    def test_unmanaged_agent_can_bootstrap_in_place(self):
+        from stream_control_hub import headless_agent
+
+        version = {
+            "version": "unmanaged",
+            "managed_install": False,
+            "upgrade_supported": True,
+        }
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with patch.object(headless_agent, "agent_version_status", return_value=version), patch.object(
+            headless_agent, "current_systemd_service", return_value="stream-control-headless-agent-local.service"
+        ), patch.object(headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"), patch.object(
+            headless_agent.subprocess, "run", return_value=completed
+        ) as run:
+            result = headless_agent.schedule_agent_upgrade()
+
+        self.assertEqual(result["install_mode"], "in-place-bootstrap")
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "systemd-run")
+        self.assertIn("git clone", command[-1])
+        self.assertIn("stream-control-headless-agent-local.service", command[-1])
+
     def test_hub_upgrades_only_requested_agent(self):
         from stream_control_hub import app
 
