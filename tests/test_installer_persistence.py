@@ -95,6 +95,11 @@ class InstallerPersistenceTests(unittest.TestCase):
             self.assertIn(directive, hub)
             self.assertIn(directive, agent)
 
+    def test_agent_installer_ignores_its_transient_upgrade_unit(self):
+        script = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
+
+        self.assertIn("stream-control-agent-upgrade-*.service) continue", script)
+
 
 if __name__ == "__main__":
     unittest.main()
