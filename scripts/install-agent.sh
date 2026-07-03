@@ -120,6 +120,9 @@ remove_legacy_conflicts() {
 
   for service in $(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '(stream.*(agent|dashboard)|(agent|dashboard).*stream)' || true); do
     [ "$service" = "stream-control-headless-agent.service" ] && continue
+    case "$service" in
+      stream-control-agent-upgrade-*.service) continue ;;
+    esac
     case " $legacy_services " in
       *" $service "*) ;;
       *) legacy_services="$legacy_services $service" ;;
