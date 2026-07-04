@@ -85,11 +85,17 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         post.assert_called_once_with(nodes[1], "/api/upgrade", {}, timeout=30)
 
-    def test_ui_remembers_last_agent_and_has_per_agent_upgrade(self):
+    def test_ui_remembers_last_agent_and_keeps_role_actions_in_settings(self):
         from stream_control_hub import app
 
         self.assertIn("streamHubLastSelectedNodeId", app.HTML)
-        self.assertIn('data-role-action="${online ? "upgrade-role" : "activate-role"}"', app.HTML)
+        self.assertIn('id="roleSettingsModal"', app.HTML)
+        self.assertIn("data-role-settings", app.HTML)
+        self.assertIn('data-settings-role="${role}"', app.HTML)
+        self.assertIn("const activeAgents = nodes.filter", app.HTML)
+        self.assertIn("const activeHubs = nodes.filter", app.HTML)
+        self.assertNotIn("升级 Agent</button>", app.HTML)
+        self.assertNotIn("激活 Hub</button>", app.HTML)
         self.assertIn('id="hubNodeList"', app.HTML)
         self.assertIn("Agent 组", app.HTML)
         self.assertIn("Hub 组", app.HTML)

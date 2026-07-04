@@ -558,12 +558,17 @@ HTML = r"""
     .dot { width: 9px; height: 9px; border-radius: 999px; background: #fbbf24; box-shadow: 0 0 16px rgba(251, 191, 36, 0.35); }
     .dot.ok { background: var(--accent); box-shadow: 0 0 16px rgba(54, 211, 153, 0.45); }
     .dot.bad { background: var(--danger); box-shadow: 0 0 16px rgba(251, 113, 133, 0.4); }
-    .row-actions { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 4px; }
+    .row-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
     .role-group + .role-group { margin-top: 12px; }
     .role-group-title { display: flex; justify-content: space-between; align-items: center; margin: 0 0 6px; color: #d6fff0; }
     .role-row.disabled-role { opacity: 0.58; border-style: dashed; }
     .role-row.disabled-role:hover { opacity: 0.82; }
     .row-actions button.tiny { padding-left: 6px; padding-right: 6px; font-size: 11px; }
+    .settings-button { min-width: 36px; font-size: 16px !important; line-height: 1; }
+    .role-settings-modal { width: min(520px, 100%); }
+    .role-settings-status { display: grid; gap: 8px; }
+    .role-settings-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.58); }
+    .role-settings-item small { display: block; margin-top: 3px; color: var(--muted); }
     .empty-state {
       min-height: 180px;
       display: grid;
@@ -876,6 +881,20 @@ HTML = r"""
     </section>
   </div>
 
+  <div class="modal-backdrop" id="roleSettingsModal" aria-hidden="true">
+    <div class="wizard-modal role-settings-modal" role="dialog" aria-modal="true" aria-labelledby="roleSettingsTitle">
+      <div class="wizard-head">
+        <div>
+          <h2 id="roleSettingsTitle">节点角色设置</h2>
+          <p id="roleSettingsSummary">查看当前状态后选择需要执行的低频维护操作。</p>
+        </div>
+        <button class="wizard-close" id="roleSettingsClose" aria-label="关闭">×</button>
+      </div>
+      <div class="role-settings-status" id="roleSettingsActions"></div>
+      <p>保护规则：点击操作后还会显示当前状态与影响范围，必须再次确认才会执行。</p>
+    </div>
+  </div>
+
   <div class="modal-backdrop" id="tailscaleWizardModal" aria-hidden="true">
     <div class="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="tailscaleWizardTitle">
       <div class="wizard-head">
@@ -1008,6 +1027,11 @@ HTML = r"""
     const refs = {
       nodeList: document.getElementById("nodeList"),
       hubNodeList: document.getElementById("hubNodeList"),
+      roleSettingsModal: document.getElementById("roleSettingsModal"),
+      roleSettingsTitle: document.getElementById("roleSettingsTitle"),
+      roleSettingsSummary: document.getElementById("roleSettingsSummary"),
+      roleSettingsActions: document.getElementById("roleSettingsActions"),
+      roleSettingsClose: document.getElementById("roleSettingsClose"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
       mediaContextMenu: document.getElementById("mediaContextMenu"),
@@ -1512,8 +1536,8 @@ HTML = r"""
           <span class="row-actions">
             <button class="tiny" data-node-action="stop-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>停止推流</button>
             <button class="tiny" data-node-action="restart-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启推流</button>
-            <button class="tiny primary" data-role-action="${online ? "upgrade-role" : "activate-role"}" data-role="agent" data-node-id="${escapeHtml(node.id)}">${online ? "升级 Agent" : "激活 Agent"}</button>
             <button class="tiny danger" data-node-action="reboot-vps" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启 VPS</button>
+            <button class="tiny settings-button" data-role-settings data-node-id="${escapeHtml(node.id)}" title="节点角色设置" aria-label="节点角色设置">⚙</button>
           </span>
         </div>
       `;
@@ -1523,17 +1547,15 @@ HTML = r"""
       const role = node.roles?.hub || {};
       const enabled = Boolean(role.enabled);
       const version = role.version || "未安装";
-      const action = enabled ? "upgrade-role" : "activate-role";
-      const label = enabled ? "升级 Hub" : "激活 Hub";
       return `
-        <div class="node-row role-row ${enabled ? "" : "disabled-role"}" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
+        <div class="node-row role-row" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
           <span>${stateDot(enabled, false)}</span>
           <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>Hub 版本 ${escapeHtml(version)}</small></span>
           <span class="node-state">${enabled ? "已启用" : "未启用"}</span>
           <span class="node-state">8788</span>
           <span class="row-actions">
-            <button class="tiny primary" data-role-action="${action}" data-role="hub" data-node-id="${escapeHtml(node.id)}">${label}</button>
-            <button class="tiny" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}" ${enabled ? "" : "disabled"}>切换 Hub</button>
+            <button class="tiny" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}">切换 Hub</button>
+            <button class="tiny settings-button" data-role-settings data-node-id="${escapeHtml(node.id)}" title="节点角色设置" aria-label="节点角色设置">⚙</button>
           </span>
         </div>
       `;
@@ -1551,7 +1573,9 @@ HTML = r"""
         rememberSelectedNode(nodes[0].id || "");
       }
       refs.nodeMonitor.innerHTML = renderMonitor(selectedNode());
-      refs.nodeList.innerHTML = `
+      const activeAgents = nodes.filter((node) => Boolean(node.roles?.agent?.enabled));
+      const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
+      refs.nodeList.innerHTML = activeAgents.length ? `
         <div class="node-table-head">
           <span></span>
           <span>节点</span>
@@ -1559,12 +1583,12 @@ HTML = r"""
           <span>推流</span>
           <span>操作</span>
         </div>
-        ${nodes.map((node) => renderNodeRow(node, checkedIds)).join("")}
-      `;
-      refs.hubNodeList.innerHTML = `
+        ${activeAgents.map((node) => renderNodeRow(node, checkedIds)).join("")}
+      ` : `<div class="empty-state">还没有已激活的 Agent。</div>`;
+      refs.hubNodeList.innerHTML = activeHubs.length ? `
         <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
-        ${nodes.map((node) => renderHubRow(node)).join("")}
-      `;
+        ${activeHubs.map((node) => renderHubRow(node)).join("")}
+      ` : `<div class="empty-state">还没有已激活的 Hub。</div>`;
     }
 
     function renderMedia() {
@@ -2640,6 +2664,28 @@ HTML = r"""
       }
     }
 
+    let roleSettingsNodeId = "";
+
+    function setRoleSettingsOpen(open, nodeId = "") {
+      roleSettingsNodeId = open ? String(nodeId) : "";
+      refs.roleSettingsModal.classList.toggle("open", open);
+      refs.roleSettingsModal.setAttribute("aria-hidden", open ? "false" : "true");
+      if (!open) return;
+      const node = nodes.find((item) => String(item.id) === roleSettingsNodeId);
+      if (!node) return setRoleSettingsOpen(false);
+      refs.roleSettingsTitle.textContent = `${node.name || node.id} · 角色设置`;
+      refs.roleSettingsSummary.textContent = "角色维护功能不会直接执行；选择后还需通过保护确认。";
+      refs.roleSettingsActions.innerHTML = ["agent", "hub"].map((role) => {
+        const info = node.roles?.[role] || {};
+        const enabled = Boolean(info.enabled);
+        const label = role === "hub" ? "Hub" : "Agent";
+        return `<div class="role-settings-item">
+          <span><strong>${label}</strong><small>当前状态：${enabled ? `已激活 · 版本 ${escapeHtml(info.version || "未识别")}` : "未激活"}</small></span>
+          <button class="${enabled ? "" : "primary"}" data-settings-role="${role}" data-role-action="${enabled ? "upgrade-role" : "activate-role"}">${enabled ? `升级 ${label}` : `激活 ${label}`}</button>
+        </div>`;
+      }).join("");
+    }
+
     async function handleRoleAction(action, role, nodeId, sourceButton) {
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const nodeName = node?.name || nodeId;
@@ -2650,10 +2696,13 @@ HTML = r"""
         return;
       }
       const activating = action === "activate-role";
+      const roleInfo = node?.roles?.[role] || {};
+      const currentStatus = roleInfo.enabled ? `已激活，当前版本 ${roleInfo.version || "未识别"}` : "未激活";
       const warning = activating
-        ? `确认在 ${nodeName} 激活 ${roleLabel} 功能？\n\n安全提示：将新增并启用独立 systemd 服务，开放 Tailscale ${role === "hub" ? "8788" : "8787"} 端口。现有 ${role === "hub" ? "Agent" : "Hub"} 会继续运行，配置与视频不会删除。`
-        : `确认升级 ${nodeName} 的 ${roleLabel}？\n\n系统会从 GitHub main 拉取最新版，只重启该角色，不停止另一个角色。`;
+        ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认激活 ${roleLabel}？\n\n安全提示：将新增并启用独立 systemd 服务，开放 Tailscale ${role === "hub" ? "8788" : "8787"} 端口。现有 ${role === "hub" ? "Agent" : "Hub"} 会继续运行，配置与视频不会删除。`
+        : `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认升级 ${roleLabel}？\n\n系统会从 GitHub main 拉取最新版，只重启该角色，不停止另一个角色。`;
       if (!confirm(warning)) return;
+      setRoleSettingsOpen(false);
       if (sourceButton) sourceButton.disabled = true;
       const path = activating ? `/api/nodes/roles/${role}/activate` : `/api/nodes/roles/${role}/upgrade`;
       const data = await postNodeAction(path, { node_id: nodeId });
@@ -2668,6 +2717,13 @@ HTML = r"""
     }
 
     refs.nodeList.addEventListener("click", (event) => {
+      const settingsButton = event.target.closest("[data-role-settings]");
+      if (settingsButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        setRoleSettingsOpen(true, settingsButton.dataset.nodeId);
+        return;
+      }
       const roleButton = event.target.closest("[data-role-action]");
       if (roleButton) {
         event.preventDefault();
@@ -2693,6 +2749,13 @@ HTML = r"""
       renderStreamControls();
     });
     refs.hubNodeList.addEventListener("click", (event) => {
+      const settingsButton = event.target.closest("[data-role-settings]");
+      if (settingsButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        setRoleSettingsOpen(true, settingsButton.dataset.nodeId);
+        return;
+      }
       const roleButton = event.target.closest("[data-role-action]");
       if (roleButton) {
         event.preventDefault();
@@ -2704,6 +2767,16 @@ HTML = r"""
       if (!row) return;
       const node = nodes.find((item) => String(item.id) === String(row.dataset.nodeId));
       if (node?.roles?.hub?.enabled && node.roles.hub.url) window.location.href = node.roles.hub.url;
+    });
+    refs.roleSettingsClose.addEventListener("click", () => setRoleSettingsOpen(false));
+    refs.roleSettingsModal.addEventListener("click", (event) => {
+      if (event.target === refs.roleSettingsModal) {
+        setRoleSettingsOpen(false);
+        return;
+      }
+      const button = event.target.closest("[data-settings-role]");
+      if (!button) return;
+      handleRoleAction(button.dataset.roleAction, button.dataset.settingsRole, roleSettingsNodeId, button);
     });
     refs.mediaList.addEventListener("click", (event) => {
       hideMediaMenu();
