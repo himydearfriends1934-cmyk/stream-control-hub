@@ -565,6 +565,8 @@ HTML = r"""
     .node-row.selected { box-shadow: 0 0 0 1px rgba(54, 211, 153, 0.22); }
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-name small { color: var(--muted); display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-note { display: inline-block; max-width: 9em; margin-top: 3px; padding: 2px 6px; border: 1px dashed var(--line); border-radius: 999px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 700; cursor: pointer; }
+    .node-note:hover { color: var(--text); border-color: var(--accent); }
     .node-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 800; }
     .dot { width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid rgba(255,255,255,0.2); border-radius: 999px; background: #fbbf24; box-shadow: inset 0 0 3px rgba(255,255,255,0.5), 0 0 10px rgba(251, 191, 36, 0.65); }
     .dot.ok { background: #28e39f; box-shadow: inset 0 0 3px rgba(255,255,255,0.65), 0 0 12px rgba(40, 227, 159, 0.85); }
@@ -1563,12 +1565,15 @@ HTML = r"""
       const streaming = nodeStreaming(node);
       const selected = String(node.id) === String(selectedNodeId);
       const checked = checkedIds.has(String(node.id));
+      const note = String(node.note || "").trim();
+      const notePreview = note ? `${[...note].slice(0, 6).join("")}${[...note].length > 6 ? "…" : ""}` : "添加备注";
       return `
         <div class="node-row ${selected ? "selected" : ""}" data-node-row data-node-id="${escapeHtml(node.id)}">
           <input data-node-check type="checkbox" value="${escapeHtml(node.id)}" ${checked ? "checked" : ""} ${node.enabled === false ? "disabled" : ""} title="选中后可推送资源或升级">
           <span class="node-name">
             <strong>${escapeHtml(node.name || node.id)}</strong>
             <small>${escapeHtml(h.hostname || node.id)} · 版本 ${escapeHtml(h.agent?.version || "未识别")}</small>
+            <button class="node-note" data-node-note data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(note || "点击添加备注")}">${escapeHtml(notePreview)}</button>
           </span>
           <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
           <span class="node-state">${streamDot(streaming)}${streaming ? "推流中" : "未推流"}</span>
@@ -2770,6 +2775,24 @@ HTML = r"""
     }
 
     refs.nodeList.addEventListener("click", (event) => {
+      const noteButton = event.target.closest("[data-node-note]");
+      if (noteButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        const node = nodes.find((item) => String(item.id) === String(noteButton.dataset.nodeId));
+        if (!node) return;
+        const current = String(node.note || "");
+        const next = prompt(`节点：${node.name || node.id}\n\n完整备注：${current || "（暂无）"}\n\n可在下方编辑备注：`, current);
+        if (next === null || next === current) return;
+        postJson("/api/nodes/note", { node_id: node.id, note: next }).then(async (data) => {
+          if (!data.ok) {
+            log(`备注保存失败：${data.message || node.id}`);
+            return;
+          }
+          await refreshAll();
+        });
+        return;
+      }
       const settingsButton = event.target.closest("[data-role-settings]");
       if (settingsButton) {
         event.preventDefault();
@@ -4114,6 +4137,25 @@ def api_nodes():
         }
         result.append(node_view)
     return jsonify(result)
+
+
+@APP.post("/api/nodes/note")
+def api_node_note():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    note = str(payload.get("note") or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(note) > 500:
+        return jsonify({"ok": False, "message": "note is limited to 500 characters"}), 400
+    nodes = load_nodes()
+    for node in nodes:
+        if str(node.get("id") or "") == node_id:
+            if note:
+                node["note"] = note
+            else:
+                node.pop("note", None)
+            save_nodes(nodes)
+            return jsonify({"ok": True, "node_id": node_id, "note": note})
+    return jsonify({"ok": False, "message": "node not found"}), 404
 
 
 @APP.get("/api/role-status")
