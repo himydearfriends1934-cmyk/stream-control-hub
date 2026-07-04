@@ -190,6 +190,49 @@ def schedule_agent_upgrade() -> dict[str, Any]:
         "service": service,
     }
 
+
+def schedule_hub_activation() -> dict[str, Any]:
+    if not shutil.which("systemd-run"):
+        raise RuntimeError("systemd-run is required to activate the Hub role")
+    status = tailscale_status()
+    tailscale_ips = (status.get("self") or {}).get("tailscale_ips") or []
+    tailscale_ip = next((str(item) for item in tailscale_ips if str(item).startswith("100.")), "")
+    if not tailscale_ip:
+        raise RuntimeError("a Tailscale IPv4 address is required before activating the Hub role")
+    unit = f"stream-control-hub-activate-{int(time.time())}"
+    root = shlex.quote(str(ROOT))
+    repo = shlex.quote(AGENT_SOURCE_REPO)
+    branch = shlex.quote(AGENT_SOURCE_BRANCH)
+    host = shlex.quote(tailscale_ip)
+    script = (
+        "set -eu; sleep 2; tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT; "
+        f"git clone --quiet --depth 1 --branch {branch} {repo} \"$tmp/repo\"; "
+        f"env INSTALL_DIR=/opt/stream-control-hub STREAM_HUB_HOST={host} "
+        "STREAM_HUB_TRUSTED_REMOTE_WRITES=1 STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 "
+        "CHOICE=1 sh \"$tmp/repo/scripts/install-hub.sh\""
+    )
+    result = subprocess.run(
+        ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "failed to schedule Hub activation").strip())
+    return {"unit": unit, "role": "hub", "url": f"http://{tailscale_ip}:8788"}
+
+
+def systemd_service_active(name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", name],
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
 APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = MAX_CHUNK_BYTES + 1024 * 1024
 
@@ -1895,6 +1938,32 @@ def api_upgrade():
         "ok": True,
         "accepted": True,
         "message": "Agent upgrade scheduled; it will restart automatically",
+        "result": result,
+    }), 202
+
+
+@APP.get("/api/role-status")
+def api_role_status():
+    version = agent_version_status()
+    return jsonify({
+        "ok": True,
+        "roles": {
+            "agent": {"enabled": True, "version": version["version"], "url": f"http://{request.host.split(':')[0]}:{PORT}"},
+            "hub": {"enabled": systemd_service_active("stream-control-hub.service"), "url": f"http://{request.host.split(':')[0]}:8788"},
+        },
+    })
+
+
+@APP.post("/api/roles/hub/activate")
+def api_activate_hub_role():
+    try:
+        result = schedule_hub_activation()
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 409
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "message": "Hub activation scheduled; the Agent role will remain active",
         "result": result,
     }), 202
 

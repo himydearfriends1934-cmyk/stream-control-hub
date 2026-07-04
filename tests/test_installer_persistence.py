@@ -27,6 +27,7 @@ class InstallerPersistenceTests(unittest.TestCase):
         )
         self.assertIn("existingHost", powershell)
         self.assertIn("existingPort", powershell)
+        self.assertIn("STREAM_HUB_SUPPRESS_TOKEN_OUTPUT", script)
 
     def test_agent_preserves_connection_settings_during_update(self):
         script = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")

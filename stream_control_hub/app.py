@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -73,6 +74,16 @@ APP = Flask(__name__)
 APP.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("STREAM_HUB_MAX_UPLOAD_BYTES", str(200 * 1024 ** 3)))
 
 
+def local_git_version() -> str:
+    result = run_command(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], timeout=5)
+    return str(result.get("stdout") or "unmanaged").strip() or "unmanaged"
+
+
+def service_active(name: str) -> bool:
+    result = run_command(["systemctl", "is-active", "--quiet", name], timeout=5)
+    return bool(result.get("ok"))
+
+
 HTML = r"""
 <!doctype html>
 <html lang="zh-CN">
@@ -116,7 +127,7 @@ HTML = r"""
     }
     h1 { margin: 0; font-size: 26px; letter-spacing: 0; }
     p { color: var(--muted); margin: 5px 0 0; line-height: 1.45; }
-    .grid { display: grid; grid-template-columns: minmax(560px, 1fr) minmax(430px, 520px); gap: 10px; margin-top: 10px; align-items: start; }
+    .grid { display: grid; grid-template-columns: minmax(520px, 0.9fr) minmax(620px, 1.1fr); gap: 12px; margin-top: 10px; align-items: start; }
     .side-stack { display: grid; gap: 10px; align-content: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 0.9fr 1.15fr 1.35fr; gap: 10px; }
     .card {
@@ -512,7 +523,7 @@ HTML = r"""
     .node-table-head,
     .node-row {
       display: grid;
-      grid-template-columns: 22px minmax(70px, 1fr) 48px 56px 190px;
+      grid-template-columns: 22px minmax(130px, 1fr) 62px 68px minmax(260px, 1.2fr);
       gap: 6px;
       align-items: center;
     }
@@ -548,6 +559,10 @@ HTML = r"""
     .dot.ok { background: var(--accent); box-shadow: 0 0 16px rgba(54, 211, 153, 0.45); }
     .dot.bad { background: var(--danger); box-shadow: 0 0 16px rgba(251, 113, 133, 0.4); }
     .row-actions { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 4px; }
+    .role-group + .role-group { margin-top: 12px; }
+    .role-group-title { display: flex; justify-content: space-between; align-items: center; margin: 0 0 6px; color: #d6fff0; }
+    .role-row.disabled-role { opacity: 0.58; border-style: dashed; }
+    .role-row.disabled-role:hover { opacity: 0.82; }
     .row-actions button.tiny { padding-left: 6px; padding-right: 6px; font-size: 11px; }
     .empty-state {
       min-height: 180px;
@@ -796,7 +811,14 @@ HTML = r"""
             </div>
             <span class="pill warn">protected</span>
           </div>
-          <div class="node-table" id="nodeList">加载中...</div>
+          <div class="role-group">
+            <h3 class="role-group-title"><span>Agent 组</span><small>推流 / 媒体 / Agent 更新</small></h3>
+            <div class="node-table" id="nodeList">加载中...</div>
+          </div>
+          <div class="role-group">
+            <h3 class="role-group-title"><span>Hub 组</span><small>控制台 / Hub 更新 / 切换</small></h3>
+            <div class="node-table" id="hubNodeList">加载中...</div>
+          </div>
         </div>
 
         <div class="card resource-card">
@@ -985,6 +1007,7 @@ HTML = r"""
     }
     const refs = {
       nodeList: document.getElementById("nodeList"),
+      hubNodeList: document.getElementById("hubNodeList"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
       mediaContextMenu: document.getElementById("mediaContextMenu"),
@@ -1473,7 +1496,7 @@ HTML = r"""
 
     function renderNodeRow(node, checkedIds) {
       const h = node.health || {};
-      const online = nodeOnline(node);
+      const online = Boolean(node.roles?.agent?.enabled ?? nodeOnline(node));
       const streaming = nodeStreaming(node);
       const selected = String(node.id) === String(selectedNodeId);
       const checked = checkedIds.has(String(node.id));
@@ -1489,8 +1512,28 @@ HTML = r"""
           <span class="row-actions">
             <button class="tiny" data-node-action="stop-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>停止推流</button>
             <button class="tiny" data-node-action="restart-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启推流</button>
-            <button class="tiny primary" data-node-action="upgrade-agent" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>升级 / 安装</button>
+            <button class="tiny primary" data-role-action="${online ? "upgrade-role" : "activate-role"}" data-role="agent" data-node-id="${escapeHtml(node.id)}">${online ? "升级 Agent" : "激活 Agent"}</button>
             <button class="tiny danger" data-node-action="reboot-vps" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启 VPS</button>
+          </span>
+        </div>
+      `;
+    }
+
+    function renderHubRow(node) {
+      const role = node.roles?.hub || {};
+      const enabled = Boolean(role.enabled);
+      const version = role.version || "未安装";
+      const action = enabled ? "upgrade-role" : "activate-role";
+      const label = enabled ? "升级 Hub" : "激活 Hub";
+      return `
+        <div class="node-row role-row ${enabled ? "" : "disabled-role"}" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
+          <span>${stateDot(enabled, false)}</span>
+          <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>Hub 版本 ${escapeHtml(version)}</small></span>
+          <span class="node-state">${enabled ? "已启用" : "未启用"}</span>
+          <span class="node-state">8788</span>
+          <span class="row-actions">
+            <button class="tiny primary" data-role-action="${action}" data-role="hub" data-node-id="${escapeHtml(node.id)}">${label}</button>
+            <button class="tiny" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}" ${enabled ? "" : "disabled"}>切换 Hub</button>
           </span>
         </div>
       `;
@@ -1501,6 +1544,7 @@ HTML = r"""
       if (!nodes.length) {
         refs.nodeMonitor.innerHTML = renderMonitor(null);
         refs.nodeList.innerHTML = `<div class="empty-state">还没有配置节点。</div>`;
+        refs.hubNodeList.innerHTML = `<div class="empty-state">还没有配置节点。</div>`;
         return;
       }
       if (!nodes.some((node) => String(node.id) === String(selectedNodeId))) {
@@ -1516,6 +1560,10 @@ HTML = r"""
           <span>操作</span>
         </div>
         ${nodes.map((node) => renderNodeRow(node, checkedIds)).join("")}
+      `;
+      refs.hubNodeList.innerHTML = `
+        <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
+        ${nodes.map((node) => renderHubRow(node)).join("")}
       `;
     }
 
@@ -2590,24 +2638,43 @@ HTML = r"""
         await refreshAll();
         return;
       }
-      if (action === "upgrade-agent") {
-        if (!confirm(`确认更新 ${nodeName}？\n\n该 Agent 会从 GitHub main 拉取最新版并自动重启。`)) return;
-        const button = refs.nodeList.querySelector(`[data-node-action="upgrade-agent"][data-node-id="${CSS.escape(String(nodeId))}"]`);
-        if (button) button.disabled = true;
-        log(`开始更新 Agent：${nodeName}`);
-        const data = await postNodeAction("/api/nodes/upgrade", { node_id: nodeId });
-        refs.updateBox.textContent = JSON.stringify(data, null, 2);
-        log(data.ok ? `更新任务已提交：${nodeName}` : `更新提交失败：${data.message || nodeName}`);
-        if (data.ok) {
-          await new Promise((resolve) => setTimeout(resolve, 8000));
-          await refreshAll();
-        } else if (button) {
-          button.disabled = false;
-        }
+    }
+
+    async function handleRoleAction(action, role, nodeId, sourceButton) {
+      const node = nodes.find((item) => String(item.id) === String(nodeId));
+      const nodeName = node?.name || nodeId;
+      const roleLabel = role === "hub" ? "Hub" : "Agent";
+      if (action === "switch-hub") {
+        const url = node?.roles?.hub?.url;
+        if (url) window.location.href = url;
+        return;
+      }
+      const activating = action === "activate-role";
+      const warning = activating
+        ? `确认在 ${nodeName} 激活 ${roleLabel} 功能？\n\n安全提示：将新增并启用独立 systemd 服务，开放 Tailscale ${role === "hub" ? "8788" : "8787"} 端口。现有 ${role === "hub" ? "Agent" : "Hub"} 会继续运行，配置与视频不会删除。`
+        : `确认升级 ${nodeName} 的 ${roleLabel}？\n\n系统会从 GitHub main 拉取最新版，只重启该角色，不停止另一个角色。`;
+      if (!confirm(warning)) return;
+      if (sourceButton) sourceButton.disabled = true;
+      const path = activating ? `/api/nodes/roles/${role}/activate` : `/api/nodes/roles/${role}/upgrade`;
+      const data = await postNodeAction(path, { node_id: nodeId });
+      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      log(data.ok ? `${roleLabel} 任务已提交：${nodeName}` : `${roleLabel} 操作失败：${data.message || nodeName}`);
+      if (data.ok) {
+        await new Promise((resolve) => setTimeout(resolve, 8000));
+        await refreshAll();
+      } else if (sourceButton) {
+        sourceButton.disabled = false;
       }
     }
 
     refs.nodeList.addEventListener("click", (event) => {
+      const roleButton = event.target.closest("[data-role-action]");
+      if (roleButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        handleRoleAction(roleButton.dataset.roleAction, roleButton.dataset.role, roleButton.dataset.nodeId, roleButton);
+        return;
+      }
       const actionButton = event.target.closest("[data-node-action]");
       if (actionButton) {
         event.preventDefault();
@@ -2624,6 +2691,19 @@ HTML = r"""
       renderNodes();
       renderMedia();
       renderStreamControls();
+    });
+    refs.hubNodeList.addEventListener("click", (event) => {
+      const roleButton = event.target.closest("[data-role-action]");
+      if (roleButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        handleRoleAction(roleButton.dataset.roleAction, roleButton.dataset.role || "hub", roleButton.dataset.nodeId, roleButton);
+        return;
+      }
+      const row = event.target.closest("[data-hub-row]");
+      if (!row) return;
+      const node = nodes.find((item) => String(item.id) === String(row.dataset.nodeId));
+      if (node?.roles?.hub?.enabled && node.roles.hub.url) window.location.href = node.roles.hub.url;
     });
     refs.mediaList.addEventListener("click", (event) => {
       hideMediaMenu();
@@ -2989,6 +3069,72 @@ def node_base_url(node: dict[str, Any]) -> str:
     return str(node.get("base_url") or "").rstrip("/")
 
 
+def node_role_urls(node: dict[str, Any]) -> dict[str, str]:
+    base_url = node_base_url(node)
+    parsed = urlparse(base_url)
+    host = parsed.hostname or ""
+    if not host:
+        return {"agent": base_url, "hub": ""}
+    host_label = f"[{host}]" if ":" in host else host
+    return {
+        "agent": base_url or f"http://{host_label}:8787",
+        "hub": str(node.get("hub_url") or f"http://{host_label}:8788").rstrip("/"),
+    }
+
+
+def request_hub_role_status(node: dict[str, Any]) -> dict[str, Any]:
+    hub_url = node_role_urls(node)["hub"]
+    if not hub_url:
+        return {"ok": False, "enabled": False, "message": "missing Hub URL"}
+    try:
+        response = requests.get(f"{hub_url}/api/role-status", timeout=3)
+        data = response.json()
+        hub = (data.get("roles") or {}).get("hub") or {}
+        return {"ok": response.ok, "enabled": response.ok and bool(hub.get("enabled", True)), "url": hub_url, **hub}
+    except Exception as exc:
+        return {"ok": False, "enabled": False, "url": hub_url, "message": str(exc)}
+
+
+def schedule_agent_role_activation(control_hub_url: str) -> dict[str, Any]:
+    if not shutil.which("systemd-run"):
+        raise RuntimeError("systemd-run is required to activate the Agent role")
+    unit = f"stream-control-agent-activate-{int(time.time())}"
+    root = shlex.quote(str(ROOT))
+    control_hub = shlex.quote(control_hub_url)
+    script = f"set -eu; sleep 2; env STREAM_AGENT_CONTROL_HUB={control_hub} CHOICE=1 sh {root}/scripts/install-agent.sh"
+    result = subprocess.run(
+        ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "failed to schedule Agent activation").strip())
+    return {"unit": unit, "role": "agent", "control_hub": control_hub_url}
+
+
+def schedule_hub_upgrade() -> dict[str, Any]:
+    if not shutil.which("systemd-run") or not (ROOT / ".git").exists():
+        raise RuntimeError("Hub must be a Git-managed systemd installation")
+    unit = f"stream-control-hub-upgrade-{int(time.time())}"
+    root = shlex.quote(str(ROOT))
+    script = (
+        "set -eu; sleep 2; "
+        f"git -C {root} fetch origin main; git -C {root} checkout main; "
+        f"git -C {root} pull --ff-only origin main; env BRANCH=main CHOICE=1 "
+        f"STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 sh {root}/scripts/install-hub.sh"
+    )
+    result = subprocess.run(
+        ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "failed to schedule Hub upgrade").strip())
+    return {"unit": unit, "role": "hub", "from_version": local_git_version(), "target_branch": "main"}
+
+
 def node_upload_base_urls(node: dict[str, Any]) -> list[str]:
     values: list[str] = []
     for key in ("upload_base_url", "public_base_url"):
@@ -3055,6 +3201,20 @@ def post_node_json(node: dict[str, Any], path: str, payload: dict[str, Any], *, 
             data = {"message": resp.text[:500]}
         data["ok"] = resp.ok and bool(data.get("ok", False))
         data.setdefault("status_code", resp.status_code)
+        return data
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+def post_url_json(url: str, payload: dict[str, Any], *, timeout: int = 30) -> dict[str, Any]:
+    try:
+        response = requests.post(url, json=payload, timeout=timeout)
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"message": response.text[:500]}
+        data["ok"] = response.ok and bool(data.get("ok", False))
+        data.setdefault("status_code", response.status_code)
         return data
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
@@ -3747,8 +3907,54 @@ def api_nodes():
         node_view.pop("token", None)
         node_view.pop("control_token", None)
         node_view["health"] = request_node_json(node, "/api/status") if node.get("enabled", True) else {"ok": False}
+        urls = node_role_urls(node)
+        agent_health = node_view["health"]
+        agent_info = agent_health.get("agent") or {}
+        node_view["roles"] = {
+            "agent": {
+                "enabled": bool(agent_health.get("ok")),
+                "version": str(agent_info.get("version") or "unrecognized"),
+                "url": urls["agent"],
+            },
+            "hub": request_hub_role_status(node),
+        }
         result.append(node_view)
     return jsonify(result)
+
+
+@APP.get("/api/role-status")
+def api_hub_role_status():
+    host = (request.host.split(":", 1)[0] or "127.0.0.1").strip("[]")
+    return jsonify({
+        "ok": True,
+        "roles": {
+            "hub": {"enabled": True, "version": local_git_version(), "url": f"http://{host}:{PORT}"},
+            "agent": {"enabled": service_active("stream-control-headless-agent.service"), "url": f"http://{host}:8787"},
+        },
+    })
+
+
+@APP.post("/api/roles/agent/activate")
+def api_activate_agent_role():
+    payload = request.get_json(silent=True) or {}
+    control_hub_url = str(payload.get("control_hub_url") or request.host_url.rstrip("/")).strip().rstrip("/")
+    parsed = urlparse(control_hub_url)
+    if not parsed.hostname or not is_private_or_loopback_host(parsed.hostname):
+        return jsonify({"ok": False, "message": "control_hub_url must use a private or Tailscale address"}), 400
+    try:
+        result = schedule_agent_role_activation(control_hub_url)
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 409
+    return jsonify({"ok": True, "accepted": True, "message": "Agent activation scheduled; Hub remains active", "result": result}), 202
+
+
+@APP.post("/api/upgrade")
+def api_upgrade_hub():
+    try:
+        result = schedule_hub_upgrade()
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 409
+    return jsonify({"ok": True, "accepted": True, "message": "Hub upgrade scheduled; Agent remains active", "result": result}), 202
 
 
 @APP.get("/api/media")
@@ -4512,6 +4718,48 @@ def api_nodes_upgrade():
     result = post_node_json(node, upgrade_api, {}, timeout=30)
     status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
     return jsonify({"node_id": node_id, **result}), status_code
+
+
+@APP.post("/api/nodes/roles/<role>/activate")
+def api_activate_node_role(role: str):
+    if role not in {"agent", "hub"}:
+        return jsonify({"ok": False, "message": "unsupported role"}), 404
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
+    if role == "hub":
+        result = post_node_json(node, "/api/roles/hub/activate", {}, timeout=30)
+    else:
+        hub_url = node_role_urls(node)["hub"]
+        if not hub_url:
+            return jsonify({"ok": False, "node_id": node_id, "message": "Hub role is unavailable; SSH bootstrap is required"}), 409
+        result = post_url_json(
+            f"{hub_url}/api/roles/agent/activate",
+            {"control_hub_url": request.host_url.rstrip("/")},
+            timeout=30,
+        )
+    status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
+    return jsonify({"node_id": node_id, "role": role, **result}), status_code
+
+
+@APP.post("/api/nodes/roles/<role>/upgrade")
+def api_upgrade_node_role(role: str):
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
+    if role == "agent":
+        result = post_node_json(node, "/api/upgrade", {}, timeout=30)
+    elif role == "hub":
+        hub_url = node_role_urls(node)["hub"]
+        result = post_url_json(f"{hub_url}/api/upgrade", {}, timeout=30)
+    else:
+        return jsonify({"ok": False, "message": "unsupported role"}), 404
+    status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
+    return jsonify({"node_id": node_id, "role": role, **result}), status_code
 
 
 def main() -> None:

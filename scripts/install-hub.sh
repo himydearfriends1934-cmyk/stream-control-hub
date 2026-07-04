@@ -25,6 +25,7 @@ ACTION="${ACTION:-${STREAM_HUB_ACTION:-install}}"
 UNINSTALL="${UNINSTALL:-0}"
 REMOVE_DATA="${REMOVE_DATA:-${STREAM_HUB_REMOVE_DATA:-0}}"
 CHOICE="${CHOICE:-${STREAM_HUB_CHOICE:-}}"
+SUPPRESS_TOKEN_OUTPUT="${STREAM_HUB_SUPPRESS_TOKEN_OUTPUT:-0}"
 
 resolve_service_mode() {
   if [ -n "$STREAM_HUB_SERVICE_MODE" ]; then
@@ -274,7 +275,11 @@ if [ "$HEALTHY" != "1" ]; then
 fi
 
 echo "Stream Control Hub installed."
-echo "Open: http://127.0.0.1:$STREAM_HUB_PORT/?token=$TOKEN"
+if [ "$SUPPRESS_TOKEN_OUTPUT" = "1" ]; then
+  echo "Open the Hub at the configured host and port. Control token output suppressed for background installation."
+else
+  echo "Open: http://127.0.0.1:$STREAM_HUB_PORT/?token=$TOKEN"
+fi
 echo "Nodes file: $NODES_FILE"
 echo "Install path: $INSTALL_DIR ($STREAM_HUB_SERVICE_MODE service)"
 echo "Trusted remote writes: $STREAM_HUB_TRUSTED_REMOTE_WRITES"
