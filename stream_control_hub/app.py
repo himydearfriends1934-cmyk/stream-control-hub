@@ -144,7 +144,6 @@ HTML = r"""
     .appearance-controls { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
     .appearance-controls label { color: var(--muted); font-size: 12px; font-weight: 800; }
     .appearance-controls select { padding: 7px 9px; min-width: 110px; }
-    .appearance-controls input { width: 170px; padding: 7px 9px; }
     .editable-title { display: inline-block; min-width: 220px; padding: 2px 5px; border: 1px dashed transparent; border-radius: 7px; outline: none; }
     .editable-title:hover { border-color: var(--line); }
     .editable-title:focus { border-color: var(--accent); background: rgba(54,211,153,.08); }
@@ -727,8 +726,6 @@ HTML = r"""
             <option value="violet">霓虹紫</option>
             <option value="light">清爽亮色</option>
           </select>
-          <label for="pageTitleInput">网页 Title</label>
-          <input id="pageTitleInput" type="text" maxlength="80" placeholder="浏览器标签标题">
         </div>
         <div class="actions" style="margin-top:8px">
           <button class="primary" id="refreshBtn">刷新状态</button>
@@ -1066,7 +1063,6 @@ HTML = r"""
       roleSettingsClose: document.getElementById("roleSettingsClose"),
       editableHubTitle: document.getElementById("editableHubTitle"),
       themeSelect: document.getElementById("themeSelect"),
-      pageTitleInput: document.getElementById("pageTitleInput"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
       mediaContextMenu: document.getElementById("mediaContextMenu"),
@@ -2920,7 +2916,6 @@ HTML = r"""
     });
     const THEME_STORAGE_KEY = "streamHubTheme";
     const TITLE_STORAGE_KEY = "streamHubCustomTitle";
-    const PAGE_TITLE_STORAGE_KEY = "streamHubPageTitle";
 
     function applyTheme(theme) {
       const allowed = new Set(["forest", "midnight", "violet", "light"]);
@@ -2933,26 +2928,14 @@ HTML = r"""
     function saveCustomTitle() {
       const title = refs.editableHubTitle.textContent.replace(/\s+/g, " ").trim().slice(0, 80) || "Stream Control Hub";
       refs.editableHubTitle.textContent = title;
-      localStorage.setItem(TITLE_STORAGE_KEY, title);
-    }
-
-    function savePageTitle() {
-      const title = refs.pageTitleInput.value.replace(/\s+/g, " ").trim().slice(0, 80) || "Stream Control Hub";
-      refs.pageTitleInput.value = title;
       document.title = title;
-      localStorage.setItem(PAGE_TITLE_STORAGE_KEY, title);
+      localStorage.setItem(TITLE_STORAGE_KEY, title);
     }
 
     applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || "forest");
     refs.editableHubTitle.textContent = localStorage.getItem(TITLE_STORAGE_KEY) || "Stream Control Hub";
-    refs.pageTitleInput.value = localStorage.getItem(PAGE_TITLE_STORAGE_KEY) || "Stream Control Hub";
-    document.title = refs.pageTitleInput.value;
+    document.title = refs.editableHubTitle.textContent;
     refs.themeSelect.addEventListener("change", () => applyTheme(refs.themeSelect.value));
-    refs.pageTitleInput.addEventListener("change", savePageTitle);
-    refs.pageTitleInput.addEventListener("blur", savePageTitle);
-    refs.pageTitleInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") refs.pageTitleInput.blur();
-    });
     refs.editableHubTitle.addEventListener("blur", saveCustomTitle);
     refs.editableHubTitle.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
