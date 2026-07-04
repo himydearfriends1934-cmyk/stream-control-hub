@@ -89,8 +89,48 @@ class AgentUpgradeTests(unittest.TestCase):
         from stream_control_hub import app
 
         self.assertIn("streamHubLastSelectedNodeId", app.HTML)
-        self.assertIn('data-node-action="upgrade-agent"', app.HTML)
+        self.assertIn('data-role-action="${online ? "upgrade-role" : "activate-role"}"', app.HTML)
+        self.assertIn('id="hubNodeList"', app.HTML)
+        self.assertIn("Agent 组", app.HTML)
+        self.assertIn("Hub 组", app.HTML)
         self.assertNotIn("upgradeSelectedNodes", app.HTML)
+
+    def test_agent_can_schedule_hub_activation(self):
+        from stream_control_hub import headless_agent
+
+        scheduled = {"unit": "hub-activate-1", "role": "hub", "url": "http://100.64.0.10:8788"}
+        with patch.object(headless_agent, "CONTROL_TOKEN", ""), patch.object(
+            headless_agent, "schedule_hub_activation", return_value=scheduled
+        ) as schedule:
+            response = headless_agent.APP.test_client().post(
+                "/api/roles/hub/activate", environ_base={"REMOTE_ADDR": "127.0.0.1"}
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.get_json()["accepted"])
+        schedule.assert_called_once_with()
+
+    def test_hub_reports_agent_and_hub_roles_per_node(self):
+        from stream_control_hub import app
+
+        node = {"id": "node-a", "base_url": "http://100.64.0.10:8787", "enabled": True}
+        health = {"ok": True, "agent": {"version": "abc1234"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "request_node_json", return_value=health
+            ), patch.object(
+                app,
+                "request_hub_role_status",
+                return_value={"ok": True, "enabled": True, "version": "def5678", "url": "http://100.64.0.10:8788"},
+            ):
+                response = app.APP.test_client().get("/api/nodes")
+
+        roles = response.get_json()[0]["roles"]
+        self.assertEqual(roles["agent"]["version"], "abc1234")
+        self.assertEqual(roles["hub"]["version"], "def5678")
+        self.assertTrue(roles["hub"]["enabled"])
 
 
 if __name__ == "__main__":

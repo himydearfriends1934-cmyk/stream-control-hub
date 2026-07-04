@@ -65,6 +65,8 @@ Agent updates preserve the existing bind host, port, Agent name, Hub pairing URL
 
 Each Agent row in the Hub shows its current Git revision and has its own `升级 / 安装` action. The action schedules an independent systemd upgrade job on that Agent, pulls GitHub `main`, runs the standard installer, and restarts only that Agent. Older copied deployments without Git metadata are bootstrapped in place while preserving `.agent.env` and `agent_data`. The Hub also remembers the last viewed Agent in browser-local storage and restores it on the next visit.
 
+The enlarged node-management area separates `Agent 组` and `Hub 组`. Each VPS can run both roles independently: Agent uses port `8787`, Hub uses `8788`. Enabled roles show their Git version and can be upgraded individually; disabled roles are shown in gray and require an explicit security confirmation before activation. Clicking an enabled Hub switches the browser to that Hub. Background Hub installation suppresses control-token output from systemd logs.
+
 When `STREAM_AGENT_CONTROL_HUB` points to the Hub's Tailscale URL, the Agent trusts API traffic only from that exact Tailscale source IP. In the Hub Tailscale wizard, choose `新增 Agent（仅输入 IP）`, enter the Agent's `100.x` address, and connect. Other tailnet peers still need the per-Agent control token.
 
 The installers generate a local control token and keep node secrets outside git. The Hub prints a URL like `http://127.0.0.1:8788/?token=...`; use that URL for remote write actions when `STREAM_HUB_CONTROL_TOKEN` is enabled.
