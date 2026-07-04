@@ -523,7 +523,7 @@ HTML = r"""
     .node-table-head,
     .node-row {
       display: grid;
-      grid-template-columns: 22px minmax(130px, 1fr) 62px 68px minmax(260px, 1.2fr);
+      grid-template-columns: 22px minmax(130px, 1fr) 70px 76px minmax(250px, 1.15fr);
       gap: 6px;
       align-items: center;
     }
@@ -555,16 +555,19 @@ HTML = r"""
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-name small { color: var(--muted); display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 800; }
-    .dot { width: 9px; height: 9px; border-radius: 999px; background: #fbbf24; box-shadow: 0 0 16px rgba(251, 191, 36, 0.35); }
-    .dot.ok { background: var(--accent); box-shadow: 0 0 16px rgba(54, 211, 153, 0.45); }
-    .dot.bad { background: var(--danger); box-shadow: 0 0 16px rgba(251, 113, 133, 0.4); }
-    .row-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+    .dot { width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid rgba(255,255,255,0.2); border-radius: 999px; background: #fbbf24; box-shadow: inset 0 0 3px rgba(255,255,255,0.5), 0 0 10px rgba(251, 191, 36, 0.65); }
+    .dot.ok { background: #28e39f; box-shadow: inset 0 0 3px rgba(255,255,255,0.65), 0 0 12px rgba(40, 227, 159, 0.85); }
+    .dot.off { background: #52615c; border-color: rgba(255,255,255,0.1); box-shadow: inset 0 0 3px rgba(0,0,0,0.55); }
+    .dot.stream-live { background: #ff334f; box-shadow: inset 0 0 3px rgba(255,255,255,0.7), 0 0 13px rgba(255, 51, 79, 0.95); }
+    .dot.stream-idle { background: #4a5551; border-color: rgba(255,255,255,0.08); box-shadow: inset 0 0 3px rgba(0,0,0,0.6); }
+    .row-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; align-items: center; }
+    .role-row .row-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .role-group + .role-group { margin-top: 12px; }
     .role-group-title { display: flex; justify-content: space-between; align-items: center; margin: 0 0 6px; color: #d6fff0; }
     .role-row.disabled-role { opacity: 0.58; border-style: dashed; }
     .role-row.disabled-role:hover { opacity: 0.82; }
-    .row-actions button.tiny { padding-left: 6px; padding-right: 6px; font-size: 11px; }
-    .settings-button { min-width: 36px; font-size: 16px !important; line-height: 1; }
+    .row-actions button.tiny { min-width: 0; padding: 6px 4px; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
+    .settings-button { min-width: 28px !important; font-size: 14px !important; line-height: 1; }
     .role-settings-modal { width: min(520px, 100%); }
     .role-settings-status { display: grid; gap: 8px; }
     .role-settings-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.58); }
@@ -1155,7 +1158,11 @@ HTML = r"""
     }
 
     function stateDot(ok, warn = false) {
-      return `<span class="dot ${ok ? "ok" : warn ? "" : "bad"}"></span>`;
+      return `<span class="dot ${ok ? "ok" : warn ? "" : "off"}"></span>`;
+    }
+
+    function streamDot(streaming) {
+      return `<span class="dot ${streaming ? "stream-live" : "stream-idle"}"></span>`;
     }
 
     function fmtBytes(bytes) {
@@ -1532,7 +1539,7 @@ HTML = r"""
             <small>${escapeHtml(h.hostname || node.id)} · 版本 ${escapeHtml(h.agent?.version || "未识别")}</small>
           </span>
           <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
-          <span class="node-state">${stateDot(streaming, online)}${streaming ? "推流中" : "未推流"}</span>
+          <span class="node-state">${streamDot(streaming)}${streaming ? "推流中" : "未推流"}</span>
           <span class="row-actions">
             <button class="tiny" data-node-action="stop-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>停止推流</button>
             <button class="tiny" data-node-action="restart-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启推流</button>
