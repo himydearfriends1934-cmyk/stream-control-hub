@@ -259,6 +259,8 @@ HTML = r"""
     }
     .media-context-menu button:hover { background: rgba(54, 211, 153, 0.12); }
     .media-context-menu button.danger:hover { background: rgba(251, 113, 133, 0.16); }
+    .media-context-label { padding: 7px 9px 3px; color: var(--muted); font-size: 11px; font-weight: 900; border-top: 1px solid var(--line); }
+    .media-context-targets { display: grid; gap: 3px; max-height: 190px; overflow: auto; }
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -852,7 +854,7 @@ HTML = r"""
         </div>
 
         <div class="card resource-card">
-          <h2>节点资源共享</h2>
+          <h2>资源管理</h2>
           <div class="split">
             <div>
               <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
@@ -867,9 +869,12 @@ HTML = r"""
           <div class="media-context-menu" id="mediaContextMenu">
             <button data-media-menu-action="inspect">查看详情</button>
             <button data-media-menu-action="use">选用开播</button>
-            <button data-media-menu-action="share">共享到勾选 Agent</button>
-            <button data-media-menu-action="rename">编辑名称</button>
+            <button data-media-menu-action="rename">重命名 / 移动</button>
             <button class="danger" data-media-menu-action="delete">删除文件</button>
+            <div class="media-context-label">发送到节点</div>
+            <div class="media-context-targets" id="mediaSendTargets"></div>
+            <div class="media-context-label">移动到节点（成功后删除源文件）</div>
+            <div class="media-context-targets" id="mediaMoveTargets"></div>
           </div>
         </div>
       </div>
@@ -1063,6 +1068,8 @@ HTML = r"""
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
       mediaContextMenu: document.getElementById("mediaContextMenu"),
+      mediaSendTargets: document.getElementById("mediaSendTargets"),
+      mediaMoveTargets: document.getElementById("mediaMoveTargets"),
       refreshBtn: document.getElementById("refreshBtn"),
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
       policyBtn: document.getElementById("policyBtn"),
@@ -1626,17 +1633,19 @@ HTML = r"""
     function renderMedia() {
       const checkedPath = selectedMediaPath();
       const checkedNodeId = selectedMediaNodeId();
-      const entries = nodes
-        .flatMap((mediaNode) => [...(mediaNode.health?.videos || [])].map((item) => ({ node: mediaNode, item })))
-        .sort((a, b) => Number(b.item.modified || 0) - Number(a.item.modified || 0));
+      const resourceNode = selectedNode();
+      const entries = resourceNode
+        ? [...(resourceNode.health?.videos || [])].map((item) => ({ node: resourceNode, item }))
+          .sort((a, b) => Number(b.item.modified || 0) - Number(a.item.modified || 0))
+        : [];
       if (!entries.length) {
-        refs.mediaList.innerHTML = `<div class="empty-state">还没有任何 Agent 视频。先上传到当前 Agent，或从其他 Agent 共享过来。</div>`;
+        refs.mediaList.innerHTML = `<div class="empty-state">${resourceNode ? `${escapeHtml(resourceNode.name || resourceNode.id)} 还没有视频资源。` : "请先选择一个节点。"}</div>`;
         return;
       }
       refs.mediaList.innerHTML = `
         <div class="media-toolbar">
-          <strong>全部 Agent 文件</strong>
-          <small>按上传时间倒序，共 ${entries.length} 个。右键文件操作。</small>
+          <strong>${escapeHtml(resourceNode.name || resourceNode.id)} · 视频资源</strong>
+          <small>共 ${entries.length} 个。右键可发送、移动、重命名或删除。</small>
         </div>
         <div class="media-window">
           <div class="media-window-head">
@@ -2370,9 +2379,10 @@ HTML = r"""
       }
     }
 
-    async function pushSelectedMedia() {
+    async function pushSelectedMedia(explicitTargetNodeIds = null) {
       const sourceNode = nodes.find((item) => String(item.id) === String(selectedMediaNodeId())) || selectedNode();
-      const target_node_ids = selectedNodeIds().filter((id) => String(id) !== String(sourceNode?.id || ""));
+      const requestedTargets = Array.isArray(explicitTargetNodeIds) ? explicitTargetNodeIds : selectedNodeIds();
+      const target_node_ids = requestedTargets.filter((id) => String(id) !== String(sourceNode?.id || ""));
       const media = selectedMediaPath() || selectedMediaName();
       const targetLabel = target_node_ids
         .map((id) => nodes.find((item) => String(item.id) === String(id))?.name || id)
@@ -2409,9 +2419,10 @@ HTML = r"""
             target: targetLabel,
             message: friendlyError(first.message || first.error || "Hub 未能创建共享任务"),
           });
-          return;
+          return false;
         }
         let last = first;
+        let completed = false;
         while (true) {
           renderTransfer({
             status: last.status === "done" ? "done" : last.status === "failed" ? "failed" : "running",
@@ -2431,6 +2442,7 @@ HTML = r"""
                 : (last.message || "正在共享，请稍候。"),
           });
           if (last.status === "done") {
+            completed = true;
             await refreshAll();
             break;
           }
@@ -2444,6 +2456,7 @@ HTML = r"""
             last = { ...last, status: "failed", message: last.message || "无法读取共享进度" };
           }
         }
+        return completed;
       } catch (error) {
         renderTransfer({
           status: "failed",
@@ -2452,6 +2465,7 @@ HTML = r"""
           target: targetLabel,
           message: friendlyError(error, "共享失败"),
         });
+        return false;
       } finally {
         if (refs.pushSelectedBtn) refs.pushSelectedBtn.disabled = false;
       }
@@ -2649,6 +2663,13 @@ HTML = r"""
       event.preventDefault();
       selectMediaRow(row);
       contextMediaRow = row;
+      const sourceNodeId = String(row.dataset.nodeId || "");
+      const targets = nodes.filter((node) => node.roles?.agent?.enabled && String(node.id) !== sourceNodeId);
+      const targetButtons = (action) => targets.length
+        ? targets.map((node) => `<button data-media-menu-action="${action}" data-target-node-id="${escapeHtml(node.id)}">${escapeHtml(node.name || node.id)}</button>`).join("")
+        : `<button disabled>没有其他在线节点</button>`;
+      refs.mediaSendTargets.innerHTML = targetButtons("send-node");
+      refs.mediaMoveTargets.innerHTML = targetButtons("move-node");
       refs.mediaContextMenu.classList.add("open");
       const menuWidth = refs.mediaContextMenu.offsetWidth || 160;
       const menuHeight = refs.mediaContextMenu.offsetHeight || 170;
@@ -2754,7 +2775,7 @@ HTML = r"""
         event.preventDefault();
         event.stopPropagation();
         setRoleSettingsOpen(true, settingsButton.dataset.nodeId);
-        return;
+        return false;
       }
       const roleButton = event.target.closest("[data-role-action]");
       if (roleButton) {
@@ -2838,10 +2859,32 @@ HTML = r"""
       if (!button || !contextMediaRow) return;
       const row = contextMediaRow;
       const action = button.dataset.mediaMenuAction;
+      const targetNodeId = button.dataset.targetNodeId || "";
       hideMediaMenu();
-      if (action === "share") {
+      if (action === "send-node") {
         selectMediaRow(row);
-        pushSelectedMedia();
+        pushSelectedMedia([targetNodeId]);
+      } else if (action === "move-node") {
+        const sourceLabel = nodes.find((node) => String(node.id) === String(row.dataset.nodeId))?.name || row.dataset.nodeId;
+        const targetLabel = nodes.find((node) => String(node.id) === String(targetNodeId))?.name || targetNodeId;
+        if (!confirm(`确认把 ${row.dataset.mediaName} 从 ${sourceLabel} 移动到 ${targetLabel}？\n\n系统会先完整传输并确认成功，然后才删除源文件。`)) return;
+        selectMediaRow(row);
+        pushSelectedMedia([targetNodeId]).then(async (completed) => {
+          if (!completed) return;
+          const data = await postJson("/api/nodes/media/delete", {
+            node_id: row.dataset.nodeId,
+            media: row.dataset.videoPath || row.dataset.mediaName,
+          });
+          renderTransfer({
+            status: data.ok ? "done" : "failed",
+            badge: data.ok ? "移动完成" : "源文件保留",
+            title: data.ok ? "资源移动完成" : "传输成功，但删除源文件失败",
+            target: targetLabel,
+            percent: 100,
+            message: data.ok ? `${row.dataset.mediaName} 已移动到 ${targetLabel}。` : friendlyError(data.message || "源文件删除失败"),
+          });
+          await refreshAll();
+        });
       } else {
         handleMediaAction(action, row);
       }
