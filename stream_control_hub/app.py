@@ -103,15 +103,17 @@ HTML = r"""
       --accent-2: #54c6eb;
       --bad: #fb7185;
       --warn: #fbbf24;
+      --body-bg: radial-gradient(circle at 12% 10%, rgba(54, 211, 153, 0.16), transparent 28%), radial-gradient(circle at 88% 0%, rgba(84, 198, 235, 0.14), transparent 24%), linear-gradient(135deg, #08100d, #111917 45%, #090d0c);
+      --panel-bg: rgba(19, 32, 28, 0.9);
     }
+    :root[data-theme="midnight"] { --bg:#080d18; --panel:#101a2d; --panel-2:#17243b; --line:#304d78; --text:#eef5ff; --muted:#9fb4d2; --accent:#55a7ff; --accent-2:#7ee7ff; --body-bg:radial-gradient(circle at 85% 5%,rgba(85,167,255,.2),transparent 28%),linear-gradient(135deg,#050914,#0d1728 55%,#060b14); --panel-bg:rgba(16,26,45,.92); }
+    :root[data-theme="violet"] { --bg:#130b1c; --panel:#25142f; --panel-2:#34203f; --line:#68437a; --text:#fff4ff; --muted:#d1acd9; --accent:#d97cff; --accent-2:#ff9fcf; --body-bg:radial-gradient(circle at 15% 5%,rgba(217,124,255,.2),transparent 30%),linear-gradient(135deg,#100718,#25102c 52%,#0d0713); --panel-bg:rgba(37,20,47,.92); }
+    :root[data-theme="light"] { --bg:#edf4f1; --panel:#ffffff; --panel-2:#edf5f2; --line:#9ab8ad; --text:#15251f; --muted:#577268; --accent:#18a873; --accent-2:#2b93bc; --body-bg:linear-gradient(135deg,#e7f2ed,#f8fbfa 48%,#e8f1f6); --panel-bg:rgba(255,255,255,.94); }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       color: var(--text);
-      background:
-        radial-gradient(circle at 12% 10%, rgba(54, 211, 153, 0.16), transparent 28%),
-        radial-gradient(circle at 88% 0%, rgba(84, 198, 235, 0.14), transparent 24%),
-        linear-gradient(135deg, #08100d, #111917 45%, #090d0c);
+      background: var(--body-bg);
       font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
     }
     .wrap { max-width: 1680px; margin: 0 auto; padding: 12px; }
@@ -119,7 +121,7 @@ HTML = r"""
       border: 1px solid var(--line);
       border-radius: 14px;
       padding: 12px 14px;
-      background: rgba(19, 32, 28, 0.88);
+      background: var(--panel-bg);
       display: grid;
       grid-template-columns: 1fr auto;
       gap: 12px;
@@ -134,11 +136,17 @@ HTML = r"""
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 10px;
-      background: rgba(19, 32, 28, 0.9);
+      background: var(--panel-bg);
       box-shadow: 0 18px 60px rgba(0,0,0,0.18);
     }
     .card h2 { margin: 0 0 8px; font-size: 16px; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .appearance-controls { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+    .appearance-controls label { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .appearance-controls select { padding: 7px 9px; min-width: 110px; }
+    .editable-title { display: inline-block; min-width: 220px; padding: 2px 5px; border: 1px dashed transparent; border-radius: 7px; outline: none; }
+    .editable-title:hover { border-color: var(--line); }
+    .editable-title:focus { border-color: var(--accent); background: rgba(54,211,153,.08); }
     button, input, select {
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -702,13 +710,24 @@ HTML = r"""
   <div class="wrap">
     <section class="hero">
       <div>
-        <h1>Stream Control Hub</h1>
+        <h1 class="editable-title" id="editableHubTitle" contenteditable="true" spellcheck="false" title="点击编辑标题">Stream Control Hub</h1>
         <p>本地总控台：集中监控 VPS 推流节点，视频从浏览器直传 Agent，也可以在 Agent 之间共享。升级面板时不触碰正在运行的 FFmpeg 推流。</p>
       </div>
-      <div class="actions">
-        <button class="primary" id="refreshBtn">刷新状态</button>
-        <button id="policyBtn">Upload Policy</button>
-        <button id="auditBtn">Push Audit</button>
+      <div>
+        <div class="appearance-controls">
+          <label for="themeSelect">界面风格</label>
+          <select id="themeSelect">
+            <option value="forest">森林绿</option>
+            <option value="midnight">深海蓝</option>
+            <option value="violet">霓虹紫</option>
+            <option value="light">清爽亮色</option>
+          </select>
+        </div>
+        <div class="actions" style="margin-top:8px">
+          <button class="primary" id="refreshBtn">刷新状态</button>
+          <button id="policyBtn">Upload Policy</button>
+          <button id="auditBtn">Push Audit</button>
+        </div>
       </div>
     </section>
 
@@ -1035,6 +1054,8 @@ HTML = r"""
       roleSettingsSummary: document.getElementById("roleSettingsSummary"),
       roleSettingsActions: document.getElementById("roleSettingsActions"),
       roleSettingsClose: document.getElementById("roleSettingsClose"),
+      editableHubTitle: document.getElementById("editableHubTitle"),
+      themeSelect: document.getElementById("themeSelect"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
       mediaContextMenu: document.getElementById("mediaContextMenu"),
@@ -2826,6 +2847,39 @@ HTML = r"""
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") hideMediaMenu();
+    });
+    const THEME_STORAGE_KEY = "streamHubTheme";
+    const TITLE_STORAGE_KEY = "streamHubCustomTitle";
+
+    function applyTheme(theme) {
+      const allowed = new Set(["forest", "midnight", "violet", "light"]);
+      const selected = allowed.has(theme) ? theme : "forest";
+      document.documentElement.dataset.theme = selected;
+      refs.themeSelect.value = selected;
+      localStorage.setItem(THEME_STORAGE_KEY, selected);
+    }
+
+    function saveCustomTitle() {
+      const title = refs.editableHubTitle.textContent.replace(/\s+/g, " ").trim().slice(0, 80) || "Stream Control Hub";
+      refs.editableHubTitle.textContent = title;
+      document.title = title;
+      localStorage.setItem(TITLE_STORAGE_KEY, title);
+    }
+
+    applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || "forest");
+    refs.editableHubTitle.textContent = localStorage.getItem(TITLE_STORAGE_KEY) || "Stream Control Hub";
+    document.title = refs.editableHubTitle.textContent;
+    refs.themeSelect.addEventListener("change", () => applyTheme(refs.themeSelect.value));
+    refs.editableHubTitle.addEventListener("blur", saveCustomTitle);
+    refs.editableHubTitle.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        refs.editableHubTitle.blur();
+      }
+    });
+    refs.editableHubTitle.addEventListener("paste", (event) => {
+      event.preventDefault();
+      document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
     });
     refs.refreshBtn.addEventListener("click", refreshAll);
     refs.uploadBtn.addEventListener("click", uploadMedia);
