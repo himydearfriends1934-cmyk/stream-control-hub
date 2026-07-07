@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, make_response, request
 from werkzeug.utils import secure_filename
 
 
@@ -3042,7 +3042,11 @@ HTML = r"""
 
 @APP.get("/")
 def index():
-    return HTML
+    response = make_response(HTML)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 def is_private_or_loopback_host(hostname: str) -> bool:
