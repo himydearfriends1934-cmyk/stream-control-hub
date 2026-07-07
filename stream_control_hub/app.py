@@ -2374,6 +2374,10 @@ HTML = r"""
         rememberSelectedNode(data.node_id || selectedNodeId || "");
         log(`已连接 ${data.node_id} 到 ${data.base_url}`);
         await refreshAll();
+        alert("连接成功，请转控制台进行推流设置。");
+        setTailscaleWizardOpen(false);
+        refs.smartStartBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+        refs.smartStartBtn.focus({ preventScroll: true });
       }
     }
 
