@@ -145,6 +145,8 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('data-media-local="${localCopy ? "1" : "0"}"', app.HTML)
         self.assertIn('request_node_json(target_node, "/api/public-upload", timeout=10)', inspect.getsource(app.run_share_task))
         self.assertIn("discovered_public_url", inspect.getsource(app.run_share_task))
+        self.assertIn("不支持媒体哈希校验", inspect.getsource(app.run_share_task))
+        self.assertIn("source_hash=source_hash", inspect.getsource(app.run_share_task))
         self.assertIn("function showMediaProperties", app.HTML)
         self.assertIn("function moveMediaToGroup", app.HTML)
         self.assertIn("function renameQuickGroup", app.HTML)

@@ -4461,9 +4461,20 @@ def register_verified_duplicate(source_node: dict[str, Any], target_node: dict[s
     save_media_groups(metadata)
 
 
-def verify_and_register_copy(source_node: dict[str, Any], target_node: dict[str, Any], filename: str) -> dict[str, Any]:
-    source_hash = request_node_media_hash(source_node, filename)
+def verify_and_register_copy(
+    source_node: dict[str, Any],
+    target_node: dict[str, Any],
+    filename: str,
+    source_hash: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    source_hash = source_hash or request_node_media_hash(source_node, filename)
     target_hash = request_node_media_hash(target_node, filename)
+    if not source_hash.get("ok"):
+        post_node_json(target_node, "/api/media/delete", {"media": filename}, timeout=60)
+        return {"ok": False, "message": "源 Agent 不支持媒体哈希校验，请先升级源 Agent"}
+    if not target_hash.get("ok"):
+        post_node_json(target_node, "/api/media/delete", {"media": filename}, timeout=60)
+        return {"ok": False, "message": "目标 Agent 无法读取复制文件，已删除不完整新副本"}
     verified = bool(
         source_hash.get("ok") and target_hash.get("ok") and source_hash.get("sha256")
         and source_hash.get("sha256") == target_hash.get("sha256")
@@ -4497,6 +4508,13 @@ def run_share_task(
             total_size = int(media_info.get("size") or 0)
             if total_size <= 0:
                 raise RuntimeError("source media size is unavailable")
+            source_hash = request_node_media_hash(source_node, filename)
+            if not source_hash.get("ok"):
+                raise RuntimeError(
+                    f"{source_node.get('name') or source_node.get('id') or '源 Agent'} 不支持媒体哈希校验，请先升级源 Agent"
+                )
+            if int(source_hash.get("size") or 0) != total_size:
+                raise RuntimeError("源媒体大小在共享前发生变化，请稍后重试")
             upload_id = f"share_{uuid.uuid4().hex}"
             ticket = request_node_upload_ticket(target_node, upload_id=upload_id, filename=filename, total_size=total_size)
             if not ticket.get("ok"):
@@ -4538,7 +4556,7 @@ def run_share_task(
             results.append(result)
             if not result.get("ok"):
                 raise RuntimeError(result.get("message") or f"{target_node_id} 共享失败")
-            verification = verify_and_register_copy(source_node, target_node, filename)
+            verification = verify_and_register_copy(source_node, target_node, filename, source_hash=source_hash)
             result["verification"] = verification
             if not verification.get("ok"):
                 raise RuntimeError(verification.get("message") or "复制完整性校验失败")
