@@ -50,7 +50,9 @@ EOF
 }
 
 read_choice() {
-  [ -z "$CHOICE" ] || return
+  if [ -n "$CHOICE" ]; then
+    return 0
+  fi
   if [ -r /dev/tty ] && [ -w /dev/tty ]; then
     show_menu > /dev/tty
     read -r CHOICE < /dev/tty || CHOICE=""
@@ -63,7 +65,9 @@ read_choice() {
 
 confirm_remove_data() {
   component="$1"
-  [ -z "$REMOVE_DATA" ] || return
+  if [ -n "$REMOVE_DATA" ]; then
+    return 0
+  fi
   if [ -r /dev/tty ] && [ -w /dev/tty ]; then
     printf "Remove all %s data too? [y/N]: " "$component" > /dev/tty
     answer=""; read -r answer < /dev/tty || answer=""
