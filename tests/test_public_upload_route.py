@@ -71,6 +71,7 @@ class HubPublicUploadRouteTests(unittest.TestCase):
             "id": "LIGHTCONE-NEW",
             "name": "LIGHTCONE-NEW",
             "base_url": "http://100.118.47.126:8787",
+            "upload_base_url": "http://165.99.42.175:8787",
             "enabled": True,
             "token": "agent-token",
         }
@@ -88,7 +89,9 @@ class HubPublicUploadRouteTests(unittest.TestCase):
                 app,
                 "request_node_upload_ticket",
                 return_value={"ok": True, "ticket": "short-lived-ticket", "expires_in": 3600},
-            ), patch.object(app, "request_node_json", return_value=public_status):
+            ), patch.object(app, "request_node_json", return_value=public_status), patch.object(
+                app, "probe_upload_route", return_value={"ok": True, "rate_label": "1 MB/s"}
+            ):
                 response = app.APP.test_client().post(
                     "/api/nodes/upload-target",
                     json={
@@ -103,7 +106,7 @@ class HubPublicUploadRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(data["candidates"][0]["url"], "http://165.99.42.174:8787")
         self.assertEqual(data["candidates"][0]["label"], "公网直连")
-        self.assertEqual(data["candidates"][1]["url"], "http://100.118.47.126:8787")
+        self.assertEqual(data["candidates"][1]["url"], "http://165.99.42.175:8787")
         self.assertEqual(data["headers"]["X-Upload-Ticket"], "short-lived-ticket")
 
     def test_hub_media_push_uses_upload_ticket_for_restricted_public_route(self):

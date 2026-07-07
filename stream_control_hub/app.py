@@ -137,8 +137,8 @@ HTML = r"""
     }
     h1 { margin: 0; font-size: 26px; letter-spacing: 0; }
     p { color: var(--muted); margin: 5px 0 0; line-height: 1.45; }
-    .grid { display: grid; grid-template-columns: minmax(520px, 0.9fr) minmax(620px, 1.1fr); gap: 12px; margin-top: 10px; align-items: start; }
-    .side-stack { display: grid; gap: 10px; align-content: start; }
+    .grid { display: grid; grid-template-columns: minmax(620px, 1.05fr) minmax(540px, 0.95fr); gap: 12px; margin-top: 10px; align-items: start; }
+    .left-stack, .side-stack { display: grid; gap: 10px; align-content: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 0.9fr 1.15fr 1.35fr; gap: 10px; }
     .card {
       border: 1px solid var(--line);
@@ -196,7 +196,7 @@ HTML = r"""
     .media-window {
       border: 1px solid rgba(49, 89, 76, 0.85);
       border-radius: 8px;
-      max-height: 400px;
+      max-height: 360px;
       overflow: auto;
       background: rgba(7, 18, 14, 0.66);
     }
@@ -247,11 +247,51 @@ HTML = r"""
     .media-file-row .muted { color: var(--muted); font-size: 12px; }
     .media-library-tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .media-library-tools select { min-width: 130px; flex: 1; }
+    .resource-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .resource-header p { margin: 0; font-size: 12px; }
+    .resource-filter-chip {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      padding: 7px 9px;
+      border: 1px dashed rgba(54, 211, 153, 0.45);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      background: rgba(54, 211, 153, 0.06);
+    }
+    .resource-filter-chip button { padding: 5px 7px; font-size: 12px; border-radius: 7px; }
     .disk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px; }
-    .disk-card { padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: rgba(7,18,14,.5); }
+    .disk-card { padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: rgba(7,18,14,.5); cursor: pointer; }
+    .disk-card:hover, .disk-card.open { border-color: rgba(54, 211, 153, 0.9); background: rgba(54, 211, 153, 0.08); }
     .disk-card-head { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
     .disk-bar { height: 8px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.08); }
     .disk-bar > span { display: block; height: 100%; background: linear-gradient(90deg,var(--accent),#4cc9f0); }
+    .media-total-table {
+      display: grid;
+      gap: 0;
+      border: 1px solid rgba(49, 89, 76, 0.75);
+      border-radius: 8px;
+      overflow: auto;
+      max-height: 220px;
+      background: rgba(7, 18, 14, 0.5);
+    }
+    .media-total-head,
+    .media-total-row {
+      display: grid;
+      grid-template-columns: minmax(150px, 1.25fr) 110px 92px 110px minmax(110px, 0.9fr);
+      gap: 8px;
+      align-items: center;
+      padding: 7px 9px;
+      border-bottom: 1px solid rgba(49, 89, 76, 0.42);
+      font-size: 12px;
+    }
+    .media-total-head { position: sticky; top: 0; z-index: 1; color: var(--muted); font-weight: 900; background: rgba(19, 32, 28, 0.98); }
+    .media-total-row:last-child { border-bottom: 0; }
+    .media-total-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .media-total-row button { padding: 5px 7px; font-size: 12px; border-radius: 7px; }
     .media-context-menu {
       position: fixed;
       z-index: 100;
@@ -675,9 +715,10 @@ HTML = r"""
     .log-card pre { min-height: 58px; max-height: 120px; }
     .node strong, .media strong { display: block; }
     .node small, .media small { color: var(--muted); }
-    .resource-card { display: grid; gap: 8px; }
-    .resource-card .split { grid-template-columns: 1fr; gap: 8px; }
-    .resource-card .actions { display: grid; grid-template-columns: 1fr; }
+    .resource-card, .upload-card { display: grid; gap: 8px; }
+    .resource-wide { grid-column: 1 / -1; }
+    .upload-card .split { grid-template-columns: 1fr; gap: 8px; }
+    .upload-card .actions { display: grid; grid-template-columns: 1fr; }
     .resource-card .media-list { overflow: visible; padding-right: 0; }
     .transfer-box {
       border: 1px solid rgba(49, 89, 76, 0.85);
@@ -723,7 +764,7 @@ HTML = r"""
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     @media (max-width: 1080px) {
-      .grid, .split, .hero, .node-detail, .bottom-section, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
+      .grid, .split, .hero, .node-detail, .bottom-section, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row, .media-total-head, .media-total-row { grid-template-columns: 1fr; }
       .bottom-section { grid-column: auto; }
       .monitor-card, .node-table-card { min-height: auto; }
       .node-monitor { min-height: 420px; }
@@ -851,7 +892,7 @@ HTML = r"""
         <div class="monitor-heading">
           <div>
             <h2>节点监控屏</h2>
-            <p>点击右侧 VPS 节点，左侧集中显示健康状态、网络吞吐、推流码率和节点配置。</p>
+            <p>点击右侧 VPS 节点，集中显示健康状态、网络吞吐、推流码率和节点配置。</p>
           </div>
           <span class="pill">live view</span>
         </div>
@@ -879,19 +920,9 @@ HTML = r"""
           </div>
         </div>
 
-        <div class="card resource-card">
-          <h2>全局资源管理器</h2>
-          <div class="media-library-tools">
-            <select id="mediaGroupFilter"><option value="">全部分组</option></select>
-            <button id="mediaGroupAddBtn">增加分组</button>
-            <button id="mediaGroupRenameBtn">分组改名</button>
-            <button class="danger" id="mediaGroupDeleteBtn">删除分组</button>
-            <button id="mediaAssignGroupBtn">将选中视频移入此分组</button>
-            <select id="mediaCleanupAge"><option value="3">创建 3 天前</option><option value="7">创建 7 天前</option><option value="15">创建 15 天前</option><option value="30" selected>创建 30 天前</option><option value="60">创建 60 天前</option><option value="90">创建 90 天前</option></select>
-            <select id="mediaCleanupUsage"><option value="any">不限制使用记录</option><option value="never">从未开播使用</option><option value="unused">超过所选天数未使用</option></select>
-            <button class="danger" id="mediaCleanupBtn">清理重复视频</button>
-          </div>
-          <div class="disk-grid" id="mediaDiskList"></div>
+        <div class="card upload-card">
+          <h2>上传模块</h2>
+          <p>上传与资源管理分开：先选择右侧目标 Agent，再把视频直传到该节点，可指定初始分组。</p>
           <div class="split">
             <div>
               <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
@@ -903,17 +934,43 @@ HTML = r"""
             </div>
             <div id="uploadBox" class="transfer-box"></div>
           </div>
-          <div class="media-list" id="mediaList">加载中...</div>
-          <div class="media-context-menu" id="mediaContextMenu">
-            <button data-media-menu-action="inspect">查看详情</button>
-            <button data-media-menu-action="use">选用开播</button>
-            <button data-media-menu-action="rename">重命名 / 移动</button>
-            <button class="danger" data-media-menu-action="delete">删除文件</button>
-            <div class="media-context-label">发送到节点</div>
-            <div class="media-context-targets" id="mediaSendTargets"></div>
-            <div class="media-context-label">移动到节点（成功后删除源文件）</div>
-            <div class="media-context-targets" id="mediaMoveTargets"></div>
+        </div>
+      </div>
+
+      <div class="card resource-card resource-wide">
+        <div class="resource-header">
+          <div>
+            <h2>资源管理模块</h2>
+            <p>双击节点容量条打开该节点资源；右键视频可查看属性、移动分组、发送/移动到节点。</p>
           </div>
+          <span class="pill">resource table</span>
+        </div>
+        <div class="media-library-tools">
+          <select id="mediaGroupFilter"><option value="">全部分组</option></select>
+          <button id="mediaGroupAddBtn">增加分组</button>
+          <button id="mediaGroupRenameBtn">分组改名</button>
+          <button class="danger" id="mediaGroupDeleteBtn">删除分组</button>
+          <button id="mediaAssignGroupBtn">将选中视频移入此分组</button>
+          <select id="mediaCleanupAge"><option value="3">创建 3 天前</option><option value="7">创建 7 天前</option><option value="15">创建 15 天前</option><option value="30" selected>创建 30 天前</option><option value="60">创建 60 天前</option><option value="90">创建 90 天前</option></select>
+          <select id="mediaCleanupUsage"><option value="any">不限制使用记录</option><option value="never">从未开播使用</option><option value="unused">超过所选天数未使用</option></select>
+          <button class="danger" id="mediaCleanupBtn">清理重复视频</button>
+        </div>
+        <div class="disk-grid" id="mediaDiskList"></div>
+        <div class="resource-filter-chip" id="resourceFilterChip">双击容量条打开节点资源；当前显示全部节点。</div>
+        <div class="media-list" id="mediaList">加载中...</div>
+        <div class="media-total-table" id="mediaTotalTable"></div>
+        <div class="media-context-menu" id="mediaContextMenu">
+          <button data-media-menu-action="property">属性</button>
+          <button data-media-menu-action="inspect">查看详情</button>
+          <button data-media-menu-action="use">选用开播</button>
+          <button data-media-menu-action="rename">重命名 / 移动</button>
+          <button class="danger" data-media-menu-action="delete">删除文件</button>
+          <div class="media-context-label">移动到分组</div>
+          <div class="media-context-targets" id="mediaGroupTargets"></div>
+          <div class="media-context-label">发送到节点</div>
+          <div class="media-context-targets" id="mediaSendTargets"></div>
+          <div class="media-context-label">移动到节点（成功后删除源文件）</div>
+          <div class="media-context-targets" id="mediaMoveTargets"></div>
         </div>
       </div>
 
@@ -1079,9 +1136,11 @@ HTML = r"""
       themeSelect: document.getElementById("themeSelect"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
+      mediaTotalTable: document.getElementById("mediaTotalTable"),
       mediaContextMenu: document.getElementById("mediaContextMenu"),
       mediaSendTargets: document.getElementById("mediaSendTargets"),
       mediaMoveTargets: document.getElementById("mediaMoveTargets"),
+      mediaGroupTargets: document.getElementById("mediaGroupTargets"),
       mediaGroupFilter: document.getElementById("mediaGroupFilter"),
       mediaGroupAddBtn: document.getElementById("mediaGroupAddBtn"),
       mediaGroupRenameBtn: document.getElementById("mediaGroupRenameBtn"),
@@ -1092,6 +1151,7 @@ HTML = r"""
       mediaCleanupBtn: document.getElementById("mediaCleanupBtn"),
       uploadGroupInput: document.getElementById("uploadGroupInput"),
       mediaDiskList: document.getElementById("mediaDiskList"),
+      resourceFilterChip: document.getElementById("resourceFilterChip"),
       refreshBtn: document.getElementById("refreshBtn"),
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
       policyBtn: document.getElementById("policyBtn"),
@@ -1149,6 +1209,7 @@ HTML = r"""
     refs.cancelUploadBtn = document.getElementById("cancelUploadBtn");
     let nodes = [];
     let mediaLibrary = { groups: [], resources: [], nodes: [] };
+    let openResourceNodeId = "";
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
     function rememberSelectedNode(nodeId) {
@@ -1650,14 +1711,53 @@ HTML = r"""
       ` : `<div class="empty-state">还没有已激活的 Hub。</div>`;
     }
 
+    function mediaGroupName(id) {
+      return (mediaLibrary.groups || []).find((item) => item.id === id)?.name || "未分组";
+    }
+
+    function mediaResourceByName(name) {
+      return (mediaLibrary.resources || []).find((item) => String(item.name || "") === String(name || ""));
+    }
+
+    function resourceHasNode(item, nodeId) {
+      if (!nodeId) return true;
+      return (item.copies || []).some((copy) => String(copy.node_id || "") === String(nodeId));
+    }
+
+    function renderMediaTotalTable(resources) {
+      const all = [...(resources || [])].sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
+      refs.mediaTotalTable.innerHTML = `
+        <div class="media-toolbar" style="padding:8px 9px;">
+          <strong>资源总表</strong>
+          <small>全部 ${all.length} 个视频，不受上方节点/分组筛选影响。</small>
+        </div>
+        <div class="media-total-head">
+          <span>文件名</span><span>分组</span><span>副本</span><span>大小</span><span>最近上传</span>
+        </div>
+        ${all.length ? all.map((item) => {
+          const copies = item.copies || [];
+          const copyNames = copies.map((entry) => entry.node_name || entry.node_id).join("、");
+          return `<div class="media-total-row" title="${escapeHtml(copyNames)}">
+            <span>${escapeHtml(item.name || "--")}</span>
+            <span>${escapeHtml(mediaGroupName(item.group_id))}</span>
+            <span>${copies.length} 节点</span>
+            <span>${escapeHtml(fmtBytes(item.size || 0))}</span>
+            <span>${escapeHtml(item.modified_label || "--")}</span>
+          </div>`;
+        }).join("") : `<div class="empty-state">暂无视频资源。</div>`}
+      `;
+    }
+
     function renderMedia() {
       const checkedPath = selectedMediaPath();
       const checkedNodeId = selectedMediaNodeId();
       const groupId = refs.mediaGroupFilter.value || "";
       const groups = mediaLibrary.groups || [];
-      const groupName = (id) => groups.find((item) => item.id === id)?.name || "未分组";
-      const entries = [...(mediaLibrary.resources || [])]
+      const allResources = [...(mediaLibrary.resources || [])];
+      const openedNode = (mediaLibrary.nodes || []).find((item) => String(item.node_id || "") === String(openResourceNodeId));
+      const entries = allResources
         .filter((item) => !groupId || (groupId === "__ungrouped__" ? !item.group_id : item.group_id === groupId))
+        .filter((item) => resourceHasNode(item, openResourceNodeId))
         .sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
       const options = `<option value="">全部分组</option><option value="__ungrouped__">未分组</option>`
         + groups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
@@ -1670,16 +1770,27 @@ HTML = r"""
       if ([...refs.uploadGroupInput.options].some((option) => option.value === currentUploadGroup)) refs.uploadGroupInput.value = currentUploadGroup;
       refs.mediaDiskList.innerHTML = (mediaLibrary.nodes || []).map((item) => {
         const percent = Math.max(0, Math.min(100, Number(item.percent || 0)));
-        return `<div class="disk-card"><div class="disk-card-head"><strong>${escapeHtml(item.node_name)}</strong><span>${item.online ? `剩余 ${escapeHtml(fmtBytes(item.free))}` : "离线"}</span></div><div class="disk-bar"><span style="width:${percent}%"></span></div><small>已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}（${percent.toFixed(1)}%）</small></div>`;
+        const nodeId = String(item.node_id || "");
+        const open = nodeId && nodeId === String(openResourceNodeId);
+        const count = allResources.filter((resource) => resourceHasNode(resource, nodeId)).length;
+        return `<div class="disk-card ${open ? "open" : ""}" role="button" tabindex="0" data-resource-node-id="${escapeHtml(nodeId)}" title="双击打开 ${escapeHtml(item.node_name)} 的视频资源">
+          <div class="disk-card-head"><strong>${escapeHtml(item.node_name)}</strong><span>${item.online ? `剩余 ${escapeHtml(fmtBytes(item.free))}` : "离线"}</span></div>
+          <div class="disk-bar"><span style="width:${percent}%"></span></div>
+          <small>已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}（${percent.toFixed(1)}%） · ${count} 个视频</small>
+        </div>`;
       }).join("");
+      refs.resourceFilterChip.innerHTML = openedNode
+        ? `<span>正在查看：${escapeHtml(openedNode.node_name)} · ${entries.length} 个视频</span><button data-clear-resource-node>显示全部资源</button>`
+        : `<span>双击容量条打开节点资源；当前显示全部节点。</span>`;
+      renderMediaTotalTable(allResources);
       if (!entries.length) {
-        refs.mediaList.innerHTML = `<div class="empty-state">当前分组还没有视频资源。</div>`;
+        refs.mediaList.innerHTML = `<div class="empty-state">当前筛选下没有视频资源。</div>`;
         return;
       }
       refs.mediaList.innerHTML = `
         <div class="media-toolbar">
-          <strong>所有 Agent / Hub · ${escapeHtml(groupId ? groupName(groupId) : "全部资源")}</strong>
-          <small>共 ${entries.length} 个，按上传时间倒序。右键可复制、移动、重命名或删除。</small>
+          <strong>${escapeHtml(openedNode ? openedNode.node_name : "所有 Agent / Hub")} · ${escapeHtml(groupId ? mediaGroupName(groupId) : "全部资源")}</strong>
+          <small>共 ${entries.length} 个。双击打开详情；右键可查看属性、移动分组、复制/移动到节点。</small>
         </div>
         <div class="media-window">
           <div class="media-window-head">
@@ -1690,24 +1801,25 @@ HTML = r"""
           </div>
           ${entries.map((item) => {
             const copies = item.copies || [];
-            const copy = copies.find((entry) => String(entry.node_id) === String(selectedNodeId)) || copies[0] || {};
+            const copy = copies.find((entry) => String(entry.node_id) === String(openResourceNodeId || selectedNodeId)) || copies[0] || {};
             const videoPath = copy.video_path || item.name;
             const nodeId = String(copy.node_id || "");
             const selected = checkedPath && checkedNodeId === nodeId && checkedPath === videoPath;
             const current = nodeId === String(selectedNodeId);
             const name = item.name || videoPath;
             const copyNames = copies.map((entry) => entry.node_name || entry.node_id).join("、");
+            const lastUsedLabels = copies.map((entry) => `${entry.node_name || entry.node_id}: ${entry.last_used_label || "从未开播"}`).join("；");
             const ageBase = Number(item.last_used_at || item.created_at || item.modified || 0);
             const ageDays = ageBase ? Math.max(0, (Date.now() / 1000 - ageBase) / 86400) : 0;
             const ageTier = Math.floor(ageDays / 3);
             const nameOpacity = Math.max(0.32, 1 - ageTier * 0.13);
             const cleanupCandidate = ageTier >= 5;
             return `
-              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""} ${cleanupCandidate ? "cleanup-candidate" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-group-id="${escapeHtml(item.group_id || "")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
+              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""} ${cleanupCandidate ? "cleanup-candidate" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-group-id="${escapeHtml(item.group_id || "")}" data-group-name="${escapeHtml(mediaGroupName(item.group_id))}" data-copy-names="${escapeHtml(copyNames)}" data-copy-count="${escapeHtml(copies.length)}" data-last-used-label="${escapeHtml(lastUsedLabels || "从未开播")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
                 <span style="opacity:${nameOpacity.toFixed(2)}" title="${escapeHtml(name)}｜冷却 ${ageDays.toFixed(1)} 天｜${cleanupCandidate ? "可人工评估删除" : "活跃"}">${escapeHtml(name)}</span>
                 <span class="muted">${escapeHtml(fmtBytes(item.size || 0))}</span>
                 <span class="muted">${escapeHtml(item.modified_label || "--")}</span>
-                <span title="${escapeHtml(copyNames)}">${escapeHtml(groupName(item.group_id))} · ${copies.length} 副本</span>
+                <span title="${escapeHtml(copyNames)}">${escapeHtml(mediaGroupName(item.group_id))} · ${copies.length} 副本</span>
                 <input data-media-check type="radio" name="media" value="${escapeHtml(name)}" data-node-id="${escapeHtml(nodeId)}" data-video-path="${escapeHtml(videoPath)}" ${selected ? "checked" : ""} hidden>
               </div>
             `;
@@ -2664,6 +2776,10 @@ HTML = r"""
       const videoPath = row.dataset.videoPath || mediaName;
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const nodeLabel = node?.name || nodeId;
+      if (action === "property") {
+        showMediaProperties(row);
+        return;
+      }
       if (action === "inspect") {
         const input = row.querySelector("[data-media-check]");
         if (input) input.checked = true;
@@ -2734,6 +2850,43 @@ HTML = r"""
       }
     }
 
+    function showMediaProperties(row) {
+      const mediaName = row.dataset.mediaName || "";
+      const resource = mediaResourceByName(mediaName);
+      const groupName = mediaGroupName(resource?.group_id || row.dataset.groupId || "");
+      const copies = resource?.copies || [];
+      const copyLines = copies.length
+        ? copies.map((copy) => `- ${copy.node_name || copy.node_id}: ${copy.video_path || mediaName}（${copy.last_used_label || "从未开播"}）`).join("\n")
+        : `- ${row.dataset.copyNames || row.dataset.nodeId || "未知节点"}`;
+      alert([
+        `文件：${mediaName}`,
+        `分组：${groupName}`,
+        `大小：${fmtBytes(Number(row.dataset.size || resource?.size || 0))}`,
+        `上传时间：${row.dataset.modifiedLabel || resource?.modified_label || "--"}`,
+        `副本数：${copies.length || row.dataset.copyCount || 1}`,
+        "",
+        "所在节点 / 路径：",
+        copyLines,
+      ].join("\n"));
+    }
+
+    async function moveMediaToGroup(row, groupId) {
+      const filename = row.dataset.mediaName || "";
+      const targetGroupId = groupId === "__ungrouped__" ? "" : groupId;
+      if (!filename) return;
+      const targetName = targetGroupId ? mediaGroupName(targetGroupId) : "未分组";
+      const data = await postJson("/api/media-library/assign", { filename, group_id: targetGroupId });
+      renderTransfer({
+        status: data.ok ? "done" : "failed",
+        badge: data.ok ? "完成" : "失败",
+        title: data.ok ? "分组移动完成" : "分组移动失败",
+        target: targetName,
+        percent: data.ok ? 100 : 0,
+        message: data.ok ? `${filename} 已移动到分组：${targetName}` : friendlyError(data.message || "移动分组失败"),
+      });
+      if (data.ok) await refreshAll();
+    }
+
     function selectMediaRow(row) {
       document.querySelectorAll("[data-media-row].selected").forEach((item) => item.classList.remove("selected"));
       row.classList.add("selected");
@@ -2754,9 +2907,17 @@ HTML = r"""
       contextMediaRow = row;
       const sourceNodeId = String(row.dataset.nodeId || "");
       const targets = nodes.filter((node) => node.roles?.agent?.enabled && String(node.id) !== sourceNodeId);
+      const currentGroupId = row.dataset.groupId || "";
+      const groupTargets = [
+        { id: "__ungrouped__", name: "未分组" },
+        ...(mediaLibrary.groups || []),
+      ].filter((group) => String(group.id === "__ungrouped__" ? "" : group.id) !== String(currentGroupId));
       const targetButtons = (action) => targets.length
         ? targets.map((node) => `<button data-media-menu-action="${action}" data-target-node-id="${escapeHtml(node.id)}">${escapeHtml(node.name || node.id)}</button>`).join("")
         : `<button disabled>没有其他在线节点</button>`;
+      refs.mediaGroupTargets.innerHTML = groupTargets.length
+        ? groupTargets.map((group) => `<button data-media-menu-action="move-group" data-target-group-id="${escapeHtml(group.id)}">${escapeHtml(group.name)}</button>`).join("")
+        : `<button disabled>已经在唯一分组</button>`;
       refs.mediaSendTargets.innerHTML = targetButtons("send-node");
       refs.mediaMoveTargets.innerHTML = targetButtons("move-node");
       refs.mediaContextMenu.classList.add("open");
@@ -3009,6 +3170,25 @@ HTML = r"""
     refs.roleSettingsNameInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") saveRoleSettingsName();
     });
+    refs.mediaDiskList.addEventListener("dblclick", (event) => {
+      const card = event.target.closest("[data-resource-node-id]");
+      if (!card) return;
+      openResourceNodeId = card.dataset.resourceNodeId || "";
+      renderMedia();
+    });
+    refs.mediaDiskList.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const card = event.target.closest("[data-resource-node-id]");
+      if (!card) return;
+      event.preventDefault();
+      openResourceNodeId = card.dataset.resourceNodeId || "";
+      renderMedia();
+    });
+    refs.resourceFilterChip.addEventListener("click", (event) => {
+      if (!event.target.closest("[data-clear-resource-node]")) return;
+      openResourceNodeId = "";
+      renderMedia();
+    });
     refs.mediaList.addEventListener("click", (event) => {
       hideMediaMenu();
       const row = event.target.closest("[data-media-row]");
@@ -3038,10 +3218,14 @@ HTML = r"""
       const row = contextMediaRow;
       const action = button.dataset.mediaMenuAction;
       const targetNodeId = button.dataset.targetNodeId || "";
+      const targetGroupId = button.dataset.targetGroupId || "";
       hideMediaMenu();
       if (action === "send-node") {
         selectMediaRow(row);
         pushSelectedMedia([targetNodeId]);
+      } else if (action === "move-group") {
+        selectMediaRow(row);
+        moveMediaToGroup(row, targetGroupId);
       } else if (action === "move-node") {
         const sourceLabel = nodes.find((node) => String(node.id) === String(row.dataset.nodeId))?.name || row.dataset.nodeId;
         const targetLabel = nodes.find((node) => String(node.id) === String(targetNodeId))?.name || targetNodeId;

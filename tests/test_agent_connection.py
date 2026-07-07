@@ -60,8 +60,10 @@ class HubAgentConnectionTests(unittest.TestCase):
             nodes_file = Path(tmp) / "nodes.json"
             nodes_file.write_text("[]", encoding="utf-8")
             with patch.object(app, "NODES_FILE", nodes_file), patch.object(
-                app, "request_node_json", return_value=status
-            ):
+                app, "online_tailscale_peer_for_ip", return_value={"online": True}
+            ), patch.object(
+                app, "pair_tailscale_agent", return_value={"ok": True, "token": "paired-token"}
+            ), patch.object(app, "request_node_json", return_value=status):
                 response = app.APP.test_client().post(
                     "/api/tailscale/connect-existing-ip",
                     json={"tailscale_ip": "100.118.47.126"},
@@ -88,8 +90,10 @@ class HubAgentConnectionTests(unittest.TestCase):
             nodes_file = Path(tmp) / "nodes.json"
             nodes_file.write_text(json.dumps(existing), encoding="utf-8")
             with patch.object(app, "NODES_FILE", nodes_file), patch.object(
-                app, "request_node_json", return_value={"ok": True, "hostname": "new-agent-host"}
-            ):
+                app, "online_tailscale_peer_for_ip", return_value={"online": True}
+            ), patch.object(
+                app, "pair_tailscale_agent", return_value={"ok": True, "token": "paired-token"}
+            ), patch.object(app, "request_node_json", return_value={"ok": True, "hostname": "new-agent-host"}):
                 response = app.APP.test_client().post(
                     "/api/tailscale/connect-existing-ip",
                     json={"tailscale_ip": "100.118.47.126"},
