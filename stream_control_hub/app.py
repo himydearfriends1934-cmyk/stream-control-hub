@@ -2049,7 +2049,7 @@ HTML = r"""
           title: `选择上传线路`,
           target: node.name || node.id,
           totalBytes: file.size,
-          message: "正在自动测速公网和 Tailscale 线路，优先选择最快公网直连。",
+          message: "正在测速公网线路；上传仅使用公网，不会回退 Tailscale 内网。",
         });
         const routeChoice = await chooseUploadRoute(target);
         if (uploadState.canceled) throw new Error("上传已取消");
@@ -2174,7 +2174,9 @@ HTML = r"""
           title: "上传失败",
           target: `${node.name || node.id}${uploadRoute?.label ? " / " + uploadRoute.label : ""}`,
           totalBytes: file.size,
-          message: friendlyError(error, "上传失败"),
+          message: String(error?.message || "").includes("Failed to fetch")
+            ? `公网连接失败：浏览器无法访问 ${uploadRoute?.url || target?.upload_url || "Agent 公网上传地址"}。请检查云防火墙和 VPS 防火墙是否放行 TCP 8787。`
+            : friendlyError(error, "上传失败"),
         });
       } finally {
         refs.uploadBtn.disabled = false;
@@ -4365,6 +4367,26 @@ def api_node_upload_target():
             "cancel_url": f"{url}/api/upload-chunk/cancel",
             "headers": headers,
         })
+    verified_candidates = []
+    probe_failures = []
+    for candidate in candidates:
+        probe = probe_upload_route({
+            "upload_base_url": candidate["url"],
+            "headers": candidate["headers"],
+        })
+        candidate["server_probe"] = probe
+        if probe.get("ok"):
+            verified_candidates.append(candidate)
+        else:
+            probe_failures.append({"url": candidate["url"], "message": probe.get("message") or "probe failed"})
+    candidates = verified_candidates
+    if not candidates:
+        return jsonify({
+            "ok": False,
+            "message": "Agent 公网 HTTP 探测失败；请在云防火墙和 VPS 防火墙放行 TCP 8787",
+            "node_id": node_id,
+            "probe_failures": probe_failures,
+        }), 502
     return jsonify({
         "ok": True,
         "node_id": node_id,

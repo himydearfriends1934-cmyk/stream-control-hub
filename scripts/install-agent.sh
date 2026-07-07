@@ -79,6 +79,16 @@ install_packages() {
   fi
 }
 
+configure_agent_firewall() {
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw allow "${STREAM_AGENT_PORT}/tcp" comment 'Stream Control Agent public upload' >/dev/null
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="${STREAM_AGENT_PORT}/tcp" >/dev/null
+    firewall-cmd --reload >/dev/null
+  fi
+}
+
 new_token() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
@@ -287,6 +297,7 @@ fi
 
 need_root
 install_packages
+configure_agent_firewall
 need_cmd git
 need_cmd python3
 need_cmd systemctl
