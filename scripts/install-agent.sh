@@ -87,6 +87,14 @@ configure_agent_firewall() {
     firewall-cmd --permanent --add-port="${STREAM_AGENT_PORT}/tcp" >/dev/null
     firewall-cmd --reload >/dev/null
   fi
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -C INPUT -p tcp --dport "$STREAM_AGENT_PORT" -j ACCEPT >/dev/null 2>&1 || \
+      iptables -I INPUT 1 -p tcp --dport "$STREAM_AGENT_PORT" -j ACCEPT
+  fi
+  if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -C INPUT -p tcp --dport "$STREAM_AGENT_PORT" -j ACCEPT >/dev/null 2>&1 || \
+      ip6tables -I INPUT 1 -p tcp --dport "$STREAM_AGENT_PORT" -j ACCEPT
+  fi
 }
 
 new_token() {
