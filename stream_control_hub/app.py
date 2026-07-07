@@ -4501,7 +4501,16 @@ def run_share_task(
             ticket = request_node_upload_ticket(target_node, upload_id=upload_id, filename=filename, total_size=total_size)
             if not ticket.get("ok"):
                 raise RuntimeError(ticket.get("message") or f"{target_node_id} did not issue an upload ticket")
-            upload_urls = node_upload_base_urls(target_node)
+            public_status = request_node_json(target_node, "/api/public-upload", timeout=10)
+            discovered_public_url = (
+                str(public_status.get("public_origin") or "").strip().rstrip("/")
+                if public_status.get("ok") and public_status.get("supported")
+                else ""
+            )
+            upload_urls: list[str] = []
+            for upload_url in [discovered_public_url, *node_upload_base_urls(target_node)]:
+                if upload_url and is_public_upload_url(upload_url) and upload_url not in upload_urls:
+                    upload_urls.append(upload_url)
             if not upload_urls:
                 raise RuntimeError(f"{target_node_id} 没有可用的公网上传地址；禁止通过 Tailscale 内网共享")
             target_upload_base_urls = upload_urls

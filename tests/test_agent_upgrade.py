@@ -1,4 +1,5 @@
 import json
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -142,6 +143,8 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("复制完成后会自动启动推流", app.HTML)
         self.assertIn("Smart Start 失败：", app.HTML)
         self.assertIn('data-media-local="${localCopy ? "1" : "0"}"', app.HTML)
+        self.assertIn('request_node_json(target_node, "/api/public-upload", timeout=10)', inspect.getsource(app.run_share_task))
+        self.assertIn("discovered_public_url", inspect.getsource(app.run_share_task))
         self.assertIn("function showMediaProperties", app.HTML)
         self.assertIn("function moveMediaToGroup", app.HTML)
         self.assertIn("function renameQuickGroup", app.HTML)
