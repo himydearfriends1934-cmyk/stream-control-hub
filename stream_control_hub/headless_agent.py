@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hmac
+import hashlib
 import ipaddress
 import os
 import platform
@@ -48,6 +49,7 @@ load_env_file(ROOT / ".agent.env")
 DATA_DIR = Path(os.environ.get("STREAM_AGENT_DATA_DIR", str(ROOT / "agent_data")))
 MEDIA_DIR = DATA_DIR / "media"
 STATE_FILE = DATA_DIR / "state.json"
+MEDIA_HASH_CACHE_FILE = DATA_DIR / "media-hashes.json"
 STREAM_RESTART_FILE = Path(os.environ.get("STREAM_AGENT_RESTART_FILE", str(DATA_DIR / "stream_restart.json")))
 PORT = int(os.environ.get("STREAM_AGENT_PORT", "8787"))
 CONTROL_HUB = os.environ.get("STREAM_AGENT_CONTROL_HUB", "")
@@ -836,19 +838,64 @@ def safe_media_filename(value: str) -> str:
 
 def list_media() -> list[dict[str, Any]]:
     ensure_dirs()
+    state = load_state()
+    media_usage = state.get("media_usage") or {}
     items: list[dict[str, Any]] = []
     for path in sorted(MEDIA_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
         if not path.is_file() or not media_allowed(path.name):
             continue
         stat = path.stat()
+        usage = media_usage.get(path.name) if isinstance(media_usage, dict) else {}
+        usage = usage if isinstance(usage, dict) else {}
         items.append({
             "name": path.name,
             "video_path": str(path),
             "size": stat.st_size,
             "modified": stat.st_mtime,
             "modified_label": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+            "created_at": stat.st_mtime,
+            "last_used_at": float(usage.get("last_used_at") or 0),
+            "last_used_label": (
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(usage.get("last_used_at") or 0)))
+                if usage.get("last_used_at") else "从未开播"
+            ),
         })
     return items
+
+
+def media_sha256(path: Path) -> str:
+    stat = path.stat()
+    try:
+        cache = json.loads(MEDIA_HASH_CACHE_FILE.read_text(encoding="utf-8"))
+        cache = cache if isinstance(cache, dict) else {}
+    except Exception:
+        cache = {}
+    cached = cache.get(path.name) if isinstance(cache.get(path.name), dict) else {}
+    if int(cached.get("size") or -1) == stat.st_size and float(cached.get("mtime") or -1) == stat.st_mtime and cached.get("sha256"):
+        return str(cached["sha256"])
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(4 * 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    value = digest.hexdigest()
+    cache[path.name] = {"sha256": value, "size": stat.st_size, "mtime": stat.st_mtime, "checked_at": time.time()}
+    write_private_json(MEDIA_HASH_CACHE_FILE, cache)
+    return value
+
+
+def mark_media_used(path: Path) -> None:
+    with STREAM_LIFECYCLE_LOCK:
+        state = load_state()
+        usage = dict(state.get("media_usage") or {})
+        item = dict(usage.get(path.name) or {})
+        item["last_used_at"] = time.time()
+        item["use_count"] = int(item.get("use_count") or 0) + 1
+        usage[path.name] = item
+        state["media_usage"] = usage
+        save_state(state)
 
 
 def file_size_label(size: int) -> str:
@@ -1524,11 +1571,19 @@ def api_media_rename():
     target = MEDIA_DIR / new_name
     if target.exists():
         return jsonify({"ok": False, "message": "target filename already exists"}), 409
+    old_name = source.name
     source.rename(target)
+    with STREAM_LIFECYCLE_LOCK:
+        state = load_state()
+        usage = dict(state.get("media_usage") or {})
+        if old_name in usage:
+            usage[target.name] = usage.pop(old_name)
+            state["media_usage"] = usage
+            save_state(state)
     return jsonify({
         "ok": True,
         "message": "media renamed",
-        "old_name": source.name,
+        "old_name": old_name,
         "name": target.name,
         "video_path": str(target),
         "videos": list_media(),
@@ -1544,11 +1599,37 @@ def api_media_delete():
         return jsonify({"ok": False, "message": str(exc)}), 400
     deleted_name = source.name
     source.unlink()
+    with STREAM_LIFECYCLE_LOCK:
+        state = load_state()
+        usage = dict(state.get("media_usage") or {})
+        if usage.pop(deleted_name, None) is not None:
+            state["media_usage"] = usage
+            save_state(state)
     return jsonify({
         "ok": True,
         "message": "media deleted",
         "name": deleted_name,
         "videos": list_media(),
+    })
+
+
+@APP.post("/api/media/hash")
+def api_media_hash():
+    payload = request.get_json(silent=True) or {}
+    try:
+        source = media_by_name_or_path(str(payload.get("media") or payload.get("video_path") or ""))
+        digest = media_sha256(source)
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+    stat = source.stat()
+    return jsonify({
+        "ok": True,
+        "name": source.name,
+        "video_path": str(source),
+        "size": stat.st_size,
+        "sha256": digest,
     })
 
 
@@ -1874,6 +1955,7 @@ def api_start_stream():
         return jsonify({"ok": False, "message": str(exc)}), 400
 
     with STREAM_LIFECYCLE_LOCK:
+        mark_media_used(video_path)
         state = load_state()
         previous_pid = int(state.get("stream_pid") or 0)
         stop_result = stop_process(previous_pid)

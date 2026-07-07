@@ -189,6 +189,9 @@ The Hub is a coordinator, not the media warehouse. Browser uploads go straight t
 - Uploads are assigned to the selected group and still go directly to the currently selected Agent.
 - Smart Start can select any grouped library item. If the target Agent has no local copy, the Hub copies one from an online source Agent over the public-only transfer route before streaming.
 - Media filenames preserve Unicode, including Chinese, Japanese, spaces, and full-width punctuation; only path/control characters and unsafe ASCII filename characters are removed.
+- Every Agent-to-Agent copy is verified by SHA-256 and size. Verified source/new-copy pairs coexist for 72 hours; after that, automatic cleanup rechecks that both complete copies still exist before deleting the older source copy.
+- Automatic and batch cleanup can delete verified duplicate copies only. It never deletes the final/only copy of a video. Single-copy deletion remains an explicit manual action.
+- Agents record the last time each video was used for streaming. The resource manager fades filenames in three-day tiers and uses a dashed underline for long-idle manual-review candidates.
 
 Policy endpoints:
 
@@ -339,6 +342,8 @@ Linux Hub 和 Headless Agent 一键安装脚本在传入 `TAILSCALE_AUTH_KEY=...
 ### 推流说明
 
 资源管理器会汇总所有在线 Agent 的视频并按上传时间倒序显示，支持分组新增、改名、删除和视频归组，同时用条形图显示每个节点的磁盘已用与剩余空间。上传仍以当前选中的 Agent 为目标，并可在上传前选择分组。Smart Start 可以从任意分组选择视频；若当前开播节点没有该视频，Hub 会先从拥有副本的在线节点通过公网复制一份，再启动推流。中文、日文、空格和全角标点文件名会原样保留。
+
+Agent 间复制完成后会比较源文件和新副本的 SHA-256 与大小；只有完全一致才进入重复副本保留规则。两份副本共存 72 小时，到期后系统再次确认两份完整且哈希一致，才删除旧副本。自动清理和批量“清理视频”只能删除这种已验证重复副本，绝不会删除唯一文件；唯一文件只能人工逐个删除。Agent 还会记录最后开播使用时间，资源管理器按每 3 天一档降低长期未使用文件名亮度，最长档用虚线标记为人工评估候选。
 
 Headless Agent 支持接收浏览器直传的视频，也支持把已有视频直接共享到其他 Agent，并用 FFmpeg 启动推流。Smart Start 支持手动填写 YouTube Stream Key，也支持从 YouTube API 向导选择已授权的直播流后一键启动。
 

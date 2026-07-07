@@ -237,6 +237,7 @@ HTML = r"""
     .media-file-row.current-agent {
       box-shadow: inset 3px 0 0 rgba(54, 211, 153, 0.9);
     }
+    .media-file-row.cleanup-candidate span:first-child { text-decoration: underline dashed; text-underline-offset: 4px; }
     .media-file-row span {
       overflow: hidden;
       text-overflow: ellipsis;
@@ -886,6 +887,9 @@ HTML = r"""
             <button id="mediaGroupRenameBtn">分组改名</button>
             <button class="danger" id="mediaGroupDeleteBtn">删除分组</button>
             <button id="mediaAssignGroupBtn">将选中视频移入此分组</button>
+            <select id="mediaCleanupAge"><option value="3">创建 3 天前</option><option value="7">创建 7 天前</option><option value="15">创建 15 天前</option><option value="30" selected>创建 30 天前</option><option value="60">创建 60 天前</option><option value="90">创建 90 天前</option></select>
+            <select id="mediaCleanupUsage"><option value="any">不限制使用记录</option><option value="never">从未开播使用</option><option value="unused">超过所选天数未使用</option></select>
+            <button class="danger" id="mediaCleanupBtn">清理重复视频</button>
           </div>
           <div class="disk-grid" id="mediaDiskList"></div>
           <div class="split">
@@ -1083,6 +1087,9 @@ HTML = r"""
       mediaGroupRenameBtn: document.getElementById("mediaGroupRenameBtn"),
       mediaGroupDeleteBtn: document.getElementById("mediaGroupDeleteBtn"),
       mediaAssignGroupBtn: document.getElementById("mediaAssignGroupBtn"),
+      mediaCleanupAge: document.getElementById("mediaCleanupAge"),
+      mediaCleanupUsage: document.getElementById("mediaCleanupUsage"),
+      mediaCleanupBtn: document.getElementById("mediaCleanupBtn"),
       uploadGroupInput: document.getElementById("uploadGroupInput"),
       mediaDiskList: document.getElementById("mediaDiskList"),
       refreshBtn: document.getElementById("refreshBtn"),
@@ -1690,9 +1697,14 @@ HTML = r"""
             const current = nodeId === String(selectedNodeId);
             const name = item.name || videoPath;
             const copyNames = copies.map((entry) => entry.node_name || entry.node_id).join("、");
+            const ageBase = Number(item.last_used_at || item.created_at || item.modified || 0);
+            const ageDays = ageBase ? Math.max(0, (Date.now() / 1000 - ageBase) / 86400) : 0;
+            const ageTier = Math.floor(ageDays / 3);
+            const nameOpacity = Math.max(0.32, 1 - ageTier * 0.13);
+            const cleanupCandidate = ageTier >= 5;
             return `
-              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-group-id="${escapeHtml(item.group_id || "")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
-                <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""} ${cleanupCandidate ? "cleanup-candidate" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-group-id="${escapeHtml(item.group_id || "")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
+                <span style="opacity:${nameOpacity.toFixed(2)}" title="${escapeHtml(name)}｜冷却 ${ageDays.toFixed(1)} 天｜${cleanupCandidate ? "可人工评估删除" : "活跃"}">${escapeHtml(name)}</span>
                 <span class="muted">${escapeHtml(fmtBytes(item.size || 0))}</span>
                 <span class="muted">${escapeHtml(item.modified_label || "--")}</span>
                 <span title="${escapeHtml(copyNames)}">${escapeHtml(groupName(item.group_id))} · ${copies.length} 副本</span>
@@ -2888,6 +2900,31 @@ HTML = r"""
       await refreshAll();
     }
 
+    async function cleanupDuplicateMedia() {
+      const createdBeforeDays = Number(refs.mediaCleanupAge.value || 30);
+      const usageMode = refs.mediaCleanupUsage.value || "any";
+      const criteria = {
+        created_before_days: createdBeforeDays,
+        unused_days: createdBeforeDays,
+        usage_mode: usageMode,
+      };
+      refs.mediaCleanupBtn.disabled = true;
+      try {
+        const preview = await postJson("/api/media-library/cleanup", { ...criteria, execute: false });
+        if (!preview.ok) return alert(preview.message || "清理预览失败");
+        if (!preview.candidate_count) {
+          return alert("没有符合条件且已通过 SHA-256 验证、保留满 72 小时的重复旧副本。唯一文件不会被系统删除。");
+        }
+        const details = (preview.candidates || []).slice(0, 10).map((item) => `• ${item.filename} @ ${item.node_name}`).join("\n");
+        if (!confirm(`将删除 ${preview.candidate_count} 个重复旧副本，释放约 ${fmtBytes(preview.candidate_bytes)}。\n\n${details}\n\n系统会在删除前再次确认另一份完整副本及 SHA-256；唯一文件绝不删除。是否继续？`)) return;
+        const result = await postJson("/api/media-library/cleanup", { ...criteria, execute: true });
+        alert(`清理完成：删除 ${result.deleted_count || 0} 个重复旧副本。`);
+        await refreshAll();
+      } finally {
+        refs.mediaCleanupBtn.disabled = false;
+      }
+    }
+
     refs.nodeList.addEventListener("click", (event) => {
       const noteButton = event.target.closest("[data-node-note]");
       if (noteButton) {
@@ -3094,6 +3131,7 @@ HTML = r"""
     refs.mediaGroupRenameBtn.addEventListener("click", () => manageMediaGroup("rename"));
     refs.mediaGroupDeleteBtn.addEventListener("click", () => manageMediaGroup("delete"));
     refs.mediaAssignGroupBtn.addEventListener("click", assignSelectedMediaGroup);
+    refs.mediaCleanupBtn.addEventListener("click", cleanupDuplicateMedia);
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.cancelUploadBtn.addEventListener("click", cancelActiveUpload);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
@@ -3467,10 +3505,11 @@ def load_media_groups() -> dict[str, Any]:
         if isinstance(payload, dict):
             payload.setdefault("groups", [])
             payload.setdefault("assignments", {})
+            payload.setdefault("duplicate_retention", [])
             return payload
     except Exception:
         pass
-    return {"groups": [], "assignments": {}}
+    return {"groups": [], "assignments": {}, "duplicate_retention": []}
 
 
 def save_media_groups(payload: dict[str, Any]) -> None:
@@ -3478,7 +3517,92 @@ def save_media_groups(payload: dict[str, Any]) -> None:
     MEDIA_GROUPS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def cleanup_verified_duplicates(
+    metadata: dict[str, Any],
+    *,
+    execute: bool,
+    created_before_days: int = 0,
+    usage_mode: str = "any",
+    unused_days: int = 0,
+) -> dict[str, Any]:
+    now = time.time()
+    nodes = {str(node.get("id") or ""): node for node in load_nodes()}
+    records = list(metadata.get("duplicate_retention") or [])
+    remaining: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    deleted: list[dict[str, Any]] = []
+    for record in records:
+        if now < float(record.get("delete_after") or 0):
+            remaining.append(record)
+            continue
+        old_node = nodes.get(str(record.get("old_node_id") or ""))
+        keep_node = nodes.get(str(record.get("keep_node_id") or ""))
+        filename = str(record.get("filename") or "")
+        expected_hash = str(record.get("sha256") or "")
+        if not old_node or not keep_node or not filename or not expected_hash:
+            record["status"] = "blocked-missing-node-metadata"
+            remaining.append(record)
+            continue
+        old_hash = request_node_media_hash(old_node, filename)
+        keep_hash = request_node_media_hash(keep_node, filename)
+        # Never delete unless two complete copies still exist and both hashes match.
+        if not (
+            old_hash.get("ok") and keep_hash.get("ok")
+            and old_hash.get("sha256") == expected_hash == keep_hash.get("sha256")
+            and int(old_hash.get("size") or 0) == int(keep_hash.get("size") or 0)
+        ):
+            record["status"] = "blocked-hash-or-copy-check"
+            remaining.append(record)
+            continue
+        old_status = request_node_json(old_node, "/api/status", timeout=12)
+        old_video = next((item for item in old_status.get("videos") or [] if str(item.get("name") or "") == filename), {})
+        created_at = float(old_video.get("created_at") or old_video.get("modified") or 0)
+        last_used_at = float(old_video.get("last_used_at") or 0)
+        if created_before_days and (not created_at or now - created_at < created_before_days * 86400):
+            remaining.append(record)
+            continue
+        if usage_mode == "never" and last_used_at:
+            remaining.append(record)
+            continue
+        if usage_mode == "unused" and last_used_at and now - last_used_at < max(1, unused_days) * 86400:
+            remaining.append(record)
+            continue
+        candidate = {
+            "record_id": record.get("id"),
+            "filename": filename,
+            "node_id": str(old_node.get("id") or ""),
+            "node_name": str(old_node.get("name") or old_node.get("id") or "Agent"),
+            "size": int(old_hash.get("size") or 0),
+            "created_at": created_at,
+            "last_used_at": last_used_at,
+            "sha256": expected_hash,
+        }
+        candidates.append(candidate)
+        if execute:
+            result = post_node_json(old_node, "/api/media/delete", {"media": filename}, timeout=60)
+            if result.get("ok"):
+                deleted.append(candidate)
+                continue
+            record["status"] = "delete-failed"
+            record["last_error"] = result.get("message") or "delete failed"
+        remaining.append(record)
+    if execute:
+        metadata["duplicate_retention"] = remaining
+        save_media_groups(metadata)
+    return {
+        "ok": True,
+        "candidates": candidates,
+        "deleted": deleted,
+        "candidate_count": len(candidates),
+        "deleted_count": len(deleted),
+        "candidate_bytes": sum(int(item.get("size") or 0) for item in candidates),
+        "safety": "verified-duplicate-only; never delete the last copy",
+    }
+
+
 def media_library_payload() -> dict[str, Any]:
+    metadata = load_media_groups()
+    cleanup_verified_duplicates(metadata, execute=True)
     metadata = load_media_groups()
     resources: dict[str, dict[str, Any]] = {}
     node_disks: list[dict[str, Any]] = []
@@ -3505,6 +3629,8 @@ def media_library_payload() -> dict[str, Any]:
                 "size": int(video.get("size") or 0),
                 "modified": float(video.get("modified") or 0),
                 "modified_label": str(video.get("modified_label") or "--"),
+                "created_at": float(video.get("created_at") or video.get("modified") or 0),
+                "last_used_at": float(video.get("last_used_at") or 0),
                 "group_id": str((metadata.get("assignments") or {}).get(name) or ""),
                 "copies": [],
             })
@@ -3516,12 +3642,17 @@ def media_library_payload() -> dict[str, Any]:
                 "node_id": str(node.get("id") or ""),
                 "node_name": str(node.get("name") or node.get("id") or "Agent"),
                 "video_path": str(video.get("video_path") or video.get("path") or name),
+                "created_at": float(video.get("created_at") or video.get("modified") or 0),
+                "last_used_at": float(video.get("last_used_at") or 0),
+                "last_used_label": str(video.get("last_used_label") or "从未开播"),
             })
+            item["last_used_at"] = max(float(item.get("last_used_at") or 0), float(video.get("last_used_at") or 0))
     return {
         "ok": True,
         "groups": metadata.get("groups") or [],
         "resources": sorted(resources.values(), key=lambda item: float(item.get("modified") or 0), reverse=True),
         "nodes": node_disks,
+        "duplicate_retention": metadata.get("duplicate_retention") or [],
     }
 
 
@@ -3774,6 +3905,47 @@ def share_task_payload(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def request_node_media_hash(node: dict[str, Any], media: str) -> dict[str, Any]:
+    return post_node_json(node, "/api/media/hash", {"media": media}, timeout=1800)
+
+
+def register_verified_duplicate(source_node: dict[str, Any], target_node: dict[str, Any], filename: str, sha256: str) -> None:
+    metadata = load_media_groups()
+    records = list(metadata.get("duplicate_retention") or [])
+    source_id = str(source_node.get("id") or "")
+    records = [item for item in records if not (
+        str(item.get("old_node_id") or "") == source_id and str(item.get("filename") or "") == filename
+    )]
+    verified_at = time.time()
+    records.append({
+        "id": f"duplicate-{uuid.uuid4().hex[:12]}",
+        "filename": filename,
+        "sha256": sha256,
+        "old_node_id": source_id,
+        "keep_node_id": str(target_node.get("id") or ""),
+        "verified_at": verified_at,
+        "delete_after": verified_at + 3 * 24 * 60 * 60,
+        "status": "waiting-72h",
+    })
+    metadata["duplicate_retention"] = records
+    save_media_groups(metadata)
+
+
+def verify_and_register_copy(source_node: dict[str, Any], target_node: dict[str, Any], filename: str) -> dict[str, Any]:
+    source_hash = request_node_media_hash(source_node, filename)
+    target_hash = request_node_media_hash(target_node, filename)
+    verified = bool(
+        source_hash.get("ok") and target_hash.get("ok") and source_hash.get("sha256")
+        and source_hash.get("sha256") == target_hash.get("sha256")
+        and int(source_hash.get("size") or 0) == int(target_hash.get("size") or 0)
+    )
+    if not verified:
+        post_node_json(target_node, "/api/media/delete", {"media": filename}, timeout=60)
+        return {"ok": False, "message": "复制文件 SHA-256 或大小校验失败，已删除不完整新副本"}
+    register_verified_duplicate(source_node, target_node, filename, str(source_hash["sha256"]))
+    return {"ok": True, "sha256": source_hash["sha256"], "delete_old_after_hours": 72}
+
+
 def run_share_task(
     task_id: str,
     source_node: dict[str, Any],
@@ -3827,6 +3999,10 @@ def run_share_task(
             results.append(result)
             if not result.get("ok"):
                 raise RuntimeError(result.get("message") or f"{target_node_id} 共享失败")
+            verification = verify_and_register_copy(source_node, target_node, filename)
+            result["verification"] = verification
+            if not verification.get("ok"):
+                raise RuntimeError(verification.get("message") or "复制完整性校验失败")
         elapsed = max(0.001, time.time() - started_at)
         task = share_task_snapshot(task_id) or {}
         total = int(task.get("total_bytes") or 0)
@@ -4431,6 +4607,29 @@ def api_media_library_assign():
     metadata["assignments"] = assignments
     save_media_groups(metadata)
     return jsonify({"ok": True, "filename": filename, "group_id": group_id})
+
+
+@APP.post("/api/media-library/cleanup")
+def api_media_library_cleanup():
+    payload = request.get_json(silent=True) or {}
+    try:
+        created_before_days = max(0, int(payload.get("created_before_days") or 0))
+        unused_days = max(0, int(payload.get("unused_days") or 0))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "invalid cleanup age"}), 400
+    usage_mode = str(payload.get("usage_mode") or "any").strip().lower()
+    if usage_mode not in {"any", "never", "unused"}:
+        return jsonify({"ok": False, "message": "invalid usage mode"}), 400
+    execute = bool(payload.get("execute"))
+    metadata = load_media_groups()
+    result = cleanup_verified_duplicates(
+        metadata,
+        execute=execute,
+        created_before_days=created_before_days,
+        usage_mode=usage_mode,
+        unused_days=unused_days,
+    )
+    return jsonify(result)
 
 
 @APP.get("/api/nodes")
