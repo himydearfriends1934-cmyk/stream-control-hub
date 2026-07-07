@@ -183,7 +183,7 @@ The Hub is a coordinator, not the media warehouse. Browser uploads go straight t
 - Agent-to-Agent sharing uses large chunks and retries a small number of times before cleanup.
 - Failed pushes call `/api/upload-chunk/cancel` through the node `base_url`, then close the public window if one was opened.
 - Public routes must pass `/api/upload-probe` and the minimum speed threshold before large chunks are sent.
-- If a public route fails during transfer, the hub closes the public window and continues over the node `base_url` with the same upload id and chunk size.
+- Uploads and Agent-to-Agent sharing are public-only. If no public address is configured, the public probe fails, or a public transfer is interrupted, the operation stops with an explicit error and never falls back to the Tailscale/internal `base_url`.
 - Each push writes a token-free audit event with policy, route, probe, speed, fallback, and cleanup details.
 
 Policy endpoints:

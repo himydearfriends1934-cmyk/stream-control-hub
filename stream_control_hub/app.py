@@ -3456,19 +3456,25 @@ def schedule_hub_upgrade() -> dict[str, Any]:
     return {"unit": unit, "role": "hub", "from_version": local_git_version(), "target_branch": "main"}
 
 
+def is_public_upload_url(value: str) -> bool:
+    try:
+        host = urlparse(value).hostname or ""
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip in TAILSCALE_CGNAT)
+    except ValueError:
+        return bool(host and not host.endswith((".local", ".ts.net", ".beta.tailscale.net")))
+
+
 def node_upload_base_urls(node: dict[str, Any]) -> list[str]:
     values: list[str] = []
     for key in ("upload_base_url", "public_base_url"):
         value = str(node.get(key) or "").strip().rstrip("/")
-        if value:
+        if value and is_public_upload_url(value):
             values.append(value)
     for value in node.get("upload_base_urls") or []:
         value = str(value or "").strip().rstrip("/")
-        if value:
+        if value and is_public_upload_url(value):
             values.append(value)
-    base_url = node_base_url(node)
-    if base_url:
-        values.append(base_url)
     result: list[str] = []
     seen: set[str] = set()
     for value in values:
@@ -3627,7 +3633,9 @@ def run_share_task(
             if not ticket.get("ok"):
                 raise RuntimeError(ticket.get("message") or f"{target_node_id} did not issue an upload ticket")
             upload_urls = node_upload_base_urls(target_node)
-            target_upload_base_urls = upload_urls or [node_base_url(target_node)]
+            if not upload_urls:
+                raise RuntimeError(f"{target_node_id} 没有可用的公网上传地址；禁止通过 Tailscale 内网共享")
+            target_upload_base_urls = upload_urls
             update_share_task(
                 task_id,
                 status="running",
@@ -3695,12 +3703,10 @@ def upload_policy() -> dict[str, Any]:
             "chunk_timeout_seconds": NODE_UPLOAD_TIMEOUT_SECONDS,
             "probe_before_public_upload": True,
             "probe_timeout_seconds": NODE_UPLOAD_PROBE_TIMEOUT_SECONDS,
-            "public_to_internal_fallback": True,
-            "preserve_chunk_size_on_fallback": True,
+            "public_to_internal_fallback": False,
         },
         "speed": {
-            "route_preference": "public-window, public-direct, internal",
-            "internal_chunk_bytes": NODE_UPLOAD_CHUNK_BYTES,
+            "route_preference": "public-window, public-direct",
             "public_chunk_bytes": NODE_PUBLIC_UPLOAD_CHUNK_BYTES,
             "probe_bytes": NODE_UPLOAD_PROBE_BYTES,
             "min_public_upload_bytes_per_second": MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND,
@@ -3713,8 +3719,8 @@ def policy_brief() -> dict[str, Any]:
     return {
         "name": policy["name"],
         "safety": "memory-only-secret/auto-close/cancel-partial/disk-guard",
-        "stability": "probe/retry/public-to-internal-fallback",
-        "speed": "public-first/probe-measured/chunked",
+        "stability": "probe/retry/public-only/no-internal-fallback",
+        "speed": "public-only/probe-measured/chunked",
     }
 
 
@@ -3782,22 +3788,22 @@ def probe_upload_route(route: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "message": str(exc)}
 
 
-def make_internal_upload_route(node: dict[str, Any], warnings: list[str] | None = None) -> dict[str, Any]:
+def make_public_upload_route(node: dict[str, Any], warnings: list[str] | None = None) -> dict[str, Any]:
     base_url = node_base_url(node)
     return {
         "base_url": base_url,
-        "upload_base_url": base_url,
-        "route": "internal",
-        "route_label": "internal",
+        "upload_base_url": "",
+        "route": "public-pending",
+        "route_label": "public only",
         "token": "",
         "headers": node_headers(node),
         "opened_public_window": False,
-        "chunk_bytes": NODE_UPLOAD_CHUNK_BYTES,
+        "chunk_bytes": NODE_PUBLIC_UPLOAD_CHUNK_BYTES,
         "public_status": {},
         "warnings": list(warnings or []),
         "decision_log": [],
         "last_heartbeat_at": 0.0,
-        "probe": {"ok": True, "skipped": True, "message": "internal fallback"},
+        "probe": {"ok": False, "skipped": True, "message": "public route not selected yet"},
         "fallback_from": "",
     }
 
@@ -3814,12 +3820,10 @@ def select_node_upload_route(
         raise ValueError("missing node base_url")
 
     status = request_node_json(node, "/api/public-upload", timeout=10)
-    route = make_internal_upload_route(node)
+    route = make_public_upload_route(node)
     route["public_status"] = public_upload_summary(status)
     if not status.get("ok"):
-        route["warnings"].append(status.get("message") or "public upload status unavailable")
-        route["decision_log"].append("public upload status unavailable; using internal route")
-        return route
+        raise RuntimeError(status.get("message") or "公网上传状态不可用；已禁止使用 Tailscale 内网上传")
 
     public_origin = str(status.get("public_origin") or "").rstrip("/")
     restrict_public = bool(status.get("restrict_public_to_upload"))
@@ -3866,11 +3870,9 @@ def select_node_upload_route(
                     )
                     return route
                 route["warnings"].append(probe.get("message") or "public upload probe failed")
-                route["decision_log"].append("public probe failed; closing public window and using internal route")
+                route["decision_log"].append("public probe failed; internal fallback is disabled")
                 close_node_public_upload(node, route, reason="stream-control-hub-public-probe-failed")
-                fallback_route = make_internal_upload_route(node, route["warnings"])
-                fallback_route["decision_log"] = [*route.get("decision_log", []), "internal fallback selected after failed public probe"]
-                return fallback_route
+                raise RuntimeError(probe.get("message") or "公网线路测速失败；不会回退 Tailscale 内网")
         route["warnings"].append(opened.get("message") or "failed to open public upload window")
         route["decision_log"].append("failed to open public window; considering direct public or internal route")
 
@@ -3880,17 +3882,11 @@ def select_node_upload_route(
             ticket = request_node_upload_ticket(node, upload_id=upload_id, filename=filename, total_size=total_size)
             if not ticket.get("ok"):
                 route["warnings"].append(ticket.get("message") or "failed to issue public upload ticket")
-                route["decision_log"].append("public upload ticket unavailable; using internal route")
-                fallback_route = make_internal_upload_route(node, route["warnings"])
-                fallback_route["decision_log"] = [*route.get("decision_log", []), "internal fallback selected after failed ticket issue"]
-                return fallback_route
+                raise RuntimeError(ticket.get("message") or "无法获取公网上传票据；不会回退 Tailscale 内网")
             ticket_value = str(ticket.get("ticket") or "")
             if not ticket_value:
                 route["warnings"].append("public upload ticket response did not include a ticket")
-                route["decision_log"].append("public upload ticket missing; using internal route")
-                fallback_route = make_internal_upload_route(node, route["warnings"])
-                fallback_route["decision_log"] = [*route.get("decision_log", []), "internal fallback selected after missing ticket"]
-                return fallback_route
+                raise RuntimeError("公网上传票据缺失；不会回退 Tailscale 内网")
             headers = {"X-Upload-Ticket": ticket_value}
             route["token"] = ticket_value
             route["decision_log"].append("public upload ticket issued; probing public route")
@@ -3910,13 +3906,11 @@ def select_node_upload_route(
         route["probe"] = probe
         if not probe.get("ok"):
             route["warnings"].append(probe.get("message") or "public direct probe failed")
-            route["decision_log"].append("direct public probe failed; using internal route")
-            fallback_route = make_internal_upload_route(node, route["warnings"])
-            fallback_route["decision_log"] = [*route.get("decision_log", []), "internal fallback selected after failed direct probe"]
-            return fallback_route
+            route["decision_log"].append("direct public probe failed; internal fallback is disabled")
+            raise RuntimeError(probe.get("message") or "公网线路测速失败；不会回退 Tailscale 内网")
         route["decision_log"].append(f"direct public probe ok at {probe.get('rate_label')}; using direct public route")
     else:
-        route["decision_log"].append("no usable public route selected; using internal route")
+        raise RuntimeError("节点没有可用的公网上传地址；请配置 upload_base_url 或 Agent 公网来源")
     return route
 
 
@@ -3969,10 +3963,6 @@ def close_node_public_upload(node: dict[str, Any], route: dict[str, Any], *, rea
 
 def cancel_node_upload(node: dict[str, Any], upload_id: str) -> dict[str, Any]:
     return post_node_json(node, "/api/upload-chunk/cancel", {"upload_id": upload_id}, timeout=30)
-
-
-def should_fallback_to_internal(route: dict[str, Any]) -> bool:
-    return route.get("route") in {"public-window", "public-direct"} and route.get("upload_base_url") != route.get("base_url")
 
 
 def upload_chunk_with_retries(
@@ -4079,34 +4069,11 @@ def push_media_to_node(node: dict[str, Any], media_path: Path) -> dict[str, Any]
                 chunk_size=chunk_size,
             )
             if not last_payload.get("ok"):
-                if should_fallback_to_internal(route):
-                    fallback_message = last_payload.get("message") or f"chunk {chunk_index + 1} upload failed"
-                    close_node_public_upload(node, route, reason="stream-control-hub-public-transfer-failed")
-                    route = make_internal_upload_route(
-                        node,
-                        [
-                            *(route.get("warnings") or []),
-                            f"public route failed at chunk {chunk_index + 1}: {fallback_message}",
-                        ],
-                    )
-                    route["fallback_from"] = "public"
-                    route["decision_log"].append(
-                        f"public transfer failed at chunk {chunk_index + 1}; switched to internal route"
-                    )
-                    # Keep the original chunk size and total_chunks so the node-side offset check stays consistent.
-                    route["chunk_bytes"] = chunk_size
-                    last_payload = upload_chunk_with_retries(
-                        media_path,
-                        route,
-                        upload_id=upload_id,
-                        chunk_index=chunk_index,
-                        total_chunks=total_chunks,
-                        offset=offset,
-                        total_size=total_size,
-                        chunk_size=chunk_size,
-                    )
-                if not last_payload.get("ok"):
-                    raise RuntimeError(last_payload.get("message") or f"chunk {chunk_index + 1} upload failed")
+                close_node_public_upload(node, route, reason="stream-control-hub-public-transfer-failed")
+                raise RuntimeError(
+                    (last_payload.get("message") or f"公网分片 {chunk_index + 1} 上传失败")
+                    + "；已禁止回退 Tailscale 内网"
+                )
             received_size = max(received_size, int(last_payload.get("received_size") or 0))
 
         if not last_payload.get("complete"):
@@ -4379,9 +4346,15 @@ def api_node_upload_target():
         else ""
     )
     upload_urls = []
-    for url in [discovered_public_url, *node_upload_base_urls(node), base_url]:
-        if url and url not in upload_urls:
+    for url in [discovered_public_url, *node_upload_base_urls(node)]:
+        if url and is_public_upload_url(url) and url not in upload_urls:
             upload_urls.append(url)
+    if not upload_urls:
+        return jsonify({
+            "ok": False,
+            "message": "该节点没有可用的公网上传地址；请配置 upload_base_url，Tailscale 内网上传已禁用",
+            "node_id": node_id,
+        }), 409
     candidates = []
     for url in upload_urls:
         candidates.append({
