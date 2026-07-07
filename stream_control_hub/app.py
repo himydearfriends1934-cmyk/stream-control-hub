@@ -139,6 +139,7 @@ HTML = r"""
     p { color: var(--muted); margin: 5px 0 0; line-height: 1.45; }
     .grid { display: grid; grid-template-columns: minmax(620px, 1.05fr) minmax(540px, 0.95fr); gap: 12px; margin-top: 10px; align-items: start; }
     .left-stack, .side-stack { display: grid; gap: 10px; align-content: start; }
+    .grid > .side-stack { align-self: stretch; grid-template-rows: 1fr; }
     .media-workspace { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(620px, 1.05fr) minmax(540px, 0.95fr); gap: 12px; align-items: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 0.9fr 1.15fr 1.35fr; gap: 10px; }
     .card {
@@ -198,14 +199,15 @@ HTML = r"""
       border: 1px solid rgba(49, 89, 76, 0.85);
       border-radius: 8px;
       max-height: 360px;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       background: rgba(7, 18, 14, 0.66);
     }
     .media-window-head,
     .media-file-row {
       display: grid;
-      grid-template-columns: minmax(180px, 1.35fr) 86px 126px 132px minmax(150px, 1fr) minmax(128px, 0.9fr);
-      gap: 8px;
+      grid-template-columns: minmax(0, 1.7fr) minmax(52px, .55fr) minmax(70px, .72fr) minmax(60px, .65fr) minmax(82px, 1fr) minmax(72px, .82fr);
+      gap: 4px;
       align-items: center;
     }
     .media-window-head {
@@ -264,25 +266,29 @@ HTML = r"""
       min-width: 0;
       padding: 7px 9px;
       border-radius: 999px;
-      font-size: 12px;
+      font-size: 11px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     .quick-group-bar button.active { border-color: rgba(54, 211, 153, 0.95); background: rgba(54, 211, 153, 0.14); }
-    .resource-tool-row { display: grid; grid-template-columns: minmax(150px, 0.65fr) minmax(360px, 2fr) auto; gap: 7px; align-items: center; }
+    .resource-tool-row { display: grid; grid-template-columns: 112px minmax(0, 1fr) auto auto; gap: 7px; align-items: center; }
+    .quick-group-manage { position: relative; }
+    .quick-group-manage-menu { position: absolute; right: 0; top: calc(100% + 5px); z-index: 20; display: flex; gap: 5px; min-width: 142px; padding: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); box-shadow: 0 12px 28px rgba(0,0,0,.35); }
+    .quick-group-manage-menu[hidden] { display: none; }
+    .quick-group-manage-menu button { flex: 1; padding: 7px 8px; font-size: 12px; }
     .resource-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
     .resource-header p { margin: 0; font-size: 12px; }
     .upload-stack { display: grid; gap: 12px; align-content: start; min-width: 0; }
     .node-space-card { padding-bottom: 12px; }
     .node-space-card h2 { margin-bottom: 3px; }
     .node-space-card p { margin: 0 0 9px; font-size: 12px; }
-    .node-space-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 8px; }
-    .node-space-ring-item { min-width: 0; display: grid; justify-items: center; gap: 5px; padding: 9px 6px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; }
+    .node-space-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); grid-auto-rows: 118px; gap: 8px; max-height: 244px; overflow-x: hidden; overflow-y: auto; }
+    .node-space-ring-item { min-width: 0; height: 118px; display: grid; justify-items: center; align-content: center; gap: 4px; padding: 7px 5px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; }
     .node-space-ring-item strong, .node-space-ring-item small { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-space-ring-item small { color: var(--muted); font-size: 11px; }
-    .node-space-ring { width: 72px; height: 72px; display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--accent) calc(var(--disk-percent) * 1%), rgba(255,255,255,.09) 0); }
-    .node-space-ring::before { content: ""; grid-area: 1 / 1; width: 54px; height: 54px; border-radius: 50%; background: var(--panel); }
+    .node-space-ring { width: clamp(58px, 5vw, 70px); height: clamp(58px, 5vw, 70px); display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--accent) calc(var(--disk-percent) * 1%), rgba(255,255,255,.09) 0); }
+    .node-space-ring::before { content: ""; grid-area: 1 / 1; width: 74%; height: 74%; border-radius: 50%; background: var(--panel); }
     .node-space-ring span { grid-area: 1 / 1; z-index: 1; font-size: 13px; font-weight: 900; }
     .node-space-ring.offline { filter: grayscale(1); opacity: .55; }
     .resource-filter-chip {
@@ -305,29 +311,6 @@ HTML = r"""
     .disk-card-head { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
     .disk-bar { height: 8px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.08); }
     .disk-bar > span { display: block; height: 100%; background: linear-gradient(90deg,var(--accent),#4cc9f0); }
-    .media-total-table {
-      display: grid;
-      gap: 0;
-      border: 1px solid rgba(49, 89, 76, 0.75);
-      border-radius: 8px;
-      overflow: auto;
-      max-height: 220px;
-      background: rgba(7, 18, 14, 0.5);
-    }
-    .media-total-head,
-    .media-total-row {
-      display: grid;
-      grid-template-columns: minmax(150px, 1.25fr) 110px 92px 110px minmax(110px, 0.9fr);
-      gap: 8px;
-      align-items: center;
-      padding: 7px 9px;
-      border-bottom: 1px solid rgba(49, 89, 76, 0.42);
-      font-size: 12px;
-    }
-    .media-total-head { position: sticky; top: 0; z-index: 1; color: var(--muted); font-weight: 900; background: rgba(19, 32, 28, 0.98); }
-    .media-total-row:last-child { border-bottom: 0; }
-    .media-total-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-    .media-total-row button { padding: 5px 7px; font-size: 12px; border-radius: 7px; }
     .media-context-menu {
       position: fixed;
       z-index: 100;
@@ -679,9 +662,7 @@ HTML = r"""
     .role-row .row-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .role-group + .role-group { margin-top: 12px; }
     .role-group-title { display: flex; justify-content: space-between; align-items: center; margin: 0 0 6px; color: #d6fff0; }
-    .node-role-summary { display: flex; gap: 7px; margin: 8px 0 10px; }
-    .node-role-count { flex: 1; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: rgba(7, 18, 14, 0.5); text-align: center; font-size: 12px; font-weight: 800; }
-    .node-role-count strong { margin: 0 3px; color: var(--text); font-size: 16px; }
+    .role-group-title .role-count { margin-left: 5px; color: var(--accent); font-size: 13px; }
     .role-row.disabled-role { opacity: 0.58; border-style: dashed; }
     .role-row.disabled-role:hover { opacity: 0.82; }
     .row-actions button.tiny { min-width: 0; padding: 6px 4px; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
@@ -803,7 +784,7 @@ HTML = r"""
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     @media (max-width: 1080px) {
-      .grid, .split, .hero, .node-detail, .bottom-section, .media-workspace, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row, .media-total-head, .media-total-row { grid-template-columns: 1fr; }
+      .grid, .split, .hero, .node-detail, .bottom-section, .media-workspace, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .bottom-section { grid-column: auto; }
       .monitor-card, .node-table-card { min-height: auto; }
       .node-monitor { min-height: 420px; }
@@ -811,8 +792,6 @@ HTML = r"""
       .node-table-head { display: none; }
       .node-row { grid-template-columns: 24px minmax(0, 1fr); }
       .node-state, .row-actions { grid-column: 2; }
-      .media-window-head,
-      .media-file-row { grid-template-columns: minmax(130px, 1.4fr) 74px 116px minmax(82px, 0.8fr); }
       .wizard-grid, .wizard-role-grid, .wizard-existing-grid, .wizard-step-grid, .wizard-actions { grid-template-columns: 1fr; }
     }
   </style>
@@ -949,16 +928,12 @@ HTML = r"""
             </div>
             <span class="pill warn">protected</span>
           </div>
-          <div class="node-role-summary" aria-label="节点角色数量">
-            <span class="node-role-count">Agent <strong id="agentNodeCount">0</strong> 台</span>
-            <span class="node-role-count">Hub <strong id="hubNodeCount">0</strong> 台</span>
-          </div>
           <div class="role-group">
-            <h3 class="role-group-title"><span>Agent 组</span><small>推流 / 媒体 / Agent 更新</small></h3>
+            <h3 class="role-group-title"><span>Agent 组 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>推流 / 媒体 / Agent 更新</small></h3>
             <div class="node-table" id="nodeList">加载中...</div>
           </div>
           <div class="role-group">
-            <h3 class="role-group-title"><span>Hub 组</span><small>控制台 / Hub 更新 / 切换</small></h3>
+            <h3 class="role-group-title"><span>Hub 组 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></h3>
             <div class="node-table" id="hubNodeList">加载中...</div>
           </div>
         </div>
@@ -977,12 +952,18 @@ HTML = r"""
           <div class="resource-tool-row">
             <select id="mediaGroupFilter"><option value="">全部分组</option></select>
             <div class="quick-group-bar" id="quickGroupBar"></div>
+            <div class="quick-group-manage">
+              <button id="quickGroupManageBtn">分组增减</button>
+              <div class="quick-group-manage-menu" id="quickGroupManageMenu" hidden>
+                <button id="quickGroupCreateBtn">＋增加</button>
+                <button id="quickGroupDeleteBtn">－减少</button>
+              </div>
+            </div>
             <button id="resourceMoreBtn">其他功能</button>
           </div>
           <div class="disk-grid" id="mediaDiskList" hidden></div>
           <div class="resource-filter-chip" id="resourceFilterChip" hidden></div>
           <div class="media-list" id="mediaList">加载中...</div>
-          <div class="media-total-table" id="mediaTotalTable"></div>
           <div class="media-context-menu" id="mediaContextMenu">
             <button data-media-menu-action="property">属性</button>
             <button data-media-menu-action="inspect">查看详情</button>
@@ -1213,7 +1194,6 @@ HTML = r"""
       themeSelect: document.getElementById("themeSelect"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
-      mediaTotalTable: document.getElementById("mediaTotalTable"),
       nodeSpaceRings: document.getElementById("nodeSpaceRings"),
       mediaContextMenu: document.getElementById("mediaContextMenu"),
       mediaSendTargets: document.getElementById("mediaSendTargets"),
@@ -1221,6 +1201,10 @@ HTML = r"""
       mediaGroupTargets: document.getElementById("mediaGroupTargets"),
       mediaGroupFilter: document.getElementById("mediaGroupFilter"),
       quickGroupBar: document.getElementById("quickGroupBar"),
+      quickGroupManageBtn: document.getElementById("quickGroupManageBtn"),
+      quickGroupManageMenu: document.getElementById("quickGroupManageMenu"),
+      quickGroupCreateBtn: document.getElementById("quickGroupCreateBtn"),
+      quickGroupDeleteBtn: document.getElementById("quickGroupDeleteBtn"),
       resourceMoreBtn: document.getElementById("resourceMoreBtn"),
       resourceToolsModal: document.getElementById("resourceToolsModal"),
       resourceToolsClose: document.getElementById("resourceToolsClose"),
@@ -1293,6 +1277,7 @@ HTML = r"""
     let mediaLibrary = { groups: [], resources: [], nodes: [] };
     let openResourceNodeId = "";
     let resourceTableFilters = { name: "", size: "", age: "", group: "", copyNode: "", ownerNode: "" };
+    let resourceNameFilterTimer = null;
     const QUICK_GROUP_LIMIT = 6;
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
@@ -1810,30 +1795,6 @@ HTML = r"""
       return (item.copies || []).some((copy) => String(copy.node_id || "") === String(nodeId));
     }
 
-    function renderMediaTotalTable(resources) {
-      const all = [...(resources || [])].sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
-      refs.mediaTotalTable.innerHTML = `
-        <div class="media-toolbar" style="padding:8px 9px;">
-          <strong>资源总表</strong>
-          <small>全部 ${all.length} 个视频，不受上方节点/分组筛选影响。</small>
-        </div>
-        <div class="media-total-head">
-          <span>文件名</span><span>分组</span><span>副本</span><span>大小</span><span>最近上传</span>
-        </div>
-        ${all.length ? all.map((item) => {
-          const copies = item.copies || [];
-          const copyNames = copies.map((entry) => entry.node_name || entry.node_id).join("、");
-          return `<div class="media-total-row" title="${escapeHtml(copyNames)}">
-            <span>${escapeHtml(item.name || "--")}</span>
-            <span>${escapeHtml(mediaGroupName(item.group_id))}</span>
-            <span>${copies.length} 节点</span>
-            <span>${escapeHtml(fmtBytes(item.size || 0))}</span>
-            <span>${escapeHtml(item.modified_label || "--")}</span>
-          </div>`;
-        }).join("") : `<div class="empty-state">暂无视频资源。</div>`}
-      `;
-    }
-
     function renderNodeSpaceRings(nodeDisks) {
       if (!nodeDisks.length) {
         refs.nodeSpaceRings.innerHTML = `<div class="muted">暂无 Agent 磁盘数据。</div>`;
@@ -1884,7 +1845,6 @@ HTML = r"""
       refs.resourceFilterChip.innerHTML = openedNode
         ? `<span>正在查看：${escapeHtml(openedNode.node_name)} · ${entries.length} 个视频</span><button data-clear-resource-node>显示全部资源</button>`
         : `<span>双击容量条打开节点资源；当前显示全部节点。</span>`;
-      renderMediaTotalTable(allResources);
       if (!entries.length) {
         refs.mediaList.innerHTML = `<div class="empty-state">当前筛选下没有视频资源。</div>`;
         return;
@@ -1933,6 +1893,10 @@ HTML = r"""
     function renderQuickGroups(groups) {
       const visible = groups.slice(0, QUICK_GROUP_LIMIT);
       refs.quickGroupBar.style.setProperty("--quick-group-count", String(Math.max(1, visible.length)));
+      if (!visible.length) {
+        refs.quickGroupBar.innerHTML = `<span class="muted">暂无快捷分组</span>`;
+        return;
+      }
       refs.quickGroupBar.innerHTML = visible.map((group, index) => {
         const active = String(refs.mediaGroupFilter.value || "") === String(group.id);
         return `<button class="${active ? "active" : ""}" data-quick-group-index="${index}" data-quick-group-id="${escapeHtml(group.id)}" title="右键改名">${escapeHtml(group.name)}</button>`;
@@ -1965,12 +1929,11 @@ HTML = r"""
       return true;
     }
 
-    function renderMediaTotalTable(resources) {
-      const totalCopies = (resources || []).reduce((sum, item) => sum + (item.copies || []).length, 0);
-      refs.mediaTotalTable.innerHTML = `<div class="media-toolbar" style="padding:8px 9px;">
-        <strong>资源总表</strong>
-        <small>当前筛选 ${resources.length} 个视频，合计 ${totalCopies} 个节点副本。</small>
-      </div>`;
+    function clearResourceFilters() {
+      resourceTableFilters = { name: "", size: "", age: "", group: "", copyNode: "", ownerNode: "" };
+      openResourceNodeId = "";
+      refs.mediaGroupFilter.value = "";
+      renderMedia();
     }
 
     function renderMedia() {
@@ -2003,21 +1966,22 @@ HTML = r"""
       const selectedGroupOptions = allGroupOptions.replace('value="' + escapeHtml(resourceTableFilters.group) + '"', 'value="' + escapeHtml(resourceTableFilters.group) + '" selected');
       const selectedCopyNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.copyNode) + '"', 'value="' + escapeHtml(resourceTableFilters.copyNode) + '" selected');
       const selectedOwnerNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.ownerNode) + '"', 'value="' + escapeHtml(resourceTableFilters.ownerNode) + '" selected');
-      renderMediaTotalTable(allResources);
+      const resourceNameOptions = allResources.map((item) => `<option value="${escapeHtml(item.name || "")}"></option>`).join("");
       refs.mediaList.innerHTML = `
         <div class="media-toolbar">
           <strong>所有节点的所有视频</strong>
-          <small>共 ${entries.length} 个。表头可筛选；右键可查看属性、移动分组、复制/移动到节点。</small>
+          <span><small>共 ${entries.length} 个。表头可筛选；右键可操作。</small> <button class="tiny" data-clear-resource-filters>全部资源</button></span>
         </div>
         <div class="media-window">
           <div class="media-window-head">
-            <label>文件名<input data-resource-filter="name" type="search" value="${escapeHtml(resourceTableFilters.name)}" placeholder="搜索文件"></label>
+            <label>文件名<input data-resource-filter="name" list="resourceNameOptions" type="search" value="${escapeHtml(resourceTableFilters.name)}" placeholder="输入或点选"></label>
             <label>大小<select data-resource-filter="size"><option value="">全部</option><option value="small" ${resourceTableFilters.size === "small" ? "selected" : ""}>小于500M</option><option value="medium" ${resourceTableFilters.size === "medium" ? "selected" : ""}>500M-2G</option><option value="large" ${resourceTableFilters.size === "large" ? "selected" : ""}>大于2G</option></select></label>
             <label>上传时间<select data-resource-filter="age"><option value="">全部</option><option value="7" ${resourceTableFilters.age === "7" ? "selected" : ""}>近7天</option><option value="30" ${resourceTableFilters.age === "30" ? "selected" : ""}>近30天</option><option value="90" ${resourceTableFilters.age === "90" ? "selected" : ""}>近90天</option></select></label>
             <label>分组<select data-resource-filter="group">${selectedGroupOptions}</select></label>
             <label>副本节点<select data-resource-filter="copyNode">${selectedCopyNodeOptions}</select></label>
             <label>归属节点<select data-resource-filter="ownerNode">${selectedOwnerNodeOptions}</select></label>
           </div>
+          <datalist id="resourceNameOptions">${resourceNameOptions}</datalist>
           ${entries.length ? entries.map((item) => {
             const copies = item.copies || [];
             const copy = resourceOwnerCopy(item);
@@ -2044,31 +2008,6 @@ HTML = r"""
             `;
           }).join("") : `<div class="empty-state">当前筛选下没有视频资源。</div>`}
         </div>
-      `;
-    }
-
-    function renderMediaTotalTable(resources) {
-      const all = [...(resources || [])].sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
-      const totalCopies = all.reduce((sum, item) => sum + (item.copies || []).length, 0);
-      refs.mediaTotalTable.innerHTML = `
-        <div class="media-toolbar" style="padding:8px 9px;">
-          <strong>资源总表</strong>
-          <small>全部 ${all.length} 个视频，合计 ${totalCopies} 个节点副本。</small>
-        </div>
-        <div class="media-total-head">
-          <span>文件名</span><span>分组</span><span>副本</span><span>大小</span><span>最近上传</span>
-        </div>
-        ${all.length ? all.map((item) => {
-          const copies = item.copies || [];
-          const copyNames = copies.map((entry) => entry.node_name || entry.node_id).join("、");
-          return `<div class="media-total-row" title="${escapeHtml(copyNames || "--")}">
-            <span>${escapeHtml(item.name || "--")}</span>
-            <span>${escapeHtml(mediaGroupName(item.group_id))}</span>
-            <span>${copies.length} 节点</span>
-            <span>${escapeHtml(fmtBytes(item.size || 0))}</span>
-            <span>${escapeHtml(item.modified_label || "--")}</span>
-          </div>`;
-        }).join("") : `<div class="empty-state">暂无视频资源。</div>`}
       `;
     }
 
@@ -2317,9 +2256,10 @@ HTML = r"""
         : "等待选择节点";
       refs.streamVideoSelect.innerHTML = videos.length ? videos.map((item) => {
         const localCopy = (item.copies || []).find((copy) => String(copy.node_id) === String(node?.id || ""));
+        const sourceCopy = localCopy || (item.copies || [])[0] || {};
         const value = localCopy?.video_path || item.name;
         const copyHint = localCopy ? "本机已有" : "开播前自动复制";
-        return `<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}">[${escapeHtml(groupName(item.group_id))}] ${escapeHtml(item.name)} · ${copyHint} (${escapeHtml(fmtBytes(item.size || 0))})</option>`;
+        return `<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}" data-media-local="${localCopy ? "1" : "0"}" data-source-node-id="${escapeHtml(sourceCopy.node_id || "")}">[${escapeHtml(groupName(item.group_id))}] ${escapeHtml(item.name)} · ${copyHint} (${escapeHtml(fmtBytes(item.size || 0))})</option>`;
       }).join("") : `<option value="">媒体库暂无视频，请先上传</option>`;
       if (previousLibraryName) {
         const option = [...refs.streamVideoSelect.options].find((item) => item.dataset.libraryName === previousLibraryName);
@@ -2340,13 +2280,16 @@ HTML = r"""
     }
 
     function streamPayload({ includeKey = true } = {}) {
+      const selectedMediaOption = refs.streamVideoSelect.selectedOptions[0];
       const payload = {
         node_id: selectedNodeId,
         stream_url: refs.streamUrlInput.value.trim(),
         stream_key: includeKey ? refs.streamKeyInput.value.trim() : "",
         youtube_stream_id: refs.youtubeStreamSelect.value,
         video_path: refs.streamVideoSelect.value,
-        library_media_name: refs.streamVideoSelect.selectedOptions[0]?.dataset.libraryName || "",
+        library_media_name: selectedMediaOption?.dataset.libraryName || "",
+        media_local: selectedMediaOption?.dataset.mediaLocal === "1",
+        source_node_id: selectedMediaOption?.dataset.sourceNodeId || "",
         copy_mode: refs.tuneBox.dataset.copyMode === "1",
         adaptive_mode: refs.adaptiveModeInput.value || "auto",
         stream_output_mode: refs.streamOutputModeInput.value || "direct",
@@ -2949,6 +2892,42 @@ HTML = r"""
       log("已应用智能调优推荐参数到开播表单");
     }
 
+    async function ensureSmartStartMedia(payload) {
+      if (!payload.library_media_name || payload.media_local) return { ok: true, copied: false };
+      if (!payload.source_node_id) throw new Error(`媒体库没有可用源副本：${payload.library_media_name}`);
+      refs.tuneBox.textContent = `目标节点没有 ${payload.library_media_name}，正在创建自动复制任务...`;
+      const task = await postJson("/api/media/share", {
+        source_node_id: payload.source_node_id,
+        target_node_ids: [payload.node_id],
+        media: payload.library_media_name,
+      });
+      if (!task.ok || !task.task_id) throw new Error(task.message || "自动复制任务创建失败");
+      const deadline = Date.now() + 30 * 60 * 1000;
+      while (Date.now() < deadline) {
+        const response = await fetch(`/api/media/share/status/${encodeURIComponent(task.task_id)}`);
+        const status = await response.json();
+        const percent = Math.max(0, Math.min(100, Number(status.percent || 0)));
+        refs.tuneBox.textContent = [
+          `正在把 ${payload.library_media_name} 复制到 ${selectedNode()?.name || payload.node_id}`,
+          `进度：${percent.toFixed(1)}%`,
+          status.average_bps ? `平均速度：${fmtBytes(status.average_bps)}/s` : "正在建立传输...",
+          status.message || "请稍候，复制完成后会自动启动推流。",
+        ].join("\n");
+        renderTransfer({
+          status: status.status === "failed" ? "failed" : "uploading",
+          badge: status.status === "failed" ? "失败" : "自动复制",
+          title: `开播前复制 · ${payload.library_media_name}`,
+          target: selectedNode()?.name || payload.node_id,
+          percent,
+          message: status.message || "复制完成后自动开播",
+        });
+        if (status.status === "done") return { ok: true, copied: true, task_id: task.task_id };
+        if (status.status === "failed" || status.ok === false) throw new Error(status.message || "自动复制失败");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      throw new Error("自动复制等待超时，请检查节点网络后重试");
+    }
+
     async function smartStart() {
       const payload = streamPayload({ includeKey: true });
       const relayMode = payload.stream_output_mode === "local_relay";
@@ -2956,16 +2935,22 @@ HTML = r"""
       const targetMissing = (!relayMode && !youtubeApiMode && !payload.stream_key)
         || (youtubeApiMode && !payload.youtube_stream_id);
       if (!payload.node_id || !payload.video_path || targetMissing) {
-        refs.tuneBox.textContent = relayMode
-          ? "请先选择节点和服务器视频，并确认本地中继可用。"
-          : youtubeApiMode
-            ? "请先通过 YouTube 向导授权频道并选择直播流。"
-            : "请先选择节点、服务器视频，并粘贴 YouTube 直播码。";
+        const missing = [];
+        if (!payload.node_id) missing.push("目标 Agent");
+        if (!payload.video_path) missing.push("服务器视频");
+        if (!relayMode && !youtubeApiMode && !payload.stream_key) missing.push("直播码");
+        if (youtubeApiMode && !payload.youtube_stream_id) missing.push("YouTube 直播流");
+        refs.tuneBox.textContent = `无法启动：还缺少 ${missing.join("、")}。`;
         return;
       }
       refs.smartStartBtn.disabled = true;
       refs.tuneBox.textContent = "正在启动 Smart Start：会在选中节点停止重复推流，并启动一个干净 FFmpeg。";
       try {
+        const mediaResult = await ensureSmartStartMedia(payload);
+        if (mediaResult.copied) {
+          refs.tuneBox.textContent = "媒体复制完成，正在刷新节点并启动 FFmpeg...";
+          await refreshAll();
+        }
         if (!lastTuneRecommendation?.ok) {
           const tune = await postNodeAction("/api/nodes/stream/recommend", { ...payload, stream_key: "" });
           if (tune.ok) {
@@ -2987,6 +2972,11 @@ HTML = r"""
           duplicate_processes: data.result?.duplicate_processes,
         }, null, 2);
         await refreshAll();
+      } catch (error) {
+        const message = friendlyError(error, "Smart Start 启动失败");
+        refs.tuneBox.textContent = `Smart Start 失败：${message}`;
+        renderTransfer({ status: "failed", badge: "失败", title: "Smart Start 未启动", message });
+        log(`Smart Start 失败：${message}`);
       } finally {
         refs.smartStartBtn.disabled = false;
       }
@@ -3300,6 +3290,23 @@ HTML = r"""
       renderMedia();
     }
 
+    function setQuickGroupManageOpen(open) {
+      refs.quickGroupManageMenu.hidden = !open;
+    }
+
+    async function deleteQuickGroup() {
+      const groups = mediaLibrary.groups || [];
+      const selected = refs.mediaGroupFilter.value;
+      const current = groups.find((item) => item.id === selected) || groups[groups.length - 1];
+      if (!current) return alert("当前没有可减少的分组。");
+      if (!confirm(`删除分组“${current.name}”？视频文件不会被删除，将回到未分组。`)) return;
+      const data = await postJson("/api/media-groups", { action: "delete", group_id: current.id, name: "" });
+      if (!data.ok) return alert(data.message || "分组删除失败");
+      refs.mediaGroupFilter.value = "";
+      resourceTableFilters.group = "";
+      await refreshAll();
+    }
+
     async function assignSelectedMediaGroup() {
       const filename = selectedMediaName();
       if (!filename) return alert("请先选择一个视频。");
@@ -3471,6 +3478,10 @@ HTML = r"""
     });
     refs.mediaList.addEventListener("click", (event) => {
       hideMediaMenu();
+      if (event.target.closest("[data-clear-resource-filters]")) {
+        clearResourceFilters();
+        return;
+      }
       const row = event.target.closest("[data-media-row]");
       if (!row) return;
       selectMediaRow(row);
@@ -3480,6 +3491,19 @@ HTML = r"""
       if (!field) return;
       resourceTableFilters[field] = event.target.value || "";
       if (field === "group") refs.mediaGroupFilter.value = resourceTableFilters.group;
+      if (field === "name") {
+        clearTimeout(resourceNameFilterTimer);
+        const caret = event.target.selectionStart ?? event.target.value.length;
+        resourceNameFilterTimer = setTimeout(() => {
+          renderMedia();
+          const input = refs.mediaList.querySelector('[data-resource-filter="name"]');
+          if (input) {
+            input.focus();
+            input.setSelectionRange(caret, caret);
+          }
+        }, 180);
+        return;
+      }
       renderMedia();
     });
     refs.mediaList.addEventListener("change", (event) => {
@@ -3547,6 +3571,7 @@ HTML = r"""
     });
     document.addEventListener("click", (event) => {
       if (!event.target.closest("#mediaContextMenu")) hideMediaMenu();
+      if (!event.target.closest(".quick-group-manage")) setQuickGroupManageOpen(false);
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") hideMediaMenu();
@@ -3607,6 +3632,18 @@ HTML = r"""
     refs.mediaGroupFilter.addEventListener("change", () => {
       resourceTableFilters.group = refs.mediaGroupFilter.value || "";
       renderMedia();
+    });
+    refs.quickGroupManageBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setQuickGroupManageOpen(refs.quickGroupManageMenu.hidden);
+    });
+    refs.quickGroupCreateBtn.addEventListener("click", () => {
+      setQuickGroupManageOpen(false);
+      manageMediaGroup("create");
+    });
+    refs.quickGroupDeleteBtn.addEventListener("click", () => {
+      setQuickGroupManageOpen(false);
+      deleteQuickGroup();
     });
     refs.resourceMoreBtn.addEventListener("click", () => setResourceToolsOpen(true));
     refs.resourceToolsClose.addEventListener("click", () => setResourceToolsOpen(false));
