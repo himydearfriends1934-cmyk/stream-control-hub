@@ -62,6 +62,7 @@ MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND = int(os.environ.get("STREAM_HUB_MIN_PUBLIC_U
 MIN_FREE_AFTER_UPLOAD_BYTES = int(os.environ.get("STREAM_HUB_MIN_FREE_AFTER_UPLOAD_BYTES", str(2 * 1024 ** 3)))
 UPLOAD_POLICY_NAME = os.environ.get("STREAM_HUB_UPLOAD_POLICY_NAME", "safe-stable-fast-v1")
 PUSH_AUDIT_LOG = DATA_DIR / "push_audit.jsonl"
+HUB_SETTINGS_FILE = DATA_DIR / "hub-settings.json"
 PUSH_AUDIT_LOG_MAX_BYTES = int(os.environ.get("STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYTES", str(5 * 1024 ** 2)))
 CONTROL_TOKEN = os.environ.get("STREAM_HUB_CONTROL_TOKEN", "").strip()
 TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_HUB_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
@@ -934,6 +935,13 @@ HTML = r"""
         </div>
         <button class="wizard-close" id="roleSettingsClose" aria-label="关闭">×</button>
       </div>
+      <div class="wizard-existing-grid">
+        <div class="wizard-field">
+          <label>机器显示名称</label>
+          <input id="roleSettingsNameInput" type="text" maxlength="80" placeholder="输入容易识别的名称">
+        </div>
+        <button id="roleSettingsSaveNameBtn">保存名称</button>
+      </div>
       <div class="role-settings-status" id="roleSettingsActions"></div>
       <p>保护规则：点击操作后还会显示当前状态与影响范围，必须再次确认才会执行。</p>
     </div>
@@ -1042,6 +1050,8 @@ HTML = r"""
       roleSettingsTitle: document.getElementById("roleSettingsTitle"),
       roleSettingsSummary: document.getElementById("roleSettingsSummary"),
       roleSettingsActions: document.getElementById("roleSettingsActions"),
+      roleSettingsNameInput: document.getElementById("roleSettingsNameInput"),
+      roleSettingsSaveNameBtn: document.getElementById("roleSettingsSaveNameBtn"),
       roleSettingsClose: document.getElementById("roleSettingsClose"),
       editableHubTitle: document.getElementById("editableHubTitle"),
       themeSelect: document.getElementById("themeSelect"),
@@ -2729,6 +2739,7 @@ HTML = r"""
       const node = nodes.find((item) => String(item.id) === roleSettingsNodeId);
       if (!node) return setRoleSettingsOpen(false);
       refs.roleSettingsTitle.textContent = `${node.name || node.id} · 角色设置`;
+      refs.roleSettingsNameInput.value = node.name || node.id;
       refs.roleSettingsSummary.textContent = "角色维护功能不会直接执行；选择后还需通过保护确认。";
       refs.roleSettingsActions.innerHTML = ["agent", "hub"].map((role) => {
         const info = node.roles?.[role] || {};
@@ -2768,6 +2779,23 @@ HTML = r"""
         await refreshAll();
       } else if (sourceButton) {
         sourceButton.disabled = false;
+      }
+    }
+
+    async function saveRoleSettingsName() {
+      const name = refs.roleSettingsNameInput.value.replace(/\s+/g, " ").trim().slice(0, 80);
+      if (!roleSettingsNodeId || !name) return;
+      refs.roleSettingsSaveNameBtn.disabled = true;
+      try {
+        const data = await postJson("/api/nodes/name", { node_id: roleSettingsNodeId, name });
+        if (!data.ok) throw new Error(data.message || "名称保存失败");
+        await refreshAll();
+        setRoleSettingsOpen(true, roleSettingsNodeId);
+        log(`节点名称已更新：${name}`);
+      } catch (error) {
+        log(friendlyError(error, "节点名称保存失败"));
+      } finally {
+        refs.roleSettingsSaveNameBtn.disabled = false;
       }
     }
 
@@ -2851,6 +2879,10 @@ HTML = r"""
       if (!button) return;
       handleRoleAction(button.dataset.roleAction, button.dataset.settingsRole, roleSettingsNodeId, button);
     });
+    refs.roleSettingsSaveNameBtn.addEventListener("click", saveRoleSettingsName);
+    refs.roleSettingsNameInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") saveRoleSettingsName();
+    });
     refs.mediaList.addEventListener("click", (event) => {
       hideMediaMenu();
       const row = event.target.closest("[data-media-row]");
@@ -2926,16 +2958,35 @@ HTML = r"""
       localStorage.setItem(THEME_STORAGE_KEY, selected);
     }
 
-    function saveCustomTitle() {
+    async function saveCustomTitle() {
       const title = refs.editableHubTitle.textContent.replace(/\s+/g, " ").trim().slice(0, 80) || "Stream Control Hub";
       refs.editableHubTitle.textContent = title;
       document.title = title;
       localStorage.setItem(TITLE_STORAGE_KEY, title);
+      try {
+        await postJson("/api/settings", { hub_name: title });
+      } catch (error) {
+        log(friendlyError(error, "Hub 名称保存失败"));
+      }
+    }
+
+    async function loadHubSettings() {
+      try {
+        const resp = await fetch("/api/settings");
+        const data = await resp.json();
+        const title = String(data.hub_name || "").trim();
+        if (title) {
+          refs.editableHubTitle.textContent = title;
+          document.title = title;
+          localStorage.setItem(TITLE_STORAGE_KEY, title);
+        }
+      } catch (_) {}
     }
 
     applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || "forest");
     refs.editableHubTitle.textContent = localStorage.getItem(TITLE_STORAGE_KEY) || "Stream Control Hub";
     document.title = refs.editableHubTitle.textContent;
+    loadHubSettings();
     refs.themeSelect.addEventListener("change", () => applyTheme(refs.themeSelect.value));
     refs.editableHubTitle.addEventListener("blur", saveCustomTitle);
     refs.editableHubTitle.addEventListener("keydown", (event) => {
@@ -3295,6 +3346,20 @@ def load_nodes() -> list[dict[str, Any]]:
 def save_nodes(nodes: list[dict[str, Any]]) -> None:
     ensure_dirs()
     NODES_FILE.write_text(json.dumps(nodes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_hub_settings() -> dict[str, Any]:
+    ensure_dirs()
+    try:
+        payload = json.loads(HUB_SETTINGS_FILE.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_hub_settings(settings: dict[str, Any]) -> None:
+    ensure_dirs()
+    HUB_SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def node_by_id(node_id: str) -> dict[str, Any] | None:
@@ -4155,6 +4220,26 @@ def list_media() -> list[dict[str, Any]]:
     return items
 
 
+@APP.get("/api/settings")
+def api_hub_settings():
+    settings = load_hub_settings()
+    return jsonify({"ok": True, "hub_name": str(settings.get("hub_name") or "Stream Control Hub")})
+
+
+@APP.post("/api/settings")
+def api_save_hub_settings():
+    payload = request.get_json(silent=True) or {}
+    hub_name = " ".join(str(payload.get("hub_name") or "").split()).strip()
+    if not hub_name:
+        return jsonify({"ok": False, "message": "Hub name is required"}), 400
+    if len(hub_name) > 80:
+        return jsonify({"ok": False, "message": "Hub name is limited to 80 characters"}), 400
+    settings = load_hub_settings()
+    settings["hub_name"] = hub_name
+    save_hub_settings(settings)
+    return jsonify({"ok": True, "hub_name": hub_name})
+
+
 @APP.get("/api/nodes")
 def api_nodes():
     result = []
@@ -4194,6 +4279,24 @@ def api_node_note():
                 node.pop("note", None)
             save_nodes(nodes)
             return jsonify({"ok": True, "node_id": node_id, "note": note})
+    return jsonify({"ok": False, "message": "node not found"}), 404
+
+
+@APP.post("/api/nodes/name")
+def api_node_name():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    name = " ".join(str(payload.get("name") or "").split()).strip()
+    if not name:
+        return jsonify({"ok": False, "message": "node name is required"}), 400
+    if len(name) > 80:
+        return jsonify({"ok": False, "message": "node name is limited to 80 characters"}), 400
+    nodes = load_nodes()
+    for node in nodes:
+        if str(node.get("id") or "") == node_id:
+            node["name"] = name
+            save_nodes(nodes)
+            return jsonify({"ok": True, "node_id": node_id, "name": name})
     return jsonify({"ok": False, "message": "node not found"}), 404
 
 
