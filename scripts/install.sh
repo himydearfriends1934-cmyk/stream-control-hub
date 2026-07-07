@@ -2,6 +2,8 @@
 set -eu
 
 REPO_RAW_URL="${REPO_RAW_URL:-https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main}"
+REPO_CONTENTS_API="${REPO_CONTENTS_API:-https://api.github.com/repos/himydearfriends1934-cmyk/stream-control-hub/contents}"
+BRANCH="${BRANCH:-main}"
 HUB_INSTALL_DIR="${HUB_INSTALL_DIR:-/opt/stream-control-hub}"
 AGENT_INSTALL_DIR="${AGENT_INSTALL_DIR:-/opt/stream-control-hub-agent}"
 CHOICE="${CHOICE:-${STREAM_CONTROL_CHOICE:-}}"
@@ -25,6 +27,21 @@ fetch() {
     curl -fsSL --retry 3 --connect-timeout 15 "$url" -o "$output"
   elif command -v wget >/dev/null 2>&1; then
     wget -q --tries=3 --timeout=15 "$url" -O "$output"
+  else
+    echo "curl or wget is required." >&2; exit 1
+  fi
+}
+
+fetch_repo_script() {
+  script_name="$1"; output="$2"
+  api_url="$REPO_CONTENTS_API/scripts/$script_name?ref=$BRANCH&ts=$(date +%s)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --connect-timeout 15 \
+      -H "Accept: application/vnd.github.raw+json" \
+      -H "Cache-Control: no-cache" \
+      "$api_url" -o "$output"
+  elif command -v wget >/dev/null 2>&1; then
+    fetch "$REPO_RAW_URL/scripts/$script_name?ts=$(date +%s)" "$output"
   else
     echo "curl or wget is required." >&2; exit 1
   fi
@@ -80,7 +97,8 @@ confirm_remove_data() {
 run_remote_script() {
   script_name="$1"; shift
   script_path="$TMP_DIR/$script_name"
-  fetch "$REPO_RAW_URL/scripts/$script_name" "$script_path"
+  echo "Downloading latest $script_name from GitHub ($BRANCH)..."
+  fetch_repo_script "$script_name" "$script_path"
   chmod 700 "$script_path"
   env "$@" sh "$script_path"
 }
@@ -98,7 +116,7 @@ configure_tailscale() {
     run_remote_script tailscale-install.sh TAILSCALE_AUTH_KEY="$auth_key" TAILSCALE_HOSTNAME="${TAILSCALE_HOSTNAME:-stream-control-node}"
   else
     helper_path="$TMP_DIR/tailscale-install.sh"
-    fetch "$REPO_RAW_URL/scripts/tailscale-install.sh" "$helper_path"
+    fetch_repo_script tailscale-install.sh "$helper_path"
     chmod 700 "$helper_path"
     sh "$helper_path" install
     echo "Tailscale installed/repaired. Run option 7 again with a one-time auth key to connect this device."
