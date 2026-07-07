@@ -139,6 +139,7 @@ HTML = r"""
     p { color: var(--muted); margin: 5px 0 0; line-height: 1.45; }
     .grid { display: grid; grid-template-columns: minmax(620px, 1.05fr) minmax(540px, 0.95fr); gap: 12px; margin-top: 10px; align-items: start; }
     .left-stack, .side-stack { display: grid; gap: 10px; align-content: start; }
+    .media-workspace { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(620px, 1.25fr) minmax(360px, 0.75fr); gap: 12px; align-items: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 0.9fr 1.15fr 1.35fr; gap: 10px; }
     .card {
       border: 1px solid var(--line);
@@ -203,7 +204,7 @@ HTML = r"""
     .media-window-head,
     .media-file-row {
       display: grid;
-      grid-template-columns: minmax(150px, 1.35fr) 82px 132px minmax(92px, 0.75fr);
+      grid-template-columns: minmax(180px, 1.35fr) 86px 126px 132px minmax(150px, 1fr) minmax(128px, 0.9fr);
       gap: 8px;
       align-items: center;
     }
@@ -218,6 +219,9 @@ HTML = r"""
       background: rgba(19, 32, 28, 0.98);
       border-bottom: 1px solid rgba(49, 89, 76, 0.7);
     }
+    .media-window-head label { display: grid; gap: 4px; }
+    .media-window-head input,
+    .media-window-head select { width: 100%; min-width: 0; padding: 5px 6px; border-radius: 7px; font-size: 12px; }
     .media-file-row {
       width: 100%;
       padding: 7px 9px;
@@ -247,6 +251,10 @@ HTML = r"""
     .media-file-row .muted { color: var(--muted); font-size: 12px; }
     .media-library-tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .media-library-tools select { min-width: 130px; flex: 1; }
+    .quick-group-bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .quick-group-bar button { padding: 7px 9px; border-radius: 999px; font-size: 12px; }
+    .quick-group-bar button.active { border-color: rgba(54, 211, 153, 0.95); background: rgba(54, 211, 153, 0.14); }
+    .resource-tool-row { display: grid; grid-template-columns: minmax(180px, 0.85fr) minmax(240px, 1.05fr) minmax(220px, 1fr) auto auto auto; gap: 7px; align-items: center; }
     .resource-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
     .resource-header p { margin: 0; font-size: 12px; }
     .resource-filter-chip {
@@ -263,7 +271,7 @@ HTML = r"""
       background: rgba(54, 211, 153, 0.06);
     }
     .resource-filter-chip button { padding: 5px 7px; font-size: 12px; border-radius: 7px; }
-    .disk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px; }
+    .disk-grid { display: none; }
     .disk-card { padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: rgba(7,18,14,.5); cursor: pointer; }
     .disk-card:hover, .disk-card.open { border-color: rgba(54, 211, 153, 0.9); background: rgba(54, 211, 153, 0.08); }
     .disk-card-head { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
@@ -764,7 +772,7 @@ HTML = r"""
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     @media (max-width: 1080px) {
-      .grid, .split, .hero, .node-detail, .bottom-section, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row, .media-total-head, .media-total-row { grid-template-columns: 1fr; }
+      .grid, .split, .hero, .node-detail, .bottom-section, .media-workspace, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row, .media-total-head, .media-total-row { grid-template-columns: 1fr; }
       .bottom-section { grid-column: auto; }
       .monitor-card, .node-table-card { min-height: auto; }
       .node-monitor { min-height: 420px; }
@@ -920,9 +928,47 @@ HTML = r"""
           </div>
         </div>
 
+      </div>
+
+      <div class="media-workspace">
+        <div class="card resource-card">
+          <div class="resource-header">
+            <div>
+              <h2>资源管理模块</h2>
+              <p>左侧管理全部节点视频：快捷分组、表格筛选、右键属性/移动分组；节点资源条形柜已取消。</p>
+            </div>
+            <span class="pill">resource table</span>
+          </div>
+          <div class="resource-tool-row">
+            <select id="mediaGroupFilter"><option value="">全部分组</option></select>
+            <input id="mediaGroupSearchInput" type="search" placeholder="查找更多分组...">
+            <div class="quick-group-bar" id="quickGroupBar"></div>
+            <button id="quickGroupAddBtn">＋快捷</button>
+            <button id="quickGroupRemoveBtn">－快捷</button>
+            <button id="resourceMoreBtn">其他功能</button>
+          </div>
+          <div class="disk-grid" id="mediaDiskList" hidden></div>
+          <div class="resource-filter-chip" id="resourceFilterChip" hidden></div>
+          <div class="media-list" id="mediaList">加载中...</div>
+          <div class="media-total-table" id="mediaTotalTable"></div>
+          <div class="media-context-menu" id="mediaContextMenu">
+            <button data-media-menu-action="property">属性</button>
+            <button data-media-menu-action="inspect">查看详情</button>
+            <button data-media-menu-action="use">选用开播</button>
+            <button data-media-menu-action="rename">重命名 / 移动</button>
+            <button class="danger" data-media-menu-action="delete">删除文件</button>
+            <div class="media-context-label">移动到分组</div>
+            <div class="media-context-targets" id="mediaGroupTargets"></div>
+            <div class="media-context-label">发送到节点</div>
+            <div class="media-context-targets" id="mediaSendTargets"></div>
+            <div class="media-context-label">移动到节点（成功后删除源文件）</div>
+            <div class="media-context-targets" id="mediaMoveTargets"></div>
+          </div>
+        </div>
+
         <div class="card upload-card">
           <h2>上传模块</h2>
-          <p>上传与资源管理分开：先选择右侧目标 Agent，再把视频直传到该节点，可指定初始分组。</p>
+          <p>上传保持在右侧：先选择目标 Agent，再把视频直传到该节点，可指定初始分组。</p>
           <div class="split">
             <div>
               <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
@@ -934,43 +980,6 @@ HTML = r"""
             </div>
             <div id="uploadBox" class="transfer-box"></div>
           </div>
-        </div>
-      </div>
-
-      <div class="card resource-card resource-wide">
-        <div class="resource-header">
-          <div>
-            <h2>资源管理模块</h2>
-            <p>双击节点容量条打开该节点资源；右键视频可查看属性、移动分组、发送/移动到节点。</p>
-          </div>
-          <span class="pill">resource table</span>
-        </div>
-        <div class="media-library-tools">
-          <select id="mediaGroupFilter"><option value="">全部分组</option></select>
-          <button id="mediaGroupAddBtn">增加分组</button>
-          <button id="mediaGroupRenameBtn">分组改名</button>
-          <button class="danger" id="mediaGroupDeleteBtn">删除分组</button>
-          <button id="mediaAssignGroupBtn">将选中视频移入此分组</button>
-          <select id="mediaCleanupAge"><option value="3">创建 3 天前</option><option value="7">创建 7 天前</option><option value="15">创建 15 天前</option><option value="30" selected>创建 30 天前</option><option value="60">创建 60 天前</option><option value="90">创建 90 天前</option></select>
-          <select id="mediaCleanupUsage"><option value="any">不限制使用记录</option><option value="never">从未开播使用</option><option value="unused">超过所选天数未使用</option></select>
-          <button class="danger" id="mediaCleanupBtn">清理重复视频</button>
-        </div>
-        <div class="disk-grid" id="mediaDiskList"></div>
-        <div class="resource-filter-chip" id="resourceFilterChip">双击容量条打开节点资源；当前显示全部节点。</div>
-        <div class="media-list" id="mediaList">加载中...</div>
-        <div class="media-total-table" id="mediaTotalTable"></div>
-        <div class="media-context-menu" id="mediaContextMenu">
-          <button data-media-menu-action="property">属性</button>
-          <button data-media-menu-action="inspect">查看详情</button>
-          <button data-media-menu-action="use">选用开播</button>
-          <button data-media-menu-action="rename">重命名 / 移动</button>
-          <button class="danger" data-media-menu-action="delete">删除文件</button>
-          <div class="media-context-label">移动到分组</div>
-          <div class="media-context-targets" id="mediaGroupTargets"></div>
-          <div class="media-context-label">发送到节点</div>
-          <div class="media-context-targets" id="mediaSendTargets"></div>
-          <div class="media-context-label">移动到节点（成功后删除源文件）</div>
-          <div class="media-context-targets" id="mediaMoveTargets"></div>
         </div>
       </div>
 
@@ -1023,6 +1032,33 @@ HTML = r"""
       </div>
       <div class="role-settings-status" id="roleSettingsActions"></div>
       <p>保护规则：点击操作后还会显示当前状态与影响范围，必须再次确认才会执行。</p>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="resourceToolsModal" aria-hidden="true">
+    <div class="wizard-modal role-settings-modal" role="dialog" aria-modal="true" aria-labelledby="resourceToolsTitle">
+      <div class="wizard-head">
+        <div>
+          <h2 id="resourceToolsTitle">资源管理 · 其他功能</h2>
+          <p>视频清理模块只处理已验证重复副本，永远不会删除最后一份视频。</p>
+        </div>
+        <button class="wizard-close" id="resourceToolsClose" aria-label="关闭">×</button>
+      </div>
+      <div class="wizard-existing-grid">
+        <div class="wizard-field">
+          <label>清理创建时间</label>
+          <select id="mediaCleanupAge"><option value="3">创建 3 天前</option><option value="7">创建 7 天前</option><option value="15">创建 15 天前</option><option value="30" selected>创建 30 天前</option><option value="60">创建 60 天前</option><option value="90">创建 90 天前</option></select>
+        </div>
+        <div class="wizard-field">
+          <label>使用记录条件</label>
+          <select id="mediaCleanupUsage"><option value="any">不限制使用记录</option><option value="never">从未开播使用</option><option value="unused">超过所选天数未使用</option></select>
+        </div>
+        <button class="danger wide-action" id="mediaCleanupBtn">预览并清理重复视频</button>
+      </div>
+      <div class="wizard-status">
+        <div class="wizard-status-line"><strong>清理规则</strong>：只删除已通过 SHA-256 验证、保留满 72 小时的重复旧副本。</div>
+        <div class="wizard-status-line">单副本视频、未验证副本、正在使用的视频不会被自动删除。</div>
+      </div>
     </div>
   </div>
 
@@ -1142,6 +1178,13 @@ HTML = r"""
       mediaMoveTargets: document.getElementById("mediaMoveTargets"),
       mediaGroupTargets: document.getElementById("mediaGroupTargets"),
       mediaGroupFilter: document.getElementById("mediaGroupFilter"),
+      mediaGroupSearchInput: document.getElementById("mediaGroupSearchInput"),
+      quickGroupBar: document.getElementById("quickGroupBar"),
+      quickGroupAddBtn: document.getElementById("quickGroupAddBtn"),
+      quickGroupRemoveBtn: document.getElementById("quickGroupRemoveBtn"),
+      resourceMoreBtn: document.getElementById("resourceMoreBtn"),
+      resourceToolsModal: document.getElementById("resourceToolsModal"),
+      resourceToolsClose: document.getElementById("resourceToolsClose"),
       mediaGroupAddBtn: document.getElementById("mediaGroupAddBtn"),
       mediaGroupRenameBtn: document.getElementById("mediaGroupRenameBtn"),
       mediaGroupDeleteBtn: document.getElementById("mediaGroupDeleteBtn"),
@@ -1210,6 +1253,9 @@ HTML = r"""
     let nodes = [];
     let mediaLibrary = { groups: [], resources: [], nodes: [] };
     let openResourceNodeId = "";
+    let resourceTableFilters = { name: "", size: "", age: "", group: "", copyNode: "", ownerNode: "" };
+    const QUICK_GROUP_COUNT_STORAGE_KEY = "streamHubQuickGroupCount";
+    let quickGroupCount = Math.max(1, Math.min(8, Number(localStorage.getItem(QUICK_GROUP_COUNT_STORAGE_KEY) || 3)));
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
     function rememberSelectedNode(nodeId) {
@@ -1825,6 +1871,151 @@ HTML = r"""
             `;
           }).join("")}
         </div>
+      `;
+    }
+
+    function renderQuickGroups(groups) {
+      const visible = groups.slice(0, quickGroupCount);
+      const buttons = [];
+      for (let index = 0; index < quickGroupCount; index += 1) {
+        const group = visible[index];
+        const active = group && String(refs.mediaGroupFilter.value || "") === String(group.id);
+        buttons.push(`<button class="${active ? "active" : ""}" data-quick-group-index="${index}" data-quick-group-id="${escapeHtml(group?.id || "")}" title="双击改名">${escapeHtml(group?.name || ("快捷分组" + (index + 1)))}</button>`);
+      }
+      refs.quickGroupBar.innerHTML = buttons.join("");
+    }
+
+    function resourceOwnerCopy(item) {
+      const copies = item.copies || [];
+      return copies.find((entry) => String(entry.node_id) === String(selectedNodeId)) || copies[0] || {};
+    }
+
+    function resourceMatchesFilters(item) {
+      const filters = resourceTableFilters;
+      const copies = item.copies || [];
+      const owner = resourceOwnerCopy(item);
+      const name = String(item.name || "").toLowerCase();
+      if (filters.name && !name.includes(filters.name.toLowerCase())) return false;
+      if (filters.group && (filters.group === "__ungrouped__" ? item.group_id : item.group_id || "") !== (filters.group === "__ungrouped__" ? "" : filters.group)) return false;
+      if (filters.copyNode && !copies.some((copy) => String(copy.node_id || "") === String(filters.copyNode))) return false;
+      if (filters.ownerNode && String(owner.node_id || "") !== String(filters.ownerNode)) return false;
+      const size = Number(item.size || 0);
+      if (filters.size === "small" && size >= 500 * 1024 * 1024) return false;
+      if (filters.size === "medium" && (size < 500 * 1024 * 1024 || size >= 2 * 1024 * 1024 * 1024)) return false;
+      if (filters.size === "large" && size < 2 * 1024 * 1024 * 1024) return false;
+      if (filters.age) {
+        const modified = Number(item.modified || 0);
+        const days = modified ? (Date.now() / 1000 - modified) / 86400 : Infinity;
+        if (days > Number(filters.age)) return false;
+      }
+      return true;
+    }
+
+    function renderMediaTotalTable(resources) {
+      const totalCopies = (resources || []).reduce((sum, item) => sum + (item.copies || []).length, 0);
+      refs.mediaTotalTable.innerHTML = `<div class="media-toolbar" style="padding:8px 9px;">
+        <strong>资源总表</strong>
+        <small>当前筛选 ${resources.length} 个视频，合计 ${totalCopies} 个节点副本。</small>
+      </div>`;
+    }
+
+    function renderMedia() {
+      const checkedPath = selectedMediaPath();
+      const checkedNodeId = selectedMediaNodeId();
+      const groups = mediaLibrary.groups || [];
+      const nodeDisks = mediaLibrary.nodes || [];
+      const allResources = [...(mediaLibrary.resources || [])];
+      const search = (refs.mediaGroupSearchInput?.value || "").trim().toLowerCase();
+      const visibleGroups = groups.filter((item) => !search || String(item.name || "").toLowerCase().includes(search));
+      const groupOptions = `<option value="">全部分组</option><option value="__ungrouped__">未分组</option>`
+        + visibleGroups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
+      const currentFilter = refs.mediaGroupFilter.value;
+      refs.mediaGroupFilter.innerHTML = groupOptions;
+      if ([...refs.mediaGroupFilter.options].some((option) => option.value === currentFilter)) refs.mediaGroupFilter.value = currentFilter;
+      else refs.mediaGroupFilter.value = "";
+      resourceTableFilters.group = refs.mediaGroupFilter.value || "";
+      const currentUploadGroup = refs.uploadGroupInput.value;
+      refs.uploadGroupInput.innerHTML = `<option value="">上传到未分组</option>`
+        + groups.map((item) => `<option value="${escapeHtml(item.id)}">上传到：${escapeHtml(item.name)}</option>`).join("");
+      if ([...refs.uploadGroupInput.options].some((option) => option.value === currentUploadGroup)) refs.uploadGroupInput.value = currentUploadGroup;
+      if (refs.mediaDiskList) refs.mediaDiskList.innerHTML = "";
+      if (refs.resourceFilterChip) refs.resourceFilterChip.hidden = true;
+      renderQuickGroups(groups);
+
+      const entries = allResources.filter(resourceMatchesFilters).sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
+      const allGroupOptions = `<option value="">全部分组</option><option value="__ungrouped__">未分组</option>`
+        + groups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
+      const nodeOptions = `<option value="">全部节点</option>`
+        + nodeDisks.map((item) => `<option value="${escapeHtml(item.node_id)}">${escapeHtml(item.node_name)}</option>`).join("");
+      const selectedGroupOptions = allGroupOptions.replace('value="' + escapeHtml(resourceTableFilters.group) + '"', 'value="' + escapeHtml(resourceTableFilters.group) + '" selected');
+      const selectedCopyNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.copyNode) + '"', 'value="' + escapeHtml(resourceTableFilters.copyNode) + '" selected');
+      const selectedOwnerNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.ownerNode) + '"', 'value="' + escapeHtml(resourceTableFilters.ownerNode) + '" selected');
+      renderMediaTotalTable(allResources);
+      refs.mediaList.innerHTML = `
+        <div class="media-toolbar">
+          <strong>所有节点的所有视频</strong>
+          <small>共 ${entries.length} 个。表头可筛选；右键可查看属性、移动分组、复制/移动到节点。</small>
+        </div>
+        <div class="media-window">
+          <div class="media-window-head">
+            <label>文件名<input data-resource-filter="name" type="search" value="${escapeHtml(resourceTableFilters.name)}" placeholder="搜索文件"></label>
+            <label>大小<select data-resource-filter="size"><option value="">全部</option><option value="small" ${resourceTableFilters.size === "small" ? "selected" : ""}>小于500M</option><option value="medium" ${resourceTableFilters.size === "medium" ? "selected" : ""}>500M-2G</option><option value="large" ${resourceTableFilters.size === "large" ? "selected" : ""}>大于2G</option></select></label>
+            <label>上传时间<select data-resource-filter="age"><option value="">全部</option><option value="7" ${resourceTableFilters.age === "7" ? "selected" : ""}>近7天</option><option value="30" ${resourceTableFilters.age === "30" ? "selected" : ""}>近30天</option><option value="90" ${resourceTableFilters.age === "90" ? "selected" : ""}>近90天</option></select></label>
+            <label>分组<select data-resource-filter="group">${selectedGroupOptions}</select></label>
+            <label>副本节点<select data-resource-filter="copyNode">${selectedCopyNodeOptions}</select></label>
+            <label>归属节点<select data-resource-filter="ownerNode">${selectedOwnerNodeOptions}</select></label>
+          </div>
+          ${entries.length ? entries.map((item) => {
+            const copies = item.copies || [];
+            const copy = resourceOwnerCopy(item);
+            const videoPath = copy.video_path || item.name;
+            const nodeId = String(copy.node_id || "");
+            const selected = checkedPath && checkedNodeId === nodeId && checkedPath === videoPath;
+            const current = nodeId === String(selectedNodeId);
+            const name = item.name || videoPath;
+            const copyNames = copies.map((entry) => entry.node_name || entry.node_id).join("、");
+            const lastUsedLabels = copies.map((entry) => `${entry.node_name || entry.node_id}: ${entry.last_used_label || "从未开播"}`).join("；");
+            const ageBase = Number(item.last_used_at || item.created_at || item.modified || 0);
+            const ageDays = ageBase ? Math.max(0, (Date.now() / 1000 - ageBase) / 86400) : 0;
+            const cleanupCandidate = Math.floor(ageDays / 3) >= 5;
+            return `
+              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""} ${cleanupCandidate ? "cleanup-candidate" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-group-id="${escapeHtml(item.group_id || "")}" data-group-name="${escapeHtml(mediaGroupName(item.group_id))}" data-copy-names="${escapeHtml(copyNames)}" data-copy-count="${escapeHtml(copies.length)}" data-last-used-label="${escapeHtml(lastUsedLabels || "从未开播")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
+                <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                <span class="muted">${escapeHtml(fmtBytes(item.size || 0))}</span>
+                <span class="muted">${escapeHtml(item.modified_label || "--")}</span>
+                <span>${escapeHtml(mediaGroupName(item.group_id))}</span>
+                <span title="${escapeHtml(copyNames)}">${copies.length} 副本：${escapeHtml(copyNames || "--")}</span>
+                <span>${escapeHtml(copy.node_name || copy.node_id || "--")}</span>
+                <input data-media-check type="radio" name="media" value="${escapeHtml(name)}" data-node-id="${escapeHtml(nodeId)}" data-video-path="${escapeHtml(videoPath)}" ${selected ? "checked" : ""} hidden>
+              </div>
+            `;
+          }).join("") : `<div class="empty-state">当前筛选下没有视频资源。</div>`}
+        </div>
+      `;
+    }
+
+    function renderMediaTotalTable(resources) {
+      const all = [...(resources || [])].sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
+      const totalCopies = all.reduce((sum, item) => sum + (item.copies || []).length, 0);
+      refs.mediaTotalTable.innerHTML = `
+        <div class="media-toolbar" style="padding:8px 9px;">
+          <strong>资源总表</strong>
+          <small>全部 ${all.length} 个视频，合计 ${totalCopies} 个节点副本。</small>
+        </div>
+        <div class="media-total-head">
+          <span>文件名</span><span>分组</span><span>副本</span><span>大小</span><span>最近上传</span>
+        </div>
+        ${all.length ? all.map((item) => {
+          const copies = item.copies || [];
+          const copyNames = copies.map((entry) => entry.node_name || entry.node_id).join("、");
+          return `<div class="media-total-row" title="${escapeHtml(copyNames || "--")}">
+            <span>${escapeHtml(item.name || "--")}</span>
+            <span>${escapeHtml(mediaGroupName(item.group_id))}</span>
+            <span>${copies.length} 节点</span>
+            <span>${escapeHtml(fmtBytes(item.size || 0))}</span>
+            <span>${escapeHtml(item.modified_label || "--")}</span>
+          </div>`;
+        }).join("") : `<div class="empty-state">暂无视频资源。</div>`}
       `;
     }
 
@@ -2990,6 +3181,11 @@ HTML = r"""
       }).join("");
     }
 
+    function setResourceToolsOpen(open) {
+      refs.resourceToolsModal.classList.toggle("open", open);
+      refs.resourceToolsModal.setAttribute("aria-hidden", open ? "false" : "true");
+    }
+
     async function handleRoleAction(action, role, nodeId, sourceButton) {
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const nodeName = node?.name || nodeId;
@@ -3084,6 +3280,38 @@ HTML = r"""
       } finally {
         refs.mediaCleanupBtn.disabled = false;
       }
+    }
+
+    async function renameQuickGroup(groupId, currentName) {
+      const nextName = prompt("修改快捷分组名称：", currentName || "");
+      if (!nextName || !nextName.trim() || nextName.trim() === currentName) return;
+      const data = await postJson("/api/media-groups", {
+        action: "rename",
+        group_id: groupId,
+        name: nextName.trim(),
+      });
+      if (!data.ok) return alert(data.message || "分组改名失败");
+      await refreshAll();
+      refs.mediaGroupFilter.value = groupId;
+      resourceTableFilters.group = groupId;
+      renderMedia();
+    }
+
+    async function createQuickGroup(index) {
+      const nextName = prompt(`创建快捷分组 ${index + 1} 名称：`, `分组${index + 1}`);
+      if (!nextName || !nextName.trim()) return;
+      const data = await postJson("/api/media-groups", {
+        action: "create",
+        group_id: "",
+        name: nextName.trim(),
+      });
+      if (!data.ok) return alert(data.message || "创建分组失败");
+      await refreshAll();
+      if (data.group_id) {
+        refs.mediaGroupFilter.value = data.group_id;
+        resourceTableFilters.group = data.group_id;
+      }
+      renderMedia();
     }
 
     refs.nodeList.addEventListener("click", (event) => {
@@ -3189,11 +3417,43 @@ HTML = r"""
       openResourceNodeId = "";
       renderMedia();
     });
+    refs.quickGroupBar.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-quick-group-index]");
+      if (!button) return;
+      const groupId = button.dataset.quickGroupId || "";
+      refs.mediaGroupFilter.value = groupId;
+      resourceTableFilters.group = groupId;
+      renderMedia();
+    });
+    refs.quickGroupBar.addEventListener("dblclick", (event) => {
+      const button = event.target.closest("[data-quick-group-index]");
+      if (!button) return;
+      event.preventDefault();
+      const groupId = button.dataset.quickGroupId || "";
+      const index = Number(button.dataset.quickGroupIndex || 0);
+      const currentName = button.textContent.trim();
+      if (groupId) renameQuickGroup(groupId, currentName);
+      else createQuickGroup(index);
+    });
     refs.mediaList.addEventListener("click", (event) => {
       hideMediaMenu();
       const row = event.target.closest("[data-media-row]");
       if (!row) return;
       selectMediaRow(row);
+    });
+    refs.mediaList.addEventListener("input", (event) => {
+      const field = event.target?.dataset?.resourceFilter;
+      if (!field) return;
+      resourceTableFilters[field] = event.target.value || "";
+      if (field === "group") refs.mediaGroupFilter.value = resourceTableFilters.group;
+      renderMedia();
+    });
+    refs.mediaList.addEventListener("change", (event) => {
+      const field = event.target?.dataset?.resourceFilter;
+      if (!field) return;
+      resourceTableFilters[field] = event.target.value || "";
+      if (field === "group") refs.mediaGroupFilter.value = resourceTableFilters.group;
+      renderMedia();
     });
     refs.mediaList.addEventListener("dblclick", (event) => {
       const row = event.target.closest("[data-media-row]");
@@ -3310,11 +3570,30 @@ HTML = r"""
       document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
     });
     refs.refreshBtn.addEventListener("click", refreshAll);
-    refs.mediaGroupFilter.addEventListener("change", renderMedia);
-    refs.mediaGroupAddBtn.addEventListener("click", () => manageMediaGroup("create"));
-    refs.mediaGroupRenameBtn.addEventListener("click", () => manageMediaGroup("rename"));
-    refs.mediaGroupDeleteBtn.addEventListener("click", () => manageMediaGroup("delete"));
-    refs.mediaAssignGroupBtn.addEventListener("click", assignSelectedMediaGroup);
+    refs.mediaGroupFilter.addEventListener("change", () => {
+      resourceTableFilters.group = refs.mediaGroupFilter.value || "";
+      renderMedia();
+    });
+    refs.mediaGroupSearchInput.addEventListener("input", renderMedia);
+    refs.quickGroupAddBtn.addEventListener("click", () => {
+      quickGroupCount = Math.min(8, quickGroupCount + 1);
+      localStorage.setItem(QUICK_GROUP_COUNT_STORAGE_KEY, String(quickGroupCount));
+      renderMedia();
+    });
+    refs.quickGroupRemoveBtn.addEventListener("click", () => {
+      quickGroupCount = Math.max(1, quickGroupCount - 1);
+      localStorage.setItem(QUICK_GROUP_COUNT_STORAGE_KEY, String(quickGroupCount));
+      renderMedia();
+    });
+    refs.resourceMoreBtn.addEventListener("click", () => setResourceToolsOpen(true));
+    refs.resourceToolsClose.addEventListener("click", () => setResourceToolsOpen(false));
+    refs.resourceToolsModal.addEventListener("click", (event) => {
+      if (event.target === refs.resourceToolsModal) setResourceToolsOpen(false);
+    });
+    if (refs.mediaGroupAddBtn) refs.mediaGroupAddBtn.addEventListener("click", () => manageMediaGroup("create"));
+    if (refs.mediaGroupRenameBtn) refs.mediaGroupRenameBtn.addEventListener("click", () => manageMediaGroup("rename"));
+    if (refs.mediaGroupDeleteBtn) refs.mediaGroupDeleteBtn.addEventListener("click", () => manageMediaGroup("delete"));
+    if (refs.mediaAssignGroupBtn) refs.mediaAssignGroupBtn.addEventListener("click", assignSelectedMediaGroup);
     refs.mediaCleanupBtn.addEventListener("click", cleanupDuplicateMedia);
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.cancelUploadBtn.addEventListener("click", cancelActiveUpload);
