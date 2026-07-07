@@ -55,6 +55,8 @@ MAX_CHUNK_BYTES = int(os.environ.get("STREAM_AGENT_MAX_CHUNK_BYTES", str(64 * 10
 CONTROL_TOKEN = os.environ.get("STREAM_AGENT_CONTROL_TOKEN", "").strip()
 PUBLIC_ORIGIN = os.environ.get("STREAM_AGENT_PUBLIC_ORIGIN", "").strip()
 TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_AGENT_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
+TAILSCALE_PAIRING_ENABLED = os.environ.get("STREAM_AGENT_TAILSCALE_PAIRING", "1").strip().lower() in {"1", "true", "yes"}
+TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 FFMPEG_BIN = os.environ.get("STREAM_AGENT_FFMPEG_BIN", "ffmpeg")
 AGENT_SOURCE_REPO = os.environ.get(
     "STREAM_AGENT_SOURCE_REPO",
@@ -410,6 +412,29 @@ def request_is_control_hub() -> bool:
     except ValueError:
         return False
     return str(remote_ip) == control_hub_ip
+
+
+def request_is_verified_tailscale_peer() -> bool:
+    raw_addr = (request.remote_addr or "").split("%", 1)[0]
+    try:
+        remote_ip = ipaddress.ip_address(raw_addr)
+    except ValueError:
+        return False
+    if remote_ip not in TAILSCALE_CGNAT or not shutil.which("tailscale"):
+        return False
+    try:
+        result = subprocess.run(
+            ["tailscale", "whois", "--json", str(remote_ip)],
+            text=True,
+            capture_output=True,
+            timeout=8,
+        )
+        if result.returncode != 0:
+            return False
+        payload = json.loads(result.stdout or "{}")
+        return bool(payload.get("Node") or payload.get("UserProfile"))
+    except Exception:
+        return False
 
 
 @APP.before_request
@@ -1136,6 +1161,24 @@ def index():
         "name": AGENT_NAME,
         "mode": "headless-agent",
         "message": "Stream Control Hub headless agent is running.",
+    })
+
+
+@APP.post("/pair")
+def pair_over_tailscale():
+    if not TAILSCALE_PAIRING_ENABLED:
+        return jsonify({"ok": False, "message": "Tailscale automatic pairing is disabled"}), 403
+    if not request_is_verified_tailscale_peer():
+        return jsonify({"ok": False, "message": "pairing requires a verified peer from the same tailnet"}), 403
+    if not CONTROL_TOKEN:
+        return jsonify({"ok": False, "message": "Agent control token is not configured"}), 503
+    return jsonify({
+        "ok": True,
+        "name": AGENT_NAME,
+        "hostname": platform.node(),
+        "mode": "headless-agent",
+        "token": CONTROL_TOKEN,
+        "paired_via": "tailscale-whois",
     })
 
 

@@ -15,6 +15,14 @@ The hub is designed to run on a local server. VPS nodes stay lightweight: they k
 
 ## Quick Start
 
+Recommended unified Linux manager for Hub, Agent, Tailscale, upgrades, uninstalls, and status:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install.sh | sudo sh
+```
+
+It opens a numbered `0-8` menu. Hub is installed under `/opt/stream-control-hub` and Agent under `/opt/stream-control-hub-agent`. For automation, pass `CHOICE=1` through `CHOICE=8`.
+
 One-line Hub install on Windows:
 
 ```powershell
@@ -120,6 +128,10 @@ Use `base_url` for trusted control traffic, normally Tailscale. Use `upload_base
 
 The Hub has a Tailscale panel at the bottom of the page. Paste a one-time Tailscale auth key and click connect; the Hub reuses the Tailscale install flow from `vps-pulse-control`: pre-check Linux environment, install or repair Tailscale when missing, enable `tailscaled`, run `tailscale up`, and read final status.
 
+Tailscale and the Headless Agent have separate jobs. Tailscale only provides private network connectivity. Install the Agent only on machines that the Hub must control for media upload, sharing, health reporting, or FFmpeg streaming. The Hub host and ordinary operator devices can join Tailscale without installing the Agent.
+
+For a new streaming node, enter only its `100.x` address in the Hub. The Hub verifies that the address is an online peer in the same tailnet, checks for the Headless Agent on port `8787`, and completes automatic pairing. The Agent releases its generated control credential only after local `tailscale whois` confirms that the caller is an authenticated tailnet peer. Set `STREAM_AGENT_TAILSCALE_PAIRING=0` to disable this convenience feature.
+
 The Linux Hub and Headless Agent one-line installers use the same helper when `TAILSCALE_AUTH_KEY=...` is supplied, so a fresh VPS does not need Tailscale preinstalled.
 
 The Agent automatically discovers its public IPv4 during install and update. It uses `api.ipify.org` first and falls back to `ifconfig.me/ip`, validates that the response is a global IPv4 address, and publishes `http://<public-ip>:8787` to the Hub. Browser uploads probe that public route first and automatically fall back to the Agent Tailscale address when the public port is unavailable. Users do not need to enter `upload_base_url` manually.
@@ -202,6 +214,20 @@ STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYTES=5242880
 Stream Control Hub 是一个本地总控台，用来集中管理多台 VPS 推流节点。Hub 负责查看节点状态、连接 Tailscale、下发 Smart Start 推流请求和调度资源共享；视频文件从浏览器直接上传到 Agent，不先落到 Hub。VPS 上的 Headless Agent 保持轻量，负责接收文件、与其他 Agent 共享资源、上报状态和启动 FFmpeg。
 
 ### Hub 一行安装 / 卸载菜单
+
+推荐使用统一 Linux 管理入口。Hub、Agent 和 Tailscale 的安装、升级、卸载与状态检查都使用同一条命令：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install.sh | sudo sh
+```
+
+运行后显示菜单：`1` 安装 Hub、`2` 升级/修复 Hub、`3` 卸载 Hub、`4` 安装 Agent、`5` 升级/修复 Agent、`6` 卸载 Agent、`7` 安装/修复/连接 Tailscale、`8` 查看状态、`0` 退出。卸载时会继续询问是否保留数据。
+
+自动化可以直接指定编号，例如安装 Agent：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install.sh | sudo env CHOICE=4 sh
+```
 
 Windows:
 
@@ -298,7 +324,11 @@ data/nodes.local.json
 
 ### Tailscale 连接管理
 
-Hub 页面底部有 `Tailscale 连接` 面板。为了操作方便，可以直接粘贴一次性 Tailscale auth key。Hub 会复用 `vps-pulse-control` 里的 Tailscale 安装流程：先检查 Linux 环境、包管理器、提权能力、TUN 和 tailscale.com 连通性；如果没安装就自动安装/修复 Tailscale；然后执行 `tailscale up` 并读取最终状态。
+Hub 页面底部有 `Agent 快速连接` 面板，只需填写目标 Agent 的 Tailscale `100.x` 地址。弹窗中的 Agent 一键安装命令每次打开时都会从 GitHub 的 `config/install-commands.json` 读取最新版；GitHub 暂时不可达时使用随 Hub 发布的本地备用清单。
+
+Tailscale 与 Agent 的职责不同：Tailscale 只建立私网连接，Agent 才提供视频上传、资源共享、状态上报和 FFmpeg 推流控制。Hub 主机以及只用于访问面板的电脑、手机无需安装 Agent；只有要作为推流节点受 Hub 管理的服务器才需要同时安装 Tailscale 和 Agent。
+
+接入新推流节点时只需填写它的 `100.x` 地址。Hub 会检查该地址是否为同一 Tailnet 中的在线设备、探测 `8787` 端口上的 Headless Agent，并自动完成授权和节点保存。Agent 只有在本机 `tailscale whois` 确认请求来自已认证 Tailnet peer 后才返回配对凭据；如需关闭此功能，可设置 `STREAM_AGENT_TAILSCALE_PAIRING=0`。
 
 Linux Hub 和 Headless Agent 一键安装脚本在传入 `TAILSCALE_AUTH_KEY=...` 时也会走同一个 helper，所以新 VPS 不需要提前手动装 Tailscale。auth key 不会写入仓库配置或审计日志。
 

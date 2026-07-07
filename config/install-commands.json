@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "unified": "curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install.sh | sudo sh",
+  "hub": "curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install.sh | sudo env CHOICE=1 sh",
+  "agent": "curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install.sh | sudo env CHOICE=4 sh"
+}

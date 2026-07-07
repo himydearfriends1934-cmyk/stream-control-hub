@@ -56,6 +56,19 @@ need_cmd() {
   }
 }
 
+install_packages() {
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y git python3 python3-venv python3-pip curl
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y git python3 python3-pip curl
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y git python3 python3-pip curl
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache git python3 py3-pip curl
+  fi
+}
+
 new_token() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
@@ -140,6 +153,7 @@ if [ "$ACTION" = "uninstall" ]; then
   exit 0
 fi
 
+install_packages
 need_cmd git
 need_cmd python3
 need_cmd curl

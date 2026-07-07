@@ -67,6 +67,11 @@ CONTROL_TOKEN = os.environ.get("STREAM_HUB_CONTROL_TOKEN", "").strip()
 TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_HUB_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
 TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 TAILSCALE_HELPER = ROOT / "scripts" / "tailscale-install.sh"
+INSTALL_COMMANDS_FILE = CONFIG_DIR / "install-commands.json"
+INSTALL_COMMANDS_URL = os.environ.get(
+    "STREAM_HUB_INSTALL_COMMANDS_URL",
+    "https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/config/install-commands.json",
+).strip()
 SHARE_TASKS: dict[str, dict[str, Any]] = {}
 SHARE_TASKS_LOCK = threading.Lock()
 
@@ -293,7 +298,18 @@ HTML = r"""
     .wizard-head p { margin: 0; font-size: 13px; }
     .wizard-close { min-width: 42px; padding: 8px 10px; }
     .wizard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .wizard-existing-grid { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(170px, 1fr) auto; gap: 10px; align-items: end; }
+    .wizard-role-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .wizard-role {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.025);
+    }
+    .wizard-role strong { display: block; margin-bottom: 4px; color: #effdf6; }
+    .wizard-role small { color: var(--muted); line-height: 1.45; }
+    .wizard-role.required { border-color: rgba(52, 211, 153, 0.35); }
+    .wizard-existing-grid { display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)); gap: 10px; align-items: end; }
+    .wizard-existing-grid .wide-action { grid-column: 1 / -1; }
     .wizard-field { display: grid; gap: 5px; min-width: 0; }
     .wizard-field label { color: var(--muted); font-size: 12px; font-weight: 900; }
     .wizard-step-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
@@ -706,7 +722,7 @@ HTML = r"""
       .node-state, .row-actions { grid-column: 2; }
       .media-window-head,
       .media-file-row { grid-template-columns: minmax(130px, 1.4fr) 74px 116px minmax(82px, 0.8fr); }
-      .wizard-grid, .wizard-existing-grid, .wizard-step-grid, .wizard-actions { grid-template-columns: 1fr; }
+      .wizard-grid, .wizard-role-grid, .wizard-existing-grid, .wizard-step-grid, .wizard-actions { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -894,11 +910,10 @@ HTML = r"""
           </div>
         </div>
         <div class="card compact-card">
-          <h2>Tailscale 连接</h2>
-          <p>打开向导，按检查、安装/修复、登录、验证四步接入 tailnet。</p>
+          <h2>Agent 快速连接</h2>
+          <p>输入目标服务器的 Tailscale IP，自动检测同一 Tailnet、Agent 服务并完成授权。</p>
           <div class="actions">
-            <button class="primary" id="tailscaleWizardBtn">打开 Tailscale 向导</button>
-            <button id="tailscaleStatusBtn">快速状态</button>
+            <button class="primary" id="tailscaleWizardBtn">连接 Agent</button>
           </div>
         </div>
         <div class="card compact-card log-card">
@@ -928,58 +943,25 @@ HTML = r"""
     <div class="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="tailscaleWizardTitle">
       <div class="wizard-head">
         <div>
-          <h2 id="tailscaleWizardTitle">Tailscale 安装向导</h2>
-          <p>按步骤检查环境、安装或修复 Tailscale、使用一次性 auth key 登录，然后验证 100.x 地址。</p>
+          <h2 id="tailscaleWizardTitle">Agent 快速连接</h2>
+          <p>输入 Agent 的 Tailscale IP。Hub 会自动完成网络、服务和权限检查。</p>
         </div>
         <button class="wizard-close" id="tailscaleWizardClose" title="关闭">X</button>
       </div>
-      <div class="wizard-grid">
-        <div class="wizard-field">
-          <label>一次性 auth key</label>
-          <input id="tailscaleAuthInput" type="password" autocomplete="off" placeholder="tskey-auth-...">
-        </div>
-        <div class="wizard-field">
-          <label>设备名称</label>
-          <input id="tailscaleHostInput" type="text" value="stream-control-hub" placeholder="stream-control-hub">
-        </div>
-      </div>
       <div class="wizard-existing-grid">
         <div class="wizard-field">
-          <label>目标 Agent</label>
-          <select id="tailscaleNodeSelect"></select>
-        </div>
-        <div class="wizard-field">
-          <label>已有 Tailscale IP</label>
+          <label>Tailscale IP</label>
           <input id="tailscaleExistingIpInput" type="text" autocomplete="off" placeholder="100.x.x.x">
         </div>
-        <button id="tailscaleUseExistingIpBtn">验证并连接</button>
+        <button class="primary" id="tailscaleUseExistingIpBtn">检测并连接</button>
       </div>
-      <div class="wizard-step-grid">
-        <div class="wizard-step" data-tailscale-step="precheck">
-          <strong>1. 环境检查</strong>
-          <small>包管理器、权限、TUN、tailscale.com 连通性。</small>
-        </div>
-        <div class="wizard-step" data-tailscale-step="install">
-          <strong>2. 安装 / 修复</strong>
-          <small>缺失时安装 Tailscale，并启用 tailscaled。</small>
-        </div>
-        <div class="wizard-step" data-tailscale-step="connect">
-          <strong>3. 登录连接</strong>
-          <small>使用 auth key 执行 tailscale up。</small>
-        </div>
-        <div class="wizard-step" data-tailscale-step="verify">
-          <strong>4. 验证状态</strong>
-          <small>读取本机 100.x 地址和 tailnet peers。</small>
-        </div>
-      </div>
-      <div class="wizard-actions">
-        <button id="tailscalePrecheckBtn">1. 检查</button>
-        <button id="tailscaleInstallBtn">2. 安装/修复</button>
-        <button class="primary" id="tailscaleConnectBtn">3. 登录连接</button>
-        <button id="tailscaleVerifyBtn">4. 验证</button>
+      <div class="wizard-status">
+        <div class="wizard-status-line"><strong>目标 VPS 尚未安装 Agent？</strong></div>
+        <pre id="agentInstallCommand">正在从 GitHub 获取最新一键安装命令...</pre>
+        <button id="copyAgentInstallBtn">复制一键安装命令</button>
       </div>
       <div class="wizard-status" id="tailscaleWizardLog">
-        <div class="wizard-status-line">打开向导后，先点“1. 检查”。已有 Tailscale IP 的 Agent 可以直接填写 IP 后点“验证并连接”。</div>
+        <div class="wizard-status-line">请输入目标 Agent 的 100.x Tailscale IP。</div>
       </div>
     </div>
   </div>
@@ -1076,16 +1058,10 @@ HTML = r"""
       tailscaleWizardModal: document.getElementById("tailscaleWizardModal"),
       tailscaleWizardClose: document.getElementById("tailscaleWizardClose"),
       tailscaleWizardLog: document.getElementById("tailscaleWizardLog"),
-      tailscaleAuthInput: document.getElementById("tailscaleAuthInput"),
-      tailscaleHostInput: document.getElementById("tailscaleHostInput"),
-      tailscaleNodeSelect: document.getElementById("tailscaleNodeSelect"),
       tailscaleExistingIpInput: document.getElementById("tailscaleExistingIpInput"),
       tailscaleUseExistingIpBtn: document.getElementById("tailscaleUseExistingIpBtn"),
-      tailscalePrecheckBtn: document.getElementById("tailscalePrecheckBtn"),
-      tailscaleInstallBtn: document.getElementById("tailscaleInstallBtn"),
-      tailscaleStatusBtn: document.getElementById("tailscaleStatusBtn"),
-      tailscaleConnectBtn: document.getElementById("tailscaleConnectBtn"),
-      tailscaleVerifyBtn: document.getElementById("tailscaleVerifyBtn"),
+      agentInstallCommand: document.getElementById("agentInstallCommand"),
+      copyAgentInstallBtn: document.getElementById("copyAgentInstallBtn"),
       mediaInput: document.getElementById("mediaInput"),
       uploadBtn: document.getElementById("uploadBtn"),
       pushSelectedBtn: document.getElementById("pushSelectedBtn"),
@@ -2232,6 +2208,20 @@ HTML = r"""
     function setTailscaleWizardOpen(open) {
       refs.tailscaleWizardModal.classList.toggle("open", open);
       refs.tailscaleWizardModal.setAttribute("aria-hidden", open ? "false" : "true");
+      if (open) loadLatestAgentInstallCommand();
+    }
+
+    async function loadLatestAgentInstallCommand() {
+      refs.agentInstallCommand.textContent = "正在从 GitHub 获取最新一键安装命令...";
+      try {
+        const resp = await fetch(`/api/install-commands?_=${Date.now()}`, { cache: "no-store" });
+        const data = await resp.json();
+        if (!resp.ok || !data.agent) throw new Error(data.message || "命令清单无效");
+        refs.agentInstallCommand.textContent = data.agent;
+        refs.agentInstallCommand.title = data.source === "github" ? "已与 GitHub 同步" : "GitHub 不可用，当前显示本地备用命令";
+      } catch (error) {
+        refs.agentInstallCommand.textContent = "无法读取安装命令，请检查 Hub 到 GitHub 的网络连接。";
+      }
     }
 
     function tailscaleStatusLines(data, fallback = "Tailscale 状态已更新") {
@@ -2245,12 +2235,16 @@ HTML = r"""
       if (tailscaleIps.length) lines.push({ label: "本机 Tailscale IP", text: tailscaleIps.join(" / "), tone: "done" });
       if (self.dns_name) lines.push({ label: "Tailnet 名称", text: self.dns_name });
       const peers = data?.peers || data?.status?.peers || [];
-      if (Array.isArray(peers)) lines.push({ label: "可见设备", text: `${peers.length} 台` });
+      if (Array.isArray(peers)) {
+        const onlinePeers = peers.filter((peer) => peer?.online === true).length;
+        const offlinePeers = peers.length - onlinePeers;
+        lines.push({ label: "Tailnet 设备", text: `${peers.length} 台（在线 ${onlinePeers} / 离线 ${offlinePeers}）`, tone: onlinePeers ? "done" : "" });
+      }
       if (data?.node_id && data?.base_url) lines.push({ label: "Agent 连接", text: `${data.node_id} -> ${data.base_url}`, tone: "done" });
       if (data?.previous_base_url) lines.push({ label: "原地址已保留", text: data.previous_base_url });
       const detail = data?.error || data?.result?.stderr || data?.result?.message || data?.precheck?.message || "";
       if (!ok && detail) lines.push({ label: "失败原因", text: String(detail).slice(0, 260), tone: "fail" });
-      lines.push({ label: "下一步", text: ok ? "可以刷新节点列表，或继续上传/共享/推流。" : "请按提示修复后重试。" });
+      lines.push({ label: "下一步", text: ok ? "普通设备到这里即可；推流节点还需安装 Agent，然后用其 100.x 地址接入。" : "请按提示修复后重试。" });
       return lines;
     }
 
@@ -2271,24 +2265,12 @@ HTML = r"""
     }
 
     function setTailscaleBusy(busy) {
-      [refs.tailscalePrecheckBtn, refs.tailscaleInstallBtn, refs.tailscaleConnectBtn, refs.tailscaleVerifyBtn, refs.tailscaleUseExistingIpBtn]
+      [refs.tailscaleUseExistingIpBtn]
         .forEach((button) => { button.disabled = busy; });
     }
 
     function renderTailscaleNodeOptions() {
-      const current = refs.tailscaleNodeSelect.dataset.initialized === "1"
-        ? refs.tailscaleNodeSelect.value
-        : "";
-      const existingOptions = nodes.map((node) => {
-            const id = String(node.id || "");
-            const label = `${node.name || id} (${node.base_url || "未配置地址"})`;
-            return `<option value="${escapeHtml(id)}" ${id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
-          }).join("");
-      refs.tailscaleNodeSelect.innerHTML = `
-        <option value="" ${current ? "" : "selected"}>新增 Agent（仅输入 IP）</option>
-        ${existingOptions}
-      `;
-      refs.tailscaleNodeSelect.dataset.initialized = "1";
+      return;
     }
 
     async function runTailscaleStep(step, label, action) {
@@ -2358,18 +2340,17 @@ HTML = r"""
     }
 
     async function connectExistingTailscaleIp() {
-      const node_id = refs.tailscaleNodeSelect.value || "";
       const tailscale_ip = refs.tailscaleExistingIpInput.value.trim();
       if (!tailscale_ip) {
         setTailscaleWizardOpen(true);
         setTailscaleLog("请输入已有的 Tailscale IP，例如 100.x.x.x。");
         return;
       }
-      const data = await runTailscaleStep("verify", "正在验证已有 Tailscale IP 并连接 Agent", async () => {
+      const data = await runTailscaleStep("verify", "正在检查同一 Tailnet、Agent 服务并自动配对", async () => {
         const resp = await fetch("/api/tailscale/connect-existing-ip", {
           method: "POST",
           headers: authHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ node_id, tailscale_ip }),
+          body: JSON.stringify({ tailscale_ip }),
         });
         return resp.json();
       });
@@ -2378,6 +2359,22 @@ HTML = r"""
         log(`已连接 ${data.node_id} 到 ${data.base_url}`);
         await refreshAll();
       }
+    }
+
+    async function copyAgentInstallCommand() {
+      const command = refs.agentInstallCommand.textContent.trim();
+      try {
+        await navigator.clipboard.writeText(command);
+        refs.copyAgentInstallBtn.textContent = "已复制";
+      } catch (_) {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(refs.agentInstallCommand);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        refs.copyAgentInstallBtn.textContent = "请按 Ctrl+C 复制";
+      }
+      window.setTimeout(() => { refs.copyAgentInstallBtn.textContent = "复制一键安装命令"; }, 1800);
     }
 
     async function pushSelectedMedia(explicitTargetNodeIds = null) {
@@ -2968,12 +2965,8 @@ HTML = r"""
     refs.youtubeAuthorizeBtn.addEventListener("click", startYouTubeAuthorization);
     refs.youtubePrepareBtn.addEventListener("click", prepareYouTubeBroadcast);
     refs.youtubeRevokeBtn.addEventListener("click", revokeYouTubeAuthorization);
-    refs.tailscalePrecheckBtn.addEventListener("click", precheckTailscale);
-    refs.tailscaleInstallBtn.addEventListener("click", installTailscale);
-    refs.tailscaleStatusBtn.addEventListener("click", showTailscaleStatus);
-    refs.tailscaleConnectBtn.addEventListener("click", connectTailscale);
-    refs.tailscaleVerifyBtn.addEventListener("click", verifyTailscale);
     refs.tailscaleUseExistingIpBtn.addEventListener("click", connectExistingTailscaleIp);
+    refs.copyAgentInstallBtn.addEventListener("click", copyAgentInstallCommand);
     if (refs.pushSelectedBtn) refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
     refs.previewTuneBtn.addEventListener("click", previewTune);
     refs.applyTuneBtn.addEventListener("click", applyLastTune);
@@ -3160,6 +3153,65 @@ def tailscale_status_from_json(data: dict[str, Any]) -> dict[str, Any]:
             for peer in (data.get("Peer") or {}).values()
         ],
     }
+
+
+def online_tailscale_peer_for_ip(ip: str) -> dict[str, Any] | None:
+    status = tailscale_status()
+    if not status.get("ok"):
+        return None
+    for peer in status.get("peers") or []:
+        if ip in (peer.get("tailscale_ips") or []) and peer.get("online") is True:
+            return peer
+    return None
+
+
+def pair_tailscale_agent(base_url: str, *, timeout: int = 12) -> dict[str, Any]:
+    try:
+        response = requests.post(f"{base_url.rstrip('/')}/pair", json={"client": "stream-control-hub"}, timeout=timeout)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"message": response.text[:500]}
+        payload["ok"] = response.ok and bool(payload.get("ok", True))
+        payload.setdefault("status_code", response.status_code)
+        return payload
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+def normalize_install_commands(payload: Any) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key in ("unified", "hub", "agent"):
+        value = str(payload.get(key) or "").strip()
+        if value and len(value) <= 2000 and "scripts/install.sh" in value:
+            result[key] = value
+    return result
+
+
+def latest_install_commands() -> dict[str, Any]:
+    if INSTALL_COMMANDS_URL:
+        try:
+            response = requests.get(
+                INSTALL_COMMANDS_URL,
+                headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+                params={"ts": int(time.time())},
+                timeout=8,
+            )
+            response.raise_for_status()
+            commands = normalize_install_commands(response.json())
+            if commands.get("agent"):
+                return {"ok": True, "source": "github", "source_url": INSTALL_COMMANDS_URL, **commands}
+        except Exception:
+            pass
+    try:
+        commands = normalize_install_commands(json.loads(INSTALL_COMMANDS_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        commands = {}
+    if commands.get("agent"):
+        return {"ok": True, "source": "local-fallback", **commands}
+    return {"ok": False, "message": "GitHub and local install command manifests are unavailable"}
 
 
 def tailscale_precheck() -> dict[str, Any]:
@@ -4275,6 +4327,13 @@ def api_tailscale_status():
     return jsonify(tailscale_status())
 
 
+@APP.get("/api/install-commands")
+def api_install_commands():
+    response = jsonify(latest_install_commands())
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
 @APP.get("/api/tailscale/precheck")
 def api_tailscale_precheck():
     return jsonify(tailscale_precheck())
@@ -4312,6 +4371,8 @@ def api_tailscale_connect_existing_ip():
         return reject_forbidden("Tailscale Agent 接入需要 localhost、可信网络或 STREAM_HUB_CONTROL_TOKEN")
     payload = request.get_json(silent=True) or {}
     node_id = str(payload.get("node_id") or "").strip()
+    agent_name = str(payload.get("name") or payload.get("agent_name") or "").strip()
+    supplied_token = str(payload.get("token") or "").strip()
     raw_ip = str(payload.get("tailscale_ip") or payload.get("ip") or "").strip()
     try:
         ip = ipaddress.ip_address(raw_ip.split("%", 1)[0])
@@ -4320,22 +4381,66 @@ def api_tailscale_connect_existing_ip():
     if ip not in TAILSCALE_CGNAT:
         return jsonify({"ok": False, "message": "这个地址不是 Tailscale 100.x 地址，请确认后再连接"}), 400
 
+    peer = online_tailscale_peer_for_ip(str(ip))
+    if not peer:
+        return jsonify({
+            "ok": False,
+            "message": "该 IP 不是当前 Tailnet 中的在线设备，请确认 Hub 与目标设备登录了同一 Tailscale 网络",
+            "tailscale_ip": str(ip),
+        }), 400
+
     base_url = f"http://{ip}:8787"
+    pairing = pair_tailscale_agent(base_url)
+    if not pairing.get("ok"):
+        status_code = int(pairing.get("status_code") or 502)
+        message = pairing.get("message") or "目标设备未检测到兼容的 Headless Agent"
+        if status_code == 404:
+            message = "Tailscale 设备在线，但未安装新版 Agent；请安装或升级 Agent 后重试"
+        elif status_code == 403:
+            message = "Agent 已安装，但同 Tailnet 自动配对验证失败或已被禁用"
+        return jsonify({
+            "ok": False,
+            "message": message,
+            "tailscale_ip": str(ip),
+            "peer": peer,
+            "status_code": status_code,
+        }), status_code
+    supplied_token = str(pairing.get("token") or "").strip()
+    agent_name = str(pairing.get("name") or pairing.get("hostname") or agent_name).strip()
+    if not supplied_token:
+        return jsonify({"ok": False, "message": "Agent 配对成功但未返回控制凭据，请升级 Agent"}), 502
+
     nodes = load_nodes()
-    target_index = next((index for index, item in enumerate(nodes) if str(item.get("id")) == node_id), -1) if node_id else -1
-    creating = not node_id
+    target_index = next((index for index, item in enumerate(nodes) if str(item.get("id")) == node_id), -1)
+    if not node_id:
+        target_index = next((
+            index for index, item in enumerate(nodes)
+            if str(item.get("tailscale_ip") or "") == str(ip)
+            or node_base_url(item) == base_url
+        ), -1)
+        if target_index >= 0:
+            node_id = str(nodes[target_index].get("id") or "")
     if node_id and target_index < 0:
         return jsonify({"ok": False, "message": "Agent 不存在"}), 404
-    if creating:
-        node_id = f"agent-{str(ip).replace('.', '-')}"
-        target_index = next((index for index, item in enumerate(nodes) if str(item.get("id")) == node_id), -1)
-        creating = target_index < 0
-    node = dict(nodes[target_index]) if target_index >= 0 else {
-        "id": node_id,
-        "name": node_id,
-        "role": "stream-node",
-        "enabled": True,
-    }
+    creating = target_index < 0
+    if target_index >= 0:
+        node = dict(nodes[target_index])
+        node["token"] = supplied_token
+    else:
+        base_id = secure_filename(agent_name).strip("-_") or f"agent-{str(ip).replace('.', '-')}"
+        node_id = base_id
+        suffix = 2
+        existing_ids = {str(item.get("id") or "") for item in nodes}
+        while node_id in existing_ids:
+            node_id = f"{base_id}-{suffix}"
+            suffix += 1
+        node = {
+            "id": node_id,
+            "name": agent_name or node_id,
+            "role": "stream-node",
+            "enabled": True,
+            "token": supplied_token,
+        }
     previous_base_url = node_base_url(node)
     probe_node = dict(node)
     probe_node["base_url"] = base_url
@@ -4368,7 +4473,7 @@ def api_tailscale_connect_existing_ip():
     save_nodes(nodes)
     return jsonify({
         "ok": True,
-        "message": "已有 Tailscale IP 验证成功，Agent 已接入",
+        "message": "同一 Tailnet、Agent 服务和控制权限均已验证，节点已直接接入",
         "node_id": node_id,
         "base_url": base_url,
         "previous_base_url": previous_base_url,
