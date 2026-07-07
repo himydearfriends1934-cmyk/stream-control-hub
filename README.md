@@ -90,6 +90,21 @@ copy config\nodes.example.json config\nodes.json
 
 Open `http://127.0.0.1:8788`.
 
+### Linux development checks
+
+Run the same syntax checks and test suite used by CI:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+sh scripts/check-linux.sh
+```
+
+GitHub Actions runs these checks on Ubuntu with Python 3.11, 3.12, and 3.13. The
+installer tests exercise the POSIX-shell path there, including preservation of
+existing Agent settings during upgrades.
+
 ## Node Model
 
 Each node entry describes how the hub reaches a VPS dashboard or node agent over a trusted network such as Tailscale.
