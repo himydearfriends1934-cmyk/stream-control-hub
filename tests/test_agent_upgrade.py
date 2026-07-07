@@ -147,6 +147,8 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("discovered_public_url", inspect.getsource(app.run_share_task))
         self.assertIn("不支持媒体哈希校验", inspect.getsource(app.run_share_task))
         self.assertIn("source_hash=source_hash", inspect.getsource(app.run_share_task))
+        self.assertIn("首选源节点不可用，已切换到", inspect.getsource(app.run_share_task))
+        self.assertIn("所有在线源 Agent", inspect.getsource(app.run_share_task))
         self.assertIn("function showMediaProperties", app.HTML)
         self.assertIn("function moveMediaToGroup", app.HTML)
         self.assertIn("function renameQuickGroup", app.HTML)

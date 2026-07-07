@@ -4497,22 +4497,43 @@ def run_share_task(
     started_at = time.time()
     results: list[dict[str, Any]] = []
     try:
+        media_info = request_node_media_info(source_node, media)
+        source_hash: dict[str, Any] = {}
+        if media_info.get("ok"):
+            source_hash = request_node_media_hash(source_node, str(media_info.get("name") or Path(media).name))
+        if not media_info.get("ok") or not source_hash.get("ok"):
+            preferred_source_id = str(source_node.get("id") or "")
+            for candidate in load_nodes():
+                if str(candidate.get("id") or "") == preferred_source_id or not candidate.get("enabled", True):
+                    continue
+                candidate_media = request_node_media_info(candidate, media)
+                if not candidate_media.get("ok"):
+                    continue
+                candidate_name = str(candidate_media.get("name") or Path(media).name)
+                candidate_hash = request_node_media_hash(candidate, candidate_name)
+                if candidate_hash.get("ok"):
+                    source_node = candidate
+                    media_info = candidate_media
+                    source_hash = candidate_hash
+                    update_share_task(
+                        task_id,
+                        source_node_id=str(candidate.get("id") or ""),
+                        message=f"首选源节点不可用，已切换到 {candidate.get('name') or candidate.get('id')}",
+                    )
+                    break
+        if not media_info.get("ok"):
+            raise RuntimeError(media_info.get("message") or "媒体库没有可用源副本")
+        if not source_hash.get("ok"):
+            raise RuntimeError("所有在线源 Agent 都不支持媒体哈希校验，请先升级源 Agent")
+
         for target_index, target_node in enumerate(target_nodes):
             target_node_id = str(target_node.get("id") or "")
             previous_task = share_task_snapshot(task_id) or {}
             previous_total = int(previous_task.get("single_target_total_bytes") or previous_task.get("total_bytes") or 0)
-            media_info = request_node_media_info(source_node, media)
-            if not media_info.get("ok"):
-                raise RuntimeError(media_info.get("message") or "source media not found")
             filename = str(media_info.get("name") or Path(media).name)
             total_size = int(media_info.get("size") or 0)
             if total_size <= 0:
                 raise RuntimeError("source media size is unavailable")
-            source_hash = request_node_media_hash(source_node, filename)
-            if not source_hash.get("ok"):
-                raise RuntimeError(
-                    f"{source_node.get('name') or source_node.get('id') or '源 Agent'} 不支持媒体哈希校验，请先升级源 Agent"
-                )
             if int(source_hash.get("size") or 0) != total_size:
                 raise RuntimeError("源媒体大小在共享前发生变化，请稍后重试")
             upload_id = f"share_{uuid.uuid4().hex}"
