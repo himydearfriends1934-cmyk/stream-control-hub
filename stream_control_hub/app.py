@@ -2234,7 +2234,7 @@ HTML = r"""
       const tailscaleIps = self.tailscale_ips || data?.tailscale_ips || data?.status?.tailscale_ips || [];
       if (tailscaleIps.length) lines.push({ label: "本机 Tailscale IP", text: tailscaleIps.join(" / "), tone: "done" });
       if (self.dns_name) lines.push({ label: "Tailnet 名称", text: self.dns_name });
-      const peers = data?.peers || data?.status?.peers || [];
+      const peers = data?.peers ?? data?.status?.peers ?? null;
       if (Array.isArray(peers)) {
         const onlinePeers = peers.filter((peer) => peer?.online === true).length;
         const offlinePeers = peers.length - onlinePeers;
@@ -2244,7 +2244,11 @@ HTML = r"""
       if (data?.previous_base_url) lines.push({ label: "原地址已保留", text: data.previous_base_url });
       const detail = data?.error || data?.result?.stderr || data?.result?.message || data?.precheck?.message || "";
       if (!ok && detail) lines.push({ label: "失败原因", text: String(detail).slice(0, 260), tone: "fail" });
-      lines.push({ label: "下一步", text: ok ? "普通设备到这里即可；推流节点还需安装 Agent，然后用其 100.x 地址接入。" : "请按提示修复后重试。" });
+      if (ok && data?.node_id && data?.base_url) {
+        lines.push({ label: "连接完成", text: "Agent 已在线并保存，节点列表已刷新；现在可以关闭此窗口。", tone: "done" });
+      } else {
+        lines.push({ label: "下一步", text: ok ? "请输入 Agent 的 100.x 地址进行连接。" : "请按提示修复后重试。" });
+      }
       return lines;
     }
 
