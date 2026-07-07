@@ -139,7 +139,7 @@ HTML = r"""
     p { color: var(--muted); margin: 5px 0 0; line-height: 1.45; }
     .grid { display: grid; grid-template-columns: minmax(620px, 1.05fr) minmax(540px, 0.95fr); gap: 12px; margin-top: 10px; align-items: start; }
     .left-stack, .side-stack { display: grid; gap: 10px; align-content: start; }
-    .media-workspace { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(620px, 1.25fr) minmax(360px, 0.75fr); gap: 12px; align-items: start; }
+    .media-workspace { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(620px, 1.05fr) minmax(540px, 0.95fr); gap: 12px; align-items: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 0.9fr 1.15fr 1.35fr; gap: 10px; }
     .card {
       border: 1px solid var(--line);
@@ -251,12 +251,40 @@ HTML = r"""
     .media-file-row .muted { color: var(--muted); font-size: 12px; }
     .media-library-tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .media-library-tools select { min-width: 130px; flex: 1; }
-    .quick-group-bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-    .quick-group-bar button { padding: 7px 9px; border-radius: 999px; font-size: 12px; }
+    .quick-group-bar {
+      display: grid;
+      grid-template-columns: repeat(var(--quick-group-count, 1), minmax(0, 1fr));
+      gap: 7px;
+      align-items: center;
+      min-width: 0;
+    }
+    .quick-group-bar:empty { display: none; }
+    .quick-group-bar button {
+      width: 100%;
+      min-width: 0;
+      padding: 7px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .quick-group-bar button.active { border-color: rgba(54, 211, 153, 0.95); background: rgba(54, 211, 153, 0.14); }
-    .resource-tool-row { display: grid; grid-template-columns: minmax(180px, 0.85fr) minmax(240px, 1.05fr) minmax(220px, 1fr) auto auto auto; gap: 7px; align-items: center; }
+    .resource-tool-row { display: grid; grid-template-columns: minmax(150px, 0.65fr) minmax(360px, 2fr) auto; gap: 7px; align-items: center; }
     .resource-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
     .resource-header p { margin: 0; font-size: 12px; }
+    .upload-stack { display: grid; gap: 12px; align-content: start; min-width: 0; }
+    .node-space-card { padding-bottom: 12px; }
+    .node-space-card h2 { margin-bottom: 3px; }
+    .node-space-card p { margin: 0 0 9px; font-size: 12px; }
+    .node-space-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 8px; }
+    .node-space-ring-item { min-width: 0; display: grid; justify-items: center; gap: 5px; padding: 9px 6px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; }
+    .node-space-ring-item strong, .node-space-ring-item small { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-space-ring-item small { color: var(--muted); font-size: 11px; }
+    .node-space-ring { width: 72px; height: 72px; display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--accent) calc(var(--disk-percent) * 1%), rgba(255,255,255,.09) 0); }
+    .node-space-ring::before { content: ""; grid-area: 1 / 1; width: 54px; height: 54px; border-radius: 50%; background: var(--panel); }
+    .node-space-ring span { grid-area: 1 / 1; z-index: 1; font-size: 13px; font-weight: 900; }
+    .node-space-ring.offline { filter: grayscale(1); opacity: .55; }
     .resource-filter-chip {
       display: flex;
       justify-content: space-between;
@@ -651,6 +679,9 @@ HTML = r"""
     .role-row .row-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .role-group + .role-group { margin-top: 12px; }
     .role-group-title { display: flex; justify-content: space-between; align-items: center; margin: 0 0 6px; color: #d6fff0; }
+    .node-role-summary { display: flex; gap: 7px; margin: 8px 0 10px; }
+    .node-role-count { flex: 1; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: rgba(7, 18, 14, 0.5); text-align: center; font-size: 12px; font-weight: 800; }
+    .node-role-count strong { margin: 0 3px; color: var(--text); font-size: 16px; }
     .role-row.disabled-role { opacity: 0.58; border-style: dashed; }
     .role-row.disabled-role:hover { opacity: 0.82; }
     .row-actions button.tiny { min-width: 0; padding: 6px 4px; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
@@ -918,6 +949,10 @@ HTML = r"""
             </div>
             <span class="pill warn">protected</span>
           </div>
+          <div class="node-role-summary" aria-label="节点角色数量">
+            <span class="node-role-count">Agent <strong id="agentNodeCount">0</strong> 台</span>
+            <span class="node-role-count">Hub <strong id="hubNodeCount">0</strong> 台</span>
+          </div>
           <div class="role-group">
             <h3 class="role-group-title"><span>Agent 组</span><small>推流 / 媒体 / Agent 更新</small></h3>
             <div class="node-table" id="nodeList">加载中...</div>
@@ -941,10 +976,7 @@ HTML = r"""
           </div>
           <div class="resource-tool-row">
             <select id="mediaGroupFilter"><option value="">全部分组</option></select>
-            <input id="mediaGroupSearchInput" type="search" placeholder="查找更多分组...">
             <div class="quick-group-bar" id="quickGroupBar"></div>
-            <button id="quickGroupAddBtn">＋快捷</button>
-            <button id="quickGroupRemoveBtn">－快捷</button>
             <button id="resourceMoreBtn">其他功能</button>
           </div>
           <div class="disk-grid" id="mediaDiskList" hidden></div>
@@ -966,19 +998,26 @@ HTML = r"""
           </div>
         </div>
 
-        <div class="card upload-card">
-          <h2>上传模块</h2>
-          <p>上传保持在右侧：先选择目标 Agent，再把视频直传到该节点，可指定初始分组。</p>
-          <div class="split">
-            <div>
-              <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
-              <select id="uploadGroupInput"><option value="">上传到未分组</option></select>
-              <div class="actions" style="margin-top: 8px;">
-                <button class="primary" id="uploadBtn">上传到当前 Agent</button>
-                <button class="danger" id="cancelUploadBtn" disabled>取消上传</button>
+        <div class="upload-stack">
+          <div class="card node-space-card">
+            <h2>节点空间</h2>
+            <p>各 Agent 媒体磁盘的已用比例与剩余容量。</p>
+            <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
+          </div>
+          <div class="card upload-card">
+            <h2>上传模块</h2>
+            <p>上传保持在右侧：先选择目标 Agent，再把视频直传到该节点，可指定初始分组。</p>
+            <div class="split">
+              <div>
+                <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
+                <select id="uploadGroupInput"><option value="">上传到未分组</option></select>
+                <div class="actions" style="margin-top: 8px;">
+                  <button class="primary" id="uploadBtn">上传到当前 Agent</button>
+                  <button class="danger" id="cancelUploadBtn" disabled>取消上传</button>
+                </div>
               </div>
+              <div id="uploadBox" class="transfer-box"></div>
             </div>
-            <div id="uploadBox" class="transfer-box"></div>
           </div>
         </div>
       </div>
@@ -1161,6 +1200,8 @@ HTML = r"""
     const refs = {
       nodeList: document.getElementById("nodeList"),
       hubNodeList: document.getElementById("hubNodeList"),
+      agentNodeCount: document.getElementById("agentNodeCount"),
+      hubNodeCount: document.getElementById("hubNodeCount"),
       roleSettingsModal: document.getElementById("roleSettingsModal"),
       roleSettingsTitle: document.getElementById("roleSettingsTitle"),
       roleSettingsSummary: document.getElementById("roleSettingsSummary"),
@@ -1173,15 +1214,13 @@ HTML = r"""
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
       mediaTotalTable: document.getElementById("mediaTotalTable"),
+      nodeSpaceRings: document.getElementById("nodeSpaceRings"),
       mediaContextMenu: document.getElementById("mediaContextMenu"),
       mediaSendTargets: document.getElementById("mediaSendTargets"),
       mediaMoveTargets: document.getElementById("mediaMoveTargets"),
       mediaGroupTargets: document.getElementById("mediaGroupTargets"),
       mediaGroupFilter: document.getElementById("mediaGroupFilter"),
-      mediaGroupSearchInput: document.getElementById("mediaGroupSearchInput"),
       quickGroupBar: document.getElementById("quickGroupBar"),
-      quickGroupAddBtn: document.getElementById("quickGroupAddBtn"),
-      quickGroupRemoveBtn: document.getElementById("quickGroupRemoveBtn"),
       resourceMoreBtn: document.getElementById("resourceMoreBtn"),
       resourceToolsModal: document.getElementById("resourceToolsModal"),
       resourceToolsClose: document.getElementById("resourceToolsClose"),
@@ -1254,8 +1293,7 @@ HTML = r"""
     let mediaLibrary = { groups: [], resources: [], nodes: [] };
     let openResourceNodeId = "";
     let resourceTableFilters = { name: "", size: "", age: "", group: "", copyNode: "", ownerNode: "" };
-    const QUICK_GROUP_COUNT_STORAGE_KEY = "streamHubQuickGroupCount";
-    let quickGroupCount = Math.max(1, Math.min(8, Number(localStorage.getItem(QUICK_GROUP_COUNT_STORAGE_KEY) || 3)));
+    const QUICK_GROUP_LIMIT = 6;
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
     function rememberSelectedNode(nodeId) {
@@ -1729,6 +1767,10 @@ HTML = r"""
 
     function renderNodes() {
       const checkedIds = new Set(selectedNodeIds().map(String));
+      const activeAgents = nodes.filter((node) => Boolean(node.roles?.agent?.enabled));
+      const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
+      refs.agentNodeCount.textContent = String(activeAgents.length);
+      refs.hubNodeCount.textContent = String(activeHubs.length);
       if (!nodes.length) {
         refs.nodeMonitor.innerHTML = renderMonitor(null);
         refs.nodeList.innerHTML = `<div class="empty-state">还没有配置节点。</div>`;
@@ -1739,8 +1781,6 @@ HTML = r"""
         rememberSelectedNode(nodes[0].id || "");
       }
       refs.nodeMonitor.innerHTML = renderMonitor(selectedNode());
-      const activeAgents = nodes.filter((node) => Boolean(node.roles?.agent?.enabled));
-      const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
       refs.nodeList.innerHTML = activeAgents.length ? `
         <div class="node-table-head">
           <span></span>
@@ -1792,6 +1832,22 @@ HTML = r"""
           </div>`;
         }).join("") : `<div class="empty-state">暂无视频资源。</div>`}
       `;
+    }
+
+    function renderNodeSpaceRings(nodeDisks) {
+      if (!nodeDisks.length) {
+        refs.nodeSpaceRings.innerHTML = `<div class="muted">暂无 Agent 磁盘数据。</div>`;
+        return;
+      }
+      refs.nodeSpaceRings.innerHTML = nodeDisks.map((item) => {
+        const percent = Math.max(0, Math.min(100, Number(item.percent || 0)));
+        const online = Boolean(item.online);
+        return `<div class="node-space-ring-item" title="${escapeHtml(item.node_name)}：已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}">
+          <div class="node-space-ring ${online ? "" : "offline"}" style="--disk-percent:${percent.toFixed(1)}"><span>${online ? `${percent.toFixed(0)}%` : "离线"}</span></div>
+          <strong>${escapeHtml(item.node_name)}</strong>
+          <small>${online ? `剩余 ${escapeHtml(fmtBytes(item.free))}` : "无法读取空间"}</small>
+        </div>`;
+      }).join("");
     }
 
     function renderMedia() {
@@ -1875,14 +1931,12 @@ HTML = r"""
     }
 
     function renderQuickGroups(groups) {
-      const visible = groups.slice(0, quickGroupCount);
-      const buttons = [];
-      for (let index = 0; index < quickGroupCount; index += 1) {
-        const group = visible[index];
-        const active = group && String(refs.mediaGroupFilter.value || "") === String(group.id);
-        buttons.push(`<button class="${active ? "active" : ""}" data-quick-group-index="${index}" data-quick-group-id="${escapeHtml(group?.id || "")}" title="双击改名">${escapeHtml(group?.name || ("快捷分组" + (index + 1)))}</button>`);
-      }
-      refs.quickGroupBar.innerHTML = buttons.join("");
+      const visible = groups.slice(0, QUICK_GROUP_LIMIT);
+      refs.quickGroupBar.style.setProperty("--quick-group-count", String(Math.max(1, visible.length)));
+      refs.quickGroupBar.innerHTML = visible.map((group, index) => {
+        const active = String(refs.mediaGroupFilter.value || "") === String(group.id);
+        return `<button class="${active ? "active" : ""}" data-quick-group-index="${index}" data-quick-group-id="${escapeHtml(group.id)}" title="右键改名">${escapeHtml(group.name)}</button>`;
+      }).join("");
     }
 
     function resourceOwnerCopy(item) {
@@ -1924,11 +1978,10 @@ HTML = r"""
       const checkedNodeId = selectedMediaNodeId();
       const groups = mediaLibrary.groups || [];
       const nodeDisks = mediaLibrary.nodes || [];
+      renderNodeSpaceRings(nodeDisks);
       const allResources = [...(mediaLibrary.resources || [])];
-      const search = (refs.mediaGroupSearchInput?.value || "").trim().toLowerCase();
-      const visibleGroups = groups.filter((item) => !search || String(item.name || "").toLowerCase().includes(search));
       const groupOptions = `<option value="">全部分组</option><option value="__ungrouped__">未分组</option>`
-        + visibleGroups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
+        + groups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
       const currentFilter = refs.mediaGroupFilter.value;
       refs.mediaGroupFilter.innerHTML = groupOptions;
       if ([...refs.mediaGroupFilter.options].some((option) => option.value === currentFilter)) refs.mediaGroupFilter.value = currentFilter;
@@ -3297,23 +3350,6 @@ HTML = r"""
       renderMedia();
     }
 
-    async function createQuickGroup(index) {
-      const nextName = prompt(`创建快捷分组 ${index + 1} 名称：`, `分组${index + 1}`);
-      if (!nextName || !nextName.trim()) return;
-      const data = await postJson("/api/media-groups", {
-        action: "create",
-        group_id: "",
-        name: nextName.trim(),
-      });
-      if (!data.ok) return alert(data.message || "创建分组失败");
-      await refreshAll();
-      if (data.group_id) {
-        refs.mediaGroupFilter.value = data.group_id;
-        resourceTableFilters.group = data.group_id;
-      }
-      renderMedia();
-    }
-
     refs.nodeList.addEventListener("click", (event) => {
       const noteButton = event.target.closest("[data-node-note]");
       if (noteButton) {
@@ -3425,15 +3461,13 @@ HTML = r"""
       resourceTableFilters.group = groupId;
       renderMedia();
     });
-    refs.quickGroupBar.addEventListener("dblclick", (event) => {
+    refs.quickGroupBar.addEventListener("contextmenu", (event) => {
       const button = event.target.closest("[data-quick-group-index]");
       if (!button) return;
       event.preventDefault();
       const groupId = button.dataset.quickGroupId || "";
-      const index = Number(button.dataset.quickGroupIndex || 0);
       const currentName = button.textContent.trim();
-      if (groupId) renameQuickGroup(groupId, currentName);
-      else createQuickGroup(index);
+      renameQuickGroup(groupId, currentName);
     });
     refs.mediaList.addEventListener("click", (event) => {
       hideMediaMenu();
@@ -3572,17 +3606,6 @@ HTML = r"""
     refs.refreshBtn.addEventListener("click", refreshAll);
     refs.mediaGroupFilter.addEventListener("change", () => {
       resourceTableFilters.group = refs.mediaGroupFilter.value || "";
-      renderMedia();
-    });
-    refs.mediaGroupSearchInput.addEventListener("input", renderMedia);
-    refs.quickGroupAddBtn.addEventListener("click", () => {
-      quickGroupCount = Math.min(8, quickGroupCount + 1);
-      localStorage.setItem(QUICK_GROUP_COUNT_STORAGE_KEY, String(quickGroupCount));
-      renderMedia();
-    });
-    refs.quickGroupRemoveBtn.addEventListener("click", () => {
-      quickGroupCount = Math.max(1, quickGroupCount - 1);
-      localStorage.setItem(QUICK_GROUP_COUNT_STORAGE_KEY, String(quickGroupCount));
       renderMedia();
     });
     refs.resourceMoreBtn.addEventListener("click", () => setResourceToolsOpen(true));
@@ -5029,6 +5052,8 @@ def api_media_groups():
     if action == "create":
         if not name or len(name) > 80:
             return jsonify({"ok": False, "message": "group name is required and limited to 80 characters"}), 400
+        if len(groups) >= 6:
+            return jsonify({"ok": False, "message": "最多支持 6 个分组"}), 400
         group_id = f"group-{uuid.uuid4().hex[:10]}"
         groups.append({"id": group_id, "name": name, "created_at": time.time()})
     elif action == "rename":
