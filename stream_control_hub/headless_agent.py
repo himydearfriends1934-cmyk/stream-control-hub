@@ -13,6 +13,7 @@ import signal
 import subprocess
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import suppress
 from pathlib import Path
@@ -818,16 +819,19 @@ def media_allowed(filename: str) -> bool:
 
 
 def safe_media_filename(value: str) -> str:
-    raw = Path(str(value or "").strip()).name
-    name = secure_filename(raw)
+    raw = str(value or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+    raw = unicodedata.normalize("NFC", raw)
     suffix = Path(raw).suffix.lower()
-    if suffix not in {".mp4", ".mov", ".mkv", ".m4v", ".webm"} and not media_allowed(name):
+    if suffix not in {".mp4", ".mov", ".mkv", ".m4v", ".webm"}:
         raise ValueError("unsupported media extension")
-    if not name or not media_allowed(name):
-        name = f"upload-{uuid.uuid4().hex}{suffix}"
-    if not media_allowed(name):
-        raise ValueError("unsupported media extension")
-    return name
+    stem = raw[:-len(suffix)]
+    stem = "".join(char for char in stem if ord(char) >= 32 and char not in '<>:"/\\|?*')
+    stem = stem.strip().strip(".").strip()
+    if not stem:
+        stem = f"视频-{uuid.uuid4().hex[:10]}"
+    if len(stem) > 180:
+        stem = stem[:180].rstrip()
+    return f"{stem}{suffix}"
 
 
 def list_media() -> list[dict[str, Any]]:
@@ -863,7 +867,7 @@ def media_by_name_or_path(value: str) -> Path:
         raise ValueError("missing media name")
     candidate = Path(raw)
     if not candidate.is_absolute():
-        candidate = MEDIA_DIR / secure_filename(raw)
+        candidate = MEDIA_DIR / safe_media_filename(raw)
     resolved = candidate.resolve()
     media_root = MEDIA_DIR.resolve()
     try:

@@ -10,6 +10,7 @@ import uuid
 import hmac
 import ipaddress
 import threading
+import unicodedata
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,7 @@ MIN_FREE_AFTER_UPLOAD_BYTES = int(os.environ.get("STREAM_HUB_MIN_FREE_AFTER_UPLO
 UPLOAD_POLICY_NAME = os.environ.get("STREAM_HUB_UPLOAD_POLICY_NAME", "safe-stable-fast-v1")
 PUSH_AUDIT_LOG = DATA_DIR / "push_audit.jsonl"
 HUB_SETTINGS_FILE = DATA_DIR / "hub-settings.json"
+MEDIA_GROUPS_FILE = DATA_DIR / "media-groups.json"
 PUSH_AUDIT_LOG_MAX_BYTES = int(os.environ.get("STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYTES", str(5 * 1024 ** 2)))
 CONTROL_TOKEN = os.environ.get("STREAM_HUB_CONTROL_TOKEN", "").strip()
 TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_HUB_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
@@ -242,6 +244,13 @@ HTML = r"""
       min-width: 0;
     }
     .media-file-row .muted { color: var(--muted); font-size: 12px; }
+    .media-library-tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .media-library-tools select { min-width: 130px; flex: 1; }
+    .disk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px; }
+    .disk-card { padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: rgba(7,18,14,.5); }
+    .disk-card-head { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
+    .disk-bar { height: 8px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.08); }
+    .disk-bar > span { display: block; height: 100%; background: linear-gradient(90deg,var(--accent),#4cc9f0); }
     .media-context-menu {
       position: fixed;
       z-index: 100;
@@ -870,10 +879,19 @@ HTML = r"""
         </div>
 
         <div class="card resource-card">
-          <h2>资源管理</h2>
+          <h2>全局资源管理器</h2>
+          <div class="media-library-tools">
+            <select id="mediaGroupFilter"><option value="">全部分组</option></select>
+            <button id="mediaGroupAddBtn">增加分组</button>
+            <button id="mediaGroupRenameBtn">分组改名</button>
+            <button class="danger" id="mediaGroupDeleteBtn">删除分组</button>
+            <button id="mediaAssignGroupBtn">将选中视频移入此分组</button>
+          </div>
+          <div class="disk-grid" id="mediaDiskList"></div>
           <div class="split">
             <div>
               <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
+              <select id="uploadGroupInput"><option value="">上传到未分组</option></select>
               <div class="actions" style="margin-top: 8px;">
                 <button class="primary" id="uploadBtn">上传到当前 Agent</button>
                 <button class="danger" id="cancelUploadBtn" disabled>取消上传</button>
@@ -1060,6 +1078,13 @@ HTML = r"""
       mediaContextMenu: document.getElementById("mediaContextMenu"),
       mediaSendTargets: document.getElementById("mediaSendTargets"),
       mediaMoveTargets: document.getElementById("mediaMoveTargets"),
+      mediaGroupFilter: document.getElementById("mediaGroupFilter"),
+      mediaGroupAddBtn: document.getElementById("mediaGroupAddBtn"),
+      mediaGroupRenameBtn: document.getElementById("mediaGroupRenameBtn"),
+      mediaGroupDeleteBtn: document.getElementById("mediaGroupDeleteBtn"),
+      mediaAssignGroupBtn: document.getElementById("mediaAssignGroupBtn"),
+      uploadGroupInput: document.getElementById("uploadGroupInput"),
+      mediaDiskList: document.getElementById("mediaDiskList"),
       refreshBtn: document.getElementById("refreshBtn"),
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
       policyBtn: document.getElementById("policyBtn"),
@@ -1116,6 +1141,7 @@ HTML = r"""
     };
     refs.cancelUploadBtn = document.getElementById("cancelUploadBtn");
     let nodes = [];
+    let mediaLibrary = { groups: [], resources: [], nodes: [] };
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
     function rememberSelectedNode(nodeId) {
@@ -1620,39 +1646,56 @@ HTML = r"""
     function renderMedia() {
       const checkedPath = selectedMediaPath();
       const checkedNodeId = selectedMediaNodeId();
-      const resourceNode = selectedNode();
-      const entries = resourceNode
-        ? [...(resourceNode.health?.videos || [])].map((item) => ({ node: resourceNode, item }))
-          .sort((a, b) => Number(b.item.modified || 0) - Number(a.item.modified || 0))
-        : [];
+      const groupId = refs.mediaGroupFilter.value || "";
+      const groups = mediaLibrary.groups || [];
+      const groupName = (id) => groups.find((item) => item.id === id)?.name || "未分组";
+      const entries = [...(mediaLibrary.resources || [])]
+        .filter((item) => !groupId || (groupId === "__ungrouped__" ? !item.group_id : item.group_id === groupId))
+        .sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
+      const options = `<option value="">全部分组</option><option value="__ungrouped__">未分组</option>`
+        + groups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
+      const currentFilter = refs.mediaGroupFilter.value;
+      refs.mediaGroupFilter.innerHTML = options;
+      if ([...refs.mediaGroupFilter.options].some((option) => option.value === currentFilter)) refs.mediaGroupFilter.value = currentFilter;
+      const currentUploadGroup = refs.uploadGroupInput.value;
+      refs.uploadGroupInput.innerHTML = `<option value="">上传到未分组</option>`
+        + groups.map((item) => `<option value="${escapeHtml(item.id)}">上传到：${escapeHtml(item.name)}</option>`).join("");
+      if ([...refs.uploadGroupInput.options].some((option) => option.value === currentUploadGroup)) refs.uploadGroupInput.value = currentUploadGroup;
+      refs.mediaDiskList.innerHTML = (mediaLibrary.nodes || []).map((item) => {
+        const percent = Math.max(0, Math.min(100, Number(item.percent || 0)));
+        return `<div class="disk-card"><div class="disk-card-head"><strong>${escapeHtml(item.node_name)}</strong><span>${item.online ? `剩余 ${escapeHtml(fmtBytes(item.free))}` : "离线"}</span></div><div class="disk-bar"><span style="width:${percent}%"></span></div><small>已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}（${percent.toFixed(1)}%）</small></div>`;
+      }).join("");
       if (!entries.length) {
-        refs.mediaList.innerHTML = `<div class="empty-state">${resourceNode ? `${escapeHtml(resourceNode.name || resourceNode.id)} 还没有视频资源。` : "请先选择一个节点。"}</div>`;
+        refs.mediaList.innerHTML = `<div class="empty-state">当前分组还没有视频资源。</div>`;
         return;
       }
       refs.mediaList.innerHTML = `
         <div class="media-toolbar">
-          <strong>${escapeHtml(resourceNode.name || resourceNode.id)} · 视频资源</strong>
-          <small>共 ${entries.length} 个。右键可发送、移动、重命名或删除。</small>
+          <strong>所有 Agent / Hub · ${escapeHtml(groupId ? groupName(groupId) : "全部资源")}</strong>
+          <small>共 ${entries.length} 个，按上传时间倒序。右键可复制、移动、重命名或删除。</small>
         </div>
         <div class="media-window">
           <div class="media-window-head">
             <span>文件名</span>
             <span>大小</span>
             <span>上传时间</span>
-            <span>所属 Agent</span>
+            <span>分组 / 副本节点</span>
           </div>
-          ${entries.map(({ node, item }) => {
-            const videoPath = item.video_path || item.path || item.name;
-            const nodeId = String(node.id || "");
+          ${entries.map((item) => {
+            const copies = item.copies || [];
+            const copy = copies.find((entry) => String(entry.node_id) === String(selectedNodeId)) || copies[0] || {};
+            const videoPath = copy.video_path || item.name;
+            const nodeId = String(copy.node_id || "");
             const selected = checkedPath && checkedNodeId === nodeId && checkedPath === videoPath;
             const current = nodeId === String(selectedNodeId);
             const name = item.name || videoPath;
+            const copyNames = copies.map((entry) => entry.node_name || entry.node_id).join("、");
             return `
-              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
+              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-group-id="${escapeHtml(item.group_id || "")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
                 <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
                 <span class="muted">${escapeHtml(fmtBytes(item.size || 0))}</span>
                 <span class="muted">${escapeHtml(item.modified_label || "--")}</span>
-                <span title="${escapeHtml(node.name || node.id || "Agent")}">${escapeHtml(node.name || node.id || "Agent")}</span>
+                <span title="${escapeHtml(copyNames)}">${escapeHtml(groupName(item.group_id))} · ${copies.length} 副本</span>
                 <input data-media-check type="radio" name="media" value="${escapeHtml(name)}" data-node-id="${escapeHtml(nodeId)}" data-video-path="${escapeHtml(videoPath)}" ${selected ? "checked" : ""} hidden>
               </div>
             `;
@@ -1896,14 +1939,24 @@ HTML = r"""
     function renderStreamControls() {
       const node = selectedNode();
       const h = node?.health || {};
-      const videos = h.videos || [];
+      const previousLibraryName = refs.streamVideoSelect.selectedOptions[0]?.dataset.libraryName || "";
+      const groups = mediaLibrary.groups || [];
+      const groupName = (id) => groups.find((item) => item.id === id)?.name || "未分组";
+      const videos = mediaLibrary.resources || [];
       refs.streamNodeInput.value = node ? `${node.name || node.id} (${node.id})` : "选择右侧 VPS 节点";
       refs.streamNodeHint.textContent = node
         ? `${h.ok ? "在线" : "离线"} / ${h.agent?.mode || "旧客户端"} / ${h.stream?.running ? "推流中" : "未推流"}`
         : "等待选择节点";
-      refs.streamVideoSelect.innerHTML = videos.length ? videos.map((item) => `
-        <option value="${escapeHtml(item.video_path || item.path || item.name)}">${escapeHtml(item.name || item.video_path || item.path)} (${escapeHtml(fmtBytes(item.size || 0))})</option>
-      `).join("") : `<option value="">该节点暂无服务器视频，请先推送视频</option>`;
+      refs.streamVideoSelect.innerHTML = videos.length ? videos.map((item) => {
+        const localCopy = (item.copies || []).find((copy) => String(copy.node_id) === String(node?.id || ""));
+        const value = localCopy?.video_path || item.name;
+        const copyHint = localCopy ? "本机已有" : "开播前自动复制";
+        return `<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}">[${escapeHtml(groupName(item.group_id))}] ${escapeHtml(item.name)} · ${copyHint} (${escapeHtml(fmtBytes(item.size || 0))})</option>`;
+      }).join("") : `<option value="">媒体库暂无视频，请先上传</option>`;
+      if (previousLibraryName) {
+        const option = [...refs.streamVideoSelect.options].find((item) => item.dataset.libraryName === previousLibraryName);
+        if (option) option.selected = true;
+      }
       const config = h.stream_config || {};
       if (config.stream_url && !refs.streamUrlInput.dataset.userEdited) refs.streamUrlInput.value = config.stream_url;
       if (config.stream_output_mode) refs.streamOutputModeInput.value = config.stream_output_mode;
@@ -1925,6 +1978,7 @@ HTML = r"""
         stream_key: includeKey ? refs.streamKeyInput.value.trim() : "",
         youtube_stream_id: refs.youtubeStreamSelect.value,
         video_path: refs.streamVideoSelect.value,
+        library_media_name: refs.streamVideoSelect.selectedOptions[0]?.dataset.libraryName || "",
         copy_mode: refs.tuneBox.dataset.copyMode === "1",
         adaptive_mode: refs.adaptiveModeInput.value || "auto",
         stream_output_mode: refs.streamOutputModeInput.value || "direct",
@@ -1984,8 +2038,9 @@ HTML = r"""
     async function refreshAll() {
       refs.refreshBtn.disabled = true;
       try {
-        const nodeResp = await fetch("/api/nodes");
+        const [nodeResp, libraryResp] = await Promise.all([fetch("/api/nodes"), fetch("/api/media-library")]);
         nodes = await nodeResp.json();
+        mediaLibrary = await libraryResp.json();
         renderNodes();
         renderMedia();
         renderStreamControls();
@@ -2151,6 +2206,10 @@ HTML = r"""
           averageBps: file.size / elapsed,
           etaSeconds: 0,
           message: `${file.name} 已通过 ${uploadRoute?.label || "默认线路"} 上传到 ${node.name || node.id}${savedNameNote}。`,
+        });
+        await postJson("/api/media-library/assign", {
+          filename: uploadFilename,
+          group_id: refs.uploadGroupInput.value || "",
         });
         await refreshAll();
       } catch (error) {
@@ -2609,21 +2668,21 @@ HTML = r"""
         return;
       }
       if (action === "use") {
-        rememberSelectedNode(nodeId);
         const input = row.querySelector("[data-media-check]");
         if (input) input.checked = true;
+        const targetNode = selectedNode();
         renderTransfer({
           status: "done",
           badge: "已选用",
-          title: "已选用服务器视频",
-          target: nodeLabel,
+          title: "已从媒体库选用视频",
+          target: targetNode?.name || targetNode?.id || "尚未选择开播节点",
           percent: 100,
-          message: `${mediaName} 已放入当前 Agent 的开播选择。`,
+          message: `${mediaName} 已放入开播选择；若当前节点没有副本，Smart Start 会先从其他节点公网复制。`,
         });
-        renderNodes();
         renderMedia();
         renderStreamControls();
-        refs.streamVideoSelect.value = videoPath;
+        const option = [...refs.streamVideoSelect.options].find((item) => item.dataset.libraryName === mediaName);
+        if (option) option.selected = true;
         return;
       }
       if (action === "rename") {
@@ -2803,6 +2862,30 @@ HTML = r"""
       } finally {
         refs.roleSettingsSaveNameBtn.disabled = false;
       }
+    }
+
+    async function manageMediaGroup(action) {
+      const selected = refs.mediaGroupFilter.value;
+      const current = (mediaLibrary.groups || []).find((item) => item.id === selected);
+      if (action !== "create" && !current) return alert("请先选择一个分组。");
+      if (action === "delete" && !confirm(`删除分组“${current.name}”？视频文件不会被删除，将回到未分组。`)) return;
+      const name = action === "delete" ? "" : prompt(action === "create" ? "新分组名称：" : "修改分组名称：", current?.name || "");
+      if (action !== "delete" && !name?.trim()) return;
+      const data = await postJson("/api/media-groups", { action, group_id: current?.id || "", name: name?.trim() || "" });
+      if (!data.ok) return alert(data.message || "分组操作失败");
+      await refreshAll();
+      if (data.group_id) refs.mediaGroupFilter.value = data.group_id;
+      renderMedia();
+    }
+
+    async function assignSelectedMediaGroup() {
+      const filename = selectedMediaName();
+      if (!filename) return alert("请先选择一个视频。");
+      const selected = refs.mediaGroupFilter.value;
+      const groupId = selected && selected !== "__ungrouped__" ? selected : "";
+      const data = await postJson("/api/media-library/assign", { filename, group_id: groupId });
+      if (!data.ok) return alert(data.message || "移动分组失败");
+      await refreshAll();
     }
 
     refs.nodeList.addEventListener("click", (event) => {
@@ -3006,6 +3089,11 @@ HTML = r"""
       document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
     });
     refs.refreshBtn.addEventListener("click", refreshAll);
+    refs.mediaGroupFilter.addEventListener("change", renderMedia);
+    refs.mediaGroupAddBtn.addEventListener("click", () => manageMediaGroup("create"));
+    refs.mediaGroupRenameBtn.addEventListener("click", () => manageMediaGroup("rename"));
+    refs.mediaGroupDeleteBtn.addEventListener("click", () => manageMediaGroup("delete"));
+    refs.mediaAssignGroupBtn.addEventListener("click", assignSelectedMediaGroup);
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.cancelUploadBtn.addEventListener("click", cancelActiveUpload);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
@@ -3372,6 +3460,71 @@ def save_hub_settings(settings: dict[str, Any]) -> None:
     HUB_SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def load_media_groups() -> dict[str, Any]:
+    ensure_dirs()
+    try:
+        payload = json.loads(MEDIA_GROUPS_FILE.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload.setdefault("groups", [])
+            payload.setdefault("assignments", {})
+            return payload
+    except Exception:
+        pass
+    return {"groups": [], "assignments": {}}
+
+
+def save_media_groups(payload: dict[str, Any]) -> None:
+    ensure_dirs()
+    MEDIA_GROUPS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def media_library_payload() -> dict[str, Any]:
+    metadata = load_media_groups()
+    resources: dict[str, dict[str, Any]] = {}
+    node_disks: list[dict[str, Any]] = []
+    for node in load_nodes():
+        if not node.get("enabled", True):
+            continue
+        status = request_node_json(node, "/api/status", timeout=10)
+        disk = status.get("disk") or {}
+        node_disks.append({
+            "node_id": str(node.get("id") or ""),
+            "node_name": str(node.get("name") or node.get("id") or "Agent"),
+            "online": bool(status.get("ok")),
+            "total": int(disk.get("total") or 0),
+            "used": int(disk.get("used") or 0),
+            "free": int(disk.get("free") or 0),
+            "percent": float(disk.get("percent") or 0),
+        })
+        for video in status.get("videos") or []:
+            name = str(video.get("name") or Path(str(video.get("video_path") or "")).name).strip()
+            if not name:
+                continue
+            item = resources.setdefault(name, {
+                "name": name,
+                "size": int(video.get("size") or 0),
+                "modified": float(video.get("modified") or 0),
+                "modified_label": str(video.get("modified_label") or "--"),
+                "group_id": str((metadata.get("assignments") or {}).get(name) or ""),
+                "copies": [],
+            })
+            if float(video.get("modified") or 0) > float(item.get("modified") or 0):
+                item["modified"] = float(video.get("modified") or 0)
+                item["modified_label"] = str(video.get("modified_label") or "--")
+            item["size"] = max(int(item.get("size") or 0), int(video.get("size") or 0))
+            item["copies"].append({
+                "node_id": str(node.get("id") or ""),
+                "node_name": str(node.get("name") or node.get("id") or "Agent"),
+                "video_path": str(video.get("video_path") or video.get("path") or name),
+            })
+    return {
+        "ok": True,
+        "groups": metadata.get("groups") or [],
+        "resources": sorted(resources.values(), key=lambda item: float(item.get("modified") or 0), reverse=True),
+        "nodes": node_disks,
+    }
+
+
 def node_by_id(node_id: str) -> dict[str, Any] | None:
     for node in load_nodes():
         if str(node.get("id")) == node_id:
@@ -3495,15 +3648,19 @@ def node_upload_base_urls(node: dict[str, Any]) -> list[str]:
 
 
 def safe_media_filename(value: str) -> str:
-    raw = Path(str(value or "").strip()).name
-    name = secure_filename(raw)
+    raw = str(value or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+    raw = unicodedata.normalize("NFC", raw)
     suffix = Path(raw).suffix.lower()
-    if suffix not in ALLOWED_MEDIA_EXTENSIONS and Path(name).suffix.lower() not in ALLOWED_MEDIA_EXTENSIONS:
+    if suffix not in ALLOWED_MEDIA_EXTENSIONS:
         raise ValueError("unsupported media extension")
-    if not name or Path(name).suffix.lower() not in ALLOWED_MEDIA_EXTENSIONS:
-        name = f"upload-{uuid.uuid4().hex}{suffix}"
-    if not media_allowed(name):
-        raise ValueError("unsupported media extension")
+    stem = raw[:-len(suffix)]
+    stem = "".join(char for char in stem if ord(char) >= 32 and char not in '<>:"/\\|?*')
+    stem = stem.strip().strip(".").strip()
+    if not stem:
+        stem = f"视频-{uuid.uuid4().hex[:10]}"
+    if len(stem) > 180:
+        stem = stem[:180].rstrip()
+    name = f"{stem}{suffix}"
     return name
 
 
@@ -4217,6 +4374,65 @@ def api_save_hub_settings():
     return jsonify({"ok": True, "hub_name": hub_name})
 
 
+@APP.get("/api/media-library")
+def api_media_library():
+    return jsonify(media_library_payload())
+
+
+@APP.post("/api/media-groups")
+def api_media_groups():
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action") or "create").strip().lower()
+    group_id = secure_filename(str(payload.get("group_id") or "").strip())
+    name = " ".join(str(payload.get("name") or "").split()).strip()
+    metadata = load_media_groups()
+    groups = list(metadata.get("groups") or [])
+    if action == "create":
+        if not name or len(name) > 80:
+            return jsonify({"ok": False, "message": "group name is required and limited to 80 characters"}), 400
+        group_id = f"group-{uuid.uuid4().hex[:10]}"
+        groups.append({"id": group_id, "name": name, "created_at": time.time()})
+    elif action == "rename":
+        target = next((item for item in groups if str(item.get("id")) == group_id), None)
+        if not target:
+            return jsonify({"ok": False, "message": "group not found"}), 404
+        if not name or len(name) > 80:
+            return jsonify({"ok": False, "message": "group name is required and limited to 80 characters"}), 400
+        target["name"] = name
+    elif action == "delete":
+        if not any(str(item.get("id")) == group_id for item in groups):
+            return jsonify({"ok": False, "message": "group not found"}), 404
+        groups = [item for item in groups if str(item.get("id")) != group_id]
+        metadata["assignments"] = {
+            key: value for key, value in (metadata.get("assignments") or {}).items() if str(value) != group_id
+        }
+    else:
+        return jsonify({"ok": False, "message": "unsupported group action"}), 400
+    metadata["groups"] = groups
+    save_media_groups(metadata)
+    return jsonify({"ok": True, "group_id": group_id, "groups": groups})
+
+
+@APP.post("/api/media-library/assign")
+def api_media_library_assign():
+    payload = request.get_json(silent=True) or {}
+    filename = Path(str(payload.get("filename") or "").strip()).name
+    group_id = secure_filename(str(payload.get("group_id") or "").strip())
+    if not filename:
+        return jsonify({"ok": False, "message": "filename is required"}), 400
+    metadata = load_media_groups()
+    if group_id and not any(str(item.get("id")) == group_id for item in metadata.get("groups") or []):
+        return jsonify({"ok": False, "message": "group not found"}), 404
+    assignments = dict(metadata.get("assignments") or {})
+    if group_id:
+        assignments[filename] = group_id
+    else:
+        assignments.pop(filename, None)
+    metadata["assignments"] = assignments
+    save_media_groups(metadata)
+    return jsonify({"ok": True, "filename": filename, "group_id": group_id})
+
+
 @APP.get("/api/nodes")
 def api_nodes():
     result = []
@@ -4607,9 +4823,10 @@ def api_media_upload():
             ensure_media_disk_space(incoming_size)
         except RuntimeError as exc:
             return jsonify({"ok": False, "message": str(exc)}), 507
-    name = secure_filename(upload.filename)
-    if not name:
-        return jsonify({"ok": False, "message": "invalid filename"}), 400
+    try:
+        name = safe_media_filename(upload.filename)
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
     target = MEDIA_DIR / name
     counter = 1
     while target.exists():
@@ -4623,7 +4840,10 @@ def api_media_upload():
 def api_media_push():
     payload = request.get_json(silent=True) or {}
     node_ids = [str(item) for item in payload.get("node_ids") or []]
-    media_name = secure_filename(str(payload.get("media_name") or ""))
+    try:
+        media_name = safe_media_filename(str(payload.get("media_name") or ""))
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
     media_path = MEDIA_DIR / media_name
     if not node_ids:
         return jsonify({"ok": False, "message": "no nodes selected"}), 400
@@ -4753,6 +4973,14 @@ def api_node_media_rename():
     if not media or not new_name:
         return jsonify({"ok": False, "message": "media and new_name are required"}), 400
     result = post_node_json(node, "/api/media/rename", {"media": media, "new_name": new_name}, timeout=30)
+    if result.get("ok"):
+        old_name = Path(media).name
+        metadata = load_media_groups()
+        assignments = dict(metadata.get("assignments") or {})
+        if old_name in assignments:
+            assignments[new_name] = assignments.pop(old_name)
+            metadata["assignments"] = assignments
+            save_media_groups(metadata)
     return jsonify({"node_id": node_id, **result}), 200 if result.get("ok") else int(result.get("status_code") or 502)
 
 
@@ -4806,6 +5034,55 @@ def redacted_stream_result(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def ensure_library_media_on_node(target_node: dict[str, Any], filename: str) -> dict[str, Any]:
+    safe_name = safe_media_filename(filename)
+    target_status = request_node_json(target_node, "/api/status", timeout=12)
+    for video in target_status.get("videos") or []:
+        if str(video.get("name") or "") == safe_name:
+            return {"ok": True, "copied": False, "video_path": str(video.get("video_path") or safe_name)}
+
+    source_node = None
+    for candidate in load_nodes():
+        if str(candidate.get("id") or "") == str(target_node.get("id") or "") or not candidate.get("enabled", True):
+            continue
+        status = request_node_json(candidate, "/api/status", timeout=12)
+        if any(str(video.get("name") or "") == safe_name for video in status.get("videos") or []):
+            source_node = candidate
+            break
+    if not source_node:
+        return {"ok": False, "message": f"媒体库中没有可复制的在线副本：{safe_name}"}
+
+    task_id = f"ensure_{uuid.uuid4().hex}"
+    with SHARE_TASKS_LOCK:
+        SHARE_TASKS[task_id] = {
+            "task_id": task_id,
+            "status": "queued",
+            "source_node_id": str(source_node.get("id") or ""),
+            "target_node_ids": [str(target_node.get("id") or "")],
+            "media": safe_name,
+            "message": "开播前自动复制媒体",
+            "done_bytes": 0,
+            "total_bytes": 0,
+            "results": [],
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+    progress_url = request.host_url.rstrip("/") + f"/api/media/share/progress/{task_id}"
+    run_share_task(task_id, source_node, [target_node], safe_name, progress_url)
+    task = share_task_snapshot(task_id) or {}
+    if task.get("status") != "done":
+        return {"ok": False, "message": task.get("error") or task.get("message") or "自动复制失败"}
+    refreshed = request_node_json(target_node, "/api/status", timeout=12)
+    video = next((item for item in refreshed.get("videos") or [] if str(item.get("name") or "") == safe_name), None)
+    return {
+        "ok": bool(video),
+        "copied": True,
+        "source_node_id": str(source_node.get("id") or ""),
+        "video_path": str((video or {}).get("video_path") or safe_name),
+        "message": "媒体已自动复制到开播节点" if video else "复制完成但目标文件未找到",
+    }
+
+
 @APP.post("/api/nodes/stream/recommend")
 def api_nodes_stream_recommend():
     payload = request.get_json(silent=True) or {}
@@ -4832,6 +5109,13 @@ def api_nodes_stream_start():
     if not node.get("enabled", True):
         return jsonify({"ok": False, "message": "node disabled"}), 409
     node_payload = stream_payload_for_node(payload)
+    library_media_name = str(payload.get("library_media_name") or "").strip()
+    ensured: dict[str, Any] | None = None
+    if library_media_name:
+        ensured = ensure_library_media_on_node(node, library_media_name)
+        if not ensured.get("ok"):
+            return jsonify({"ok": False, "message": ensured.get("message") or "开播媒体自动复制失败"}), 502
+        node_payload["video_path"] = str(ensured.get("video_path") or library_media_name)
     if not node_payload["video_path"]:
         return jsonify({"ok": False, "message": "missing node video_path"}), 400
     if node_payload["stream_output_mode"] == "direct" and not node_payload["stream_key"]:
@@ -4842,6 +5126,7 @@ def api_nodes_stream_start():
     status_code = 200 if result.get("ok") else 502
     return jsonify({
         "node_id": node_id,
+        "media_ensure": ensured,
         **redacted_stream_result(result),
     }), status_code
 
