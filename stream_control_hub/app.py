@@ -647,7 +647,14 @@ HTML = r"""
       border-color: rgba(54, 211, 153, 0.85);
       background: rgba(20, 55, 43, 0.86);
     }
-    .node-row.selected { box-shadow: 0 0 0 1px rgba(54, 211, 153, 0.22); }
+    .node-row.selected {
+      border-color: var(--accent);
+      background: linear-gradient(90deg, rgba(54, 211, 153, .28), rgba(20, 55, 43, .94) 38%, rgba(25, 43, 37, .9));
+      box-shadow: inset 5px 0 0 var(--accent), 0 0 0 2px rgba(54, 211, 153, .42), 0 0 18px rgba(54, 211, 153, .28);
+      transform: translateY(-1px);
+    }
+    .node-row.selected .node-name strong { color: #8fffd5; text-shadow: 0 0 10px rgba(54, 211, 153, .45); }
+    .node-row.selected .node-state { color: var(--text); }
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-name small { color: var(--muted); display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-note { display: inline-block; max-width: 9em; margin-top: 3px; padding: 2px 6px; border: 1px dashed var(--line); border-radius: 999px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 700; cursor: pointer; }

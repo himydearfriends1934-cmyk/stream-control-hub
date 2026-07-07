@@ -89,6 +89,8 @@ class AgentUpgradeTests(unittest.TestCase):
         from stream_control_hub import app
 
         self.assertIn("streamHubLastSelectedNodeId", app.HTML)
+        self.assertIn("box-shadow: inset 5px 0 0 var(--accent)", app.HTML)
+        self.assertIn(".node-row.selected .node-name strong", app.HTML)
         self.assertIn('id="roleSettingsModal"', app.HTML)
         self.assertIn("data-role-settings", app.HTML)
         self.assertIn('data-settings-role="${role}"', app.HTML)
