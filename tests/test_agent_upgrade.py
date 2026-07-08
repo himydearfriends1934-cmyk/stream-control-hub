@@ -95,7 +95,10 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('id="roleSettingsModal"', app.HTML)
         self.assertIn("data-role-settings", app.HTML)
         self.assertIn('data-settings-role="${role}"', app.HTML)
-        self.assertIn("const activeAgents = nodes.filter", app.HTML)
+        self.assertIn("const agentRows = nodes.filter", app.HTML)
+        self.assertIn("/api/nodes/delete", app.HTML)
+        self.assertIn('refs.nodeList.addEventListener("contextmenu"', app.HTML)
+        self.assertIn('refs.nodeSpaceRings.addEventListener("contextmenu"', app.HTML)
         self.assertIn("const activeHubs = nodes.filter", app.HTML)
         self.assertIn("function streamDot(streaming)", app.HTML)
         self.assertIn('streaming ? "stream-live" : "stream-idle"', app.HTML)
@@ -170,6 +173,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('id="nodeSpaceRings"', app.HTML)
         self.assertIn('class="upload-stack"', app.HTML)
         self.assertIn("function renderNodeSpaceRings", app.HTML)
+        self.assertIn("const diskByNodeId = new Map", app.HTML)
         self.assertIn("conic-gradient", app.HTML)
         self.assertIn("max-height: 244px", app.HTML)
         self.assertIn("grid-template-columns: repeat(6, minmax(0, 1fr))", app.HTML)
@@ -275,6 +279,29 @@ class AgentUpgradeTests(unittest.TestCase):
                 args, kwargs = post.call_args
                 self.assertEqual(args[0], "http://100.64.0.9:8788/api/nodes/import")
                 self.assertEqual(kwargs["headers"], {"X-Control-Token": "hub-token"})
+
+    def test_hub_deletes_node_record_only_from_config(self):
+        from stream_control_hub import app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(
+                json.dumps([
+                    {"id": "keep", "base_url": "http://100.64.0.2:8787"},
+                    {"id": "remove", "base_url": "http://100.64.0.3:8787"},
+                ]),
+                encoding="utf-8",
+            )
+            with patch.object(app, "NODES_FILE", nodes_file):
+                response = app.APP.test_client().post(
+                    "/api/nodes/delete",
+                    json={"node_id": "remove"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.get_json()["deleted"])
+                saved = json.loads(nodes_file.read_text(encoding="utf-8"))
+                self.assertEqual([item["id"] for item in saved], ["keep"])
 
     def test_hub_can_forward_role_deactivation(self):
         from stream_control_hub import app

@@ -663,6 +663,8 @@ HTML = r"""
     }
     .node-row.selected .node-name strong { color: #8fffd5; text-shadow: 0 0 10px rgba(54, 211, 153, .45); }
     .node-row.selected .node-state { color: var(--text); }
+    .node-row.offline-node, .node-space-ring-item.offline-node { opacity: .68; }
+    .node-row.offline-node:hover, .node-space-ring-item.offline-node:hover { opacity: .9; }
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-name small { color: var(--muted); display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-note { display: inline-block; max-width: 9em; margin-top: 3px; padding: 2px 6px; border: 1px dashed var(--line); border-radius: 999px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 700; cursor: pointer; }
@@ -1792,7 +1794,7 @@ HTML = r"""
       const note = String(node.note || "").trim();
       const notePreview = note ? `${[...note].slice(0, 6).join("")}${[...note].length > 6 ? "…" : ""}` : "添加备注";
       return `
-        <div class="node-row ${selected ? "selected" : ""}" data-node-row data-node-id="${escapeHtml(node.id)}">
+        <div class="node-row ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="右键可删除这个节点记录">
           <input data-node-check type="checkbox" value="${escapeHtml(node.id)}" ${checked ? "checked" : ""} ${node.enabled === false ? "disabled" : ""} title="选中后可推送资源或升级">
           <span class="node-name">
             <strong>${escapeHtml(node.name || node.id)}</strong>
@@ -1831,9 +1833,10 @@ HTML = r"""
 
     function renderNodes() {
       const checkedIds = new Set(selectedNodeIds().map(String));
-      const activeAgents = nodes.filter((node) => Boolean(node.roles?.agent?.enabled));
+      const agentRows = nodes.filter((node) => node.enabled !== false);
       const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
-      refs.agentNodeCount.textContent = String(activeAgents.length);
+      const onlineAgentCount = agentRows.filter((node) => Boolean(node.roles?.agent?.enabled)).length;
+      refs.agentNodeCount.textContent = `${onlineAgentCount}/${agentRows.length}`;
       refs.hubNodeCount.textContent = String(activeHubs.length);
       if (!nodes.length) {
         refs.nodeMonitor.innerHTML = renderMonitor(null);
@@ -1845,7 +1848,7 @@ HTML = r"""
         rememberSelectedNode(nodes[0].id || "");
       }
       refs.nodeMonitor.innerHTML = renderMonitor(selectedNode());
-      refs.nodeList.innerHTML = activeAgents.length ? `
+      refs.nodeList.innerHTML = agentRows.length ? `
         <div class="node-table-head">
           <span></span>
           <span>节点</span>
@@ -1853,8 +1856,8 @@ HTML = r"""
           <span>推流</span>
           <span>操作</span>
         </div>
-        ${activeAgents.map((node) => renderNodeRow(node, checkedIds)).join("")}
-      ` : `<div class="empty-state">还没有已激活的 Agent。</div>`;
+        ${agentRows.map((node) => renderNodeRow(node, checkedIds)).join("")}
+      ` : `<div class="empty-state">还没有配置 Agent 节点。</div>`;
       refs.hubNodeList.innerHTML = activeHubs.length ? `
         <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
         ${activeHubs.map((node) => renderHubRow(node)).join("")}
@@ -1875,15 +1878,28 @@ HTML = r"""
     }
 
     function renderNodeSpaceRings(nodeDisks) {
-      if (!nodeDisks.length) {
-        refs.nodeSpaceRings.innerHTML = `<div class="muted">暂无 Agent 磁盘数据。</div>`;
+      const diskByNodeId = new Map((nodeDisks || []).map((item) => [String(item.node_id || ""), item]));
+      const merged = nodes.map((node) => {
+        const nodeId = String(node.id || "");
+        return diskByNodeId.get(nodeId) || {
+          node_id: nodeId,
+          node_name: node.name || node.id || "Agent",
+          online: false,
+          total: 0,
+          used: 0,
+          free: 0,
+          percent: 0,
+        };
+      });
+      if (!merged.length) {
+        refs.nodeSpaceRings.innerHTML = `<div class="muted">暂无节点数据。</div>`;
         return;
       }
-      refs.nodeSpaceRings.innerHTML = nodeDisks.map((item) => {
+      refs.nodeSpaceRings.innerHTML = merged.map((item) => {
         const percent = Math.max(0, Math.min(100, Number(item.percent || 0)));
         const online = Boolean(item.online);
         const open = String(item.node_id || "") === String(openResourceNodeId || "");
-        return `<div class="node-space-ring-item ${open ? "open" : ""}" role="button" tabindex="0" data-space-node-id="${escapeHtml(item.node_id || "")}" title="双击在资源管理模块查看 ${escapeHtml(item.node_name)} 的视频；已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}">
+        return `<div class="node-space-ring-item ${open ? "open" : ""} ${online ? "" : "offline-node"}" role="button" tabindex="0" data-space-node-id="${escapeHtml(item.node_id || "")}" title="双击在资源管理模块查看 ${escapeHtml(item.node_name)} 的视频；右键可删除节点记录；已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}">
           <div class="node-space-ring ${online ? "" : "offline"}" style="--disk-percent:${percent.toFixed(1)}"><span>${online ? `${percent.toFixed(0)}%` : "离线"}</span></div>
           <strong>${escapeHtml(item.node_name)}</strong>
           <small>${online ? `剩余 ${escapeHtml(fmtBytes(item.free))}` : "无法读取空间"}</small>
@@ -3375,6 +3391,19 @@ HTML = r"""
       }
     }
 
+    async function deleteNodeRecord(nodeId) {
+      const node = nodes.find((item) => String(item.id) === String(nodeId));
+      const label = node?.name || nodeId;
+      if (!nodeId || !confirm(`删除节点记录：${label}？\n\n这只会从当前 Hub 的节点列表移除，不会删除 VPS 上的视频、配置或服务。`)) return;
+      const data = await postJson("/api/nodes/delete", { node_id: nodeId });
+      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      if (!data.ok) return alert(data.message || "节点删除失败");
+      if (String(selectedNodeId) === String(nodeId)) rememberSelectedNode("");
+      if (String(openResourceNodeId) === String(nodeId)) openResourceNodeId = "";
+      log(`节点记录已删除：${label}`);
+      await refreshAll();
+    }
+
     async function transferHubNodes() {
       const target = refs.transferHubUrlInput.value.trim();
       const token = refs.transferHubTokenInput.value.trim();
@@ -3527,6 +3556,12 @@ HTML = r"""
       renderMedia();
       renderStreamControls();
     });
+    refs.nodeList.addEventListener("contextmenu", (event) => {
+      const row = event.target.closest("[data-node-row]");
+      if (!row) return;
+      event.preventDefault();
+      deleteNodeRecord(row.dataset.nodeId);
+    });
     refs.hubNodeList.addEventListener("click", (event) => {
       const settingsButton = event.target.closest("[data-role-settings]");
       if (settingsButton) {
@@ -3577,6 +3612,12 @@ HTML = r"""
     refs.nodeSpaceRings.addEventListener("dblclick", (event) => {
       const card = event.target.closest("[data-space-node-id]");
       if (card) openNodeResources(card.dataset.spaceNodeId);
+    });
+    refs.nodeSpaceRings.addEventListener("contextmenu", (event) => {
+      const card = event.target.closest("[data-space-node-id]");
+      if (!card) return;
+      event.preventDefault();
+      deleteNodeRecord(card.dataset.spaceNodeId);
     });
     refs.nodeSpaceRings.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
@@ -5422,6 +5463,20 @@ def api_node_name():
             save_nodes(nodes)
             return jsonify({"ok": True, "node_id": node_id, "name": name})
     return jsonify({"ok": False, "message": "node not found"}), 404
+
+
+@APP.post("/api/nodes/delete")
+def api_node_delete():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    if not node_id:
+        return jsonify({"ok": False, "message": "node_id is required"}), 400
+    nodes = load_nodes()
+    remaining = [node for node in nodes if str(node.get("id") or "") != node_id]
+    if len(remaining) == len(nodes):
+        return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
+    save_nodes(remaining)
+    return jsonify({"ok": True, "node_id": node_id, "deleted": True, "remaining_count": len(remaining)})
 
 
 @APP.post("/api/nodes/import")
