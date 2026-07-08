@@ -105,6 +105,38 @@ class HubAgentConnectionTests(unittest.TestCase):
         self.assertFalse(response.get_json()["created"])
         self.assertEqual(len(saved), 1)
 
+    def test_ip_only_connection_recognizes_hub_only_node(self):
+        from stream_control_hub import app
+
+        existing = [{
+            "id": "tokyo",
+            "name": "TOKYO",
+            "base_url": "http://100.98.19.85:8787",
+            "enabled": True,
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(existing), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "online_tailscale_peer_for_ip", return_value={"online": True}
+            ), patch.object(
+                app, "pair_tailscale_agent", return_value={"ok": False, "message": "connection refused"}
+            ), patch.object(
+                app,
+                "request_hub_status_url",
+                return_value={"ok": True, "roles": {"hub": {"enabled": True, "version": "abc1234"}}},
+            ):
+                response = app.APP.test_client().post(
+                    "/api/tailscale/connect-existing-ip",
+                    json={"tailscale_ip": "100.98.19.85"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data["hub_only"])
+        self.assertEqual(data["node_id"], "tokyo")
+        self.assertEqual(data["hub_url"], "http://100.98.19.85:8788")
+
 
 if __name__ == "__main__":
     unittest.main()

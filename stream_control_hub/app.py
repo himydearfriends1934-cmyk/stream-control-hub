@@ -2883,6 +2883,13 @@ HTML = r"""
         return resp.json();
       });
       if (data.ok) {
+        if (data.hub_only) {
+          if (data.node_id) rememberSelectedNode(data.node_id);
+          log(`Hub-only 节点：${data.node_id || data.hub_url || tailscale_ip}，Agent 当前关闭`);
+          await refreshAll();
+          setTailscaleLog(`检测结果：Hub 在线，Agent 已关闭。\n\n${data.message || ""}\n\nHub 地址：${data.hub_url || "--"}`);
+          return;
+        }
         rememberSelectedNode(data.node_id || selectedNodeId || "");
         log(`已连接 ${data.node_id} 到 ${data.base_url}`);
         await refreshAll();
@@ -4285,6 +4292,20 @@ def pair_tailscale_agent(base_url: str, *, timeout: int = 12) -> dict[str, Any]:
         except ValueError:
             payload = {"message": response.text[:500]}
         payload["ok"] = response.ok and bool(payload.get("ok", True))
+        payload.setdefault("status_code", response.status_code)
+        return payload
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+def request_hub_status_url(hub_url: str, *, timeout: int = 5) -> dict[str, Any]:
+    try:
+        response = requests.get(f"{hub_url.rstrip('/')}/api/role-status", timeout=timeout)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"message": response.text[:500]}
+        payload["ok"] = response.ok and bool(payload.get("ok", False))
         payload.setdefault("status_code", response.status_code)
         return payload
     except Exception as exc:
@@ -6253,6 +6274,25 @@ def api_tailscale_connect_existing_ip():
     base_url = f"http://{ip}:8787"
     pairing = pair_tailscale_agent(base_url)
     if not pairing.get("ok"):
+        hub_url = f"http://{ip}:8788"
+        hub_status = request_hub_status_url(hub_url)
+        if hub_status.get("ok") and (hub_status.get("roles") or {}).get("hub"):
+            node_id_for_ip = node_id
+            if not node_id_for_ip:
+                for item in load_nodes():
+                    if str(item.get("tailscale_ip") or "") == str(ip) or node_base_url(item) == base_url or node_role_urls(item)["hub"] == hub_url:
+                        node_id_for_ip = str(item.get("id") or "")
+                        break
+            return jsonify({
+                "ok": True,
+                "hub_only": True,
+                "message": "?? VPS ? Hub ???? Agent 8787 ??????? Hub-only ???????????/??/???????????? Agent?",
+                "tailscale_ip": str(ip),
+                "node_id": node_id_for_ip,
+                "hub_url": hub_url,
+                "hub_status": hub_status,
+                "peer": peer,
+            })
         status_code = int(pairing.get("status_code") or 502)
         message = pairing.get("message") or "目标设备未检测到兼容的 Headless Agent"
         if status_code == 404:
