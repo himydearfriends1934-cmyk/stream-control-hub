@@ -106,15 +106,20 @@ class AgentUpgradeTests(unittest.TestCase):
         from stream_control_hub import app
 
         self.assertIn("streamHubLastSelectedNodeId", app.HTML)
-        self.assertIn("box-shadow: inset 5px 0 0 var(--accent)", app.HTML)
+        self.assertIn("box-shadow: inset 5px 0 0 #ff3b4f", app.HTML)
         self.assertIn(".node-row.selected .node-name strong", app.HTML)
+        self.assertIn(".node-row.control-hub", app.HTML)
+        self.assertIn("function switchHubWithFallback", app.HTML)
+        self.assertIn("/api/hubs/switch-target", app.HTML)
         self.assertIn('id="roleSettingsModal"', app.HTML)
         self.assertIn("data-role-settings", app.HTML)
         self.assertIn('data-settings-role="${role}"', app.HTML)
         self.assertIn("const agentRows = nodes.filter", app.HTML)
         self.assertIn("/api/nodes/delete", app.HTML)
-        self.assertIn('refs.nodeList.addEventListener("contextmenu"', app.HTML)
-        self.assertIn('refs.nodeSpaceRings.addEventListener("contextmenu"', app.HTML)
+        self.assertIn('id="roleSettingsDeleteNodeBtn"', app.HTML)
+        self.assertIn("deleteNodeRecord(roleSettingsNodeId)", app.HTML)
+        self.assertNotIn('refs.nodeList.addEventListener("contextmenu"', app.HTML)
+        self.assertNotIn('refs.nodeSpaceRings.addEventListener("contextmenu"', app.HTML)
         self.assertIn("const activeHubs = nodes.filter", app.HTML)
         self.assertIn("function streamDot(streaming)", app.HTML)
         self.assertIn('streaming ? "stream-live" : "stream-idle"', app.HTML)
@@ -325,6 +330,36 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(response.get_json()["target_count"], 1)
         self.assertEqual(post.call_args.args[0], "http://100.64.0.2:8788/api/nodes/import")
         self.assertEqual(post.call_args.args[1]["nodes"], nodes)
+
+    def test_hub_switch_target_falls_back_to_available_hub(self):
+        from stream_control_hub import app
+
+        nodes = [
+            {"id": "dead-hub", "name": "Dead", "base_url": "http://100.64.0.2:8787"},
+            {"id": "live-hub", "name": "Live", "base_url": "http://100.64.0.3:8787"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app,
+                "request_hub_role_status",
+                side_effect=[
+                    {"ok": False, "enabled": False, "url": "http://100.64.0.2:8788"},
+                    {"ok": True, "enabled": True, "url": "http://100.64.0.3:8788"},
+                ],
+            ):
+                response = app.APP.test_client().post(
+                    "/api/hubs/switch-target",
+                    json={"node_id": "dead-hub"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data["fallback"])
+        self.assertEqual(data["node_id"], "live-hub")
+        self.assertEqual(data["url"], "http://100.64.0.3:8788")
 
     def test_hub_activation_forwards_current_nodes_as_seed(self):
         from stream_control_hub import app

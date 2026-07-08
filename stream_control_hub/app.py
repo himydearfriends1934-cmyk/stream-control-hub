@@ -650,19 +650,21 @@ HTML = r"""
       cursor: pointer;
       transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease;
     }
-    .node-row:hover,
-    .node-row.selected {
+    .node-row:hover {
       border-color: rgba(54, 211, 153, 0.85);
       background: rgba(20, 55, 43, 0.86);
     }
-    .node-row.selected {
-      border-color: var(--accent);
-      background: linear-gradient(90deg, rgba(54, 211, 153, .28), rgba(20, 55, 43, .94) 38%, rgba(25, 43, 37, .9));
-      box-shadow: inset 5px 0 0 var(--accent), 0 0 0 2px rgba(54, 211, 153, .42), 0 0 18px rgba(54, 211, 153, .28);
+    .node-row.selected,
+    .node-row.control-hub {
+      border-color: #ff3b4f;
+      background: linear-gradient(90deg, rgba(255, 59, 79, .28), rgba(72, 25, 32, .96) 38%, rgba(25, 43, 37, .9));
+      box-shadow: inset 5px 0 0 #ff3b4f, 0 0 0 2px rgba(255, 59, 79, .58), 0 0 22px rgba(255, 59, 79, .36);
       transform: translateY(-1px);
     }
-    .node-row.selected .node-name strong { color: #8fffd5; text-shadow: 0 0 10px rgba(54, 211, 153, .45); }
-    .node-row.selected .node-state { color: var(--text); }
+    .node-row.selected .node-name strong,
+    .node-row.control-hub .node-name strong { color: #ffe8ec; text-shadow: 0 0 10px rgba(255, 59, 79, .55); }
+    .node-row.selected .node-state,
+    .node-row.control-hub .node-state { color: var(--text); }
     .node-row.offline-node, .node-space-ring-item.offline-node { opacity: .68; }
     .node-row.offline-node:hover, .node-space-ring-item.offline-node:hover { opacity: .9; }
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1075,6 +1077,10 @@ HTML = r"""
         <button id="roleSettingsSaveNameBtn">保存名称</button>
       </div>
       <div class="role-settings-status" id="roleSettingsActions"></div>
+      <div class="role-settings-item">
+        <span><strong>节点记录</strong><small>删除前会先迁移该节点独有资源；失败则保留节点记录。</small></span>
+        <button class="danger" id="roleSettingsDeleteNodeBtn">删除节点</button>
+      </div>
       <div class="control-transfer-box">
         <h3>Hub 控制转移 / 换平台</h3>
         <p>把当前 Hub 的节点信息合并导入到新 Hub，新 Hub 会接管这些 Agent / Hub 节点的控制入口。</p>
@@ -1201,6 +1207,7 @@ HTML = r"""
   <script>
     const TOKEN_FROM_URL = new URLSearchParams(window.location.search).get("token") || "";
     const CONTROL_TOKEN = TOKEN_FROM_URL || sessionStorage.getItem("streamHubControlToken") || localStorage.getItem("streamHubControlToken") || "";
+    const CURRENT_ORIGIN = window.location.origin.replace(/\/+$/, "");
     if (TOKEN_FROM_URL) {
       sessionStorage.setItem("streamHubControlToken", TOKEN_FROM_URL);
       const cleanUrl = new URL(window.location.href);
@@ -1209,6 +1216,14 @@ HTML = r"""
     }
     function authHeaders(extra = {}) {
       return CONTROL_TOKEN ? { ...extra, "X-Control-Token": CONTROL_TOKEN } : extra;
+    }
+
+    function sameOriginUrl(value) {
+      try {
+        return new URL(value, window.location.href).origin.replace(/\/+$/, "") === CURRENT_ORIGIN;
+      } catch (_) {
+        return false;
+      }
     }
     const refs = {
       nodeList: document.getElementById("nodeList"),
@@ -1223,6 +1238,7 @@ HTML = r"""
       roleSettingsActions: document.getElementById("roleSettingsActions"),
       roleSettingsNameInput: document.getElementById("roleSettingsNameInput"),
       roleSettingsSaveNameBtn: document.getElementById("roleSettingsSaveNameBtn"),
+      roleSettingsDeleteNodeBtn: document.getElementById("roleSettingsDeleteNodeBtn"),
       roleSettingsClose: document.getElementById("roleSettingsClose"),
       transferHubUrlInput: document.getElementById("transferHubUrlInput"),
       transferHubTokenInput: document.getElementById("transferHubTokenInput"),
@@ -1796,7 +1812,7 @@ HTML = r"""
       const note = String(node.note || "").trim();
       const notePreview = note ? `${[...note].slice(0, 6).join("")}${[...note].length > 6 ? "…" : ""}` : "添加备注";
       return `
-        <div class="node-row ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="右键可删除这个节点记录">
+        <div class="node-row ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="点击选中；删除/取消角色请打开后面的设置">
           <input data-node-check type="checkbox" value="${escapeHtml(node.id)}" ${checked ? "checked" : ""} ${node.enabled === false ? "disabled" : ""} title="选中后可推送资源或升级">
           <span class="node-name">
             <strong>${escapeHtml(node.name || node.id)}</strong>
@@ -1819,14 +1835,15 @@ HTML = r"""
       const role = node.roles?.hub || {};
       const enabled = Boolean(role.enabled);
       const version = role.version || "未安装";
+      const current = enabled && role.url && sameOriginUrl(role.url);
       return `
-        <div class="node-row role-row" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
+        <div class="node-row role-row ${current ? "control-hub" : ""}" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
           <span>${stateDot(enabled, false)}</span>
-          <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>Hub 版本 ${escapeHtml(version)}</small></span>
-          <span class="node-state">${enabled ? "已启用" : "未启用"}</span>
+          <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>${current ? "当前控制 Hub · " : ""}Hub 版本 ${escapeHtml(version)}</small></span>
+          <span class="node-state">${current ? "控制中" : enabled ? "已启用" : "未启用"}</span>
           <span class="node-state">8788</span>
           <span class="row-actions">
-            <button class="tiny" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}">切换 Hub</button>
+            <button class="tiny" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}">${current ? "当前 Hub" : "切换 Hub"}</button>
             <button class="tiny settings-button" data-role-settings data-node-id="${escapeHtml(node.id)}" title="节点角色设置" aria-label="节点角色设置">⚙</button>
           </span>
         </div>
@@ -1901,7 +1918,7 @@ HTML = r"""
         const percent = Math.max(0, Math.min(100, Number(item.percent || 0)));
         const online = Boolean(item.online);
         const open = String(item.node_id || "") === String(openResourceNodeId || "");
-        return `<div class="node-space-ring-item ${open ? "open" : ""} ${online ? "" : "offline-node"}" role="button" tabindex="0" data-space-node-id="${escapeHtml(item.node_id || "")}" title="双击在资源管理模块查看 ${escapeHtml(item.node_name)} 的视频；右键可删除节点记录；已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}">
+        return `<div class="node-space-ring-item ${open ? "open" : ""} ${online ? "" : "offline-node"}" role="button" tabindex="0" data-space-node-id="${escapeHtml(item.node_id || "")}" title="双击在资源管理模块查看 ${escapeHtml(item.node_name)} 的视频；删除/取消角色请打开后面的设置；已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}">
           <div class="node-space-ring ${online ? "" : "offline"}" style="--disk-percent:${percent.toFixed(1)}"><span>${online ? `${percent.toFixed(0)}%` : "离线"}</span></div>
           <strong>${escapeHtml(item.node_name)}</strong>
           <small>${online ? `剩余 ${escapeHtml(fmtBytes(item.free))}` : "无法读取空间"}</small>
@@ -3348,8 +3365,7 @@ HTML = r"""
       const nodeName = node?.name || nodeId;
       const roleLabel = role === "hub" ? "Hub" : "Agent";
       if (action === "switch-hub") {
-        const url = node?.roles?.hub?.url;
-        if (url) window.location.href = url;
+        await switchHubWithFallback(nodeId);
         return;
       }
       const activating = action === "activate-role";
@@ -3390,6 +3406,28 @@ HTML = r"""
         log(friendlyError(error, "节点名称保存失败"));
       } finally {
         refs.roleSettingsSaveNameBtn.disabled = false;
+      }
+    }
+
+    async function switchHubWithFallback(nodeId) {
+      const node = nodes.find((item) => String(item.id) === String(nodeId));
+      const fallbackUrl = node?.roles?.hub?.url || "";
+      try {
+        const data = await postJson("/api/hubs/switch-target", { node_id: nodeId });
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        if (data.ok && data.url) {
+          if (data.fallback) log(`目标 Hub 无响应，自动切换到可用 Hub：${data.node_name || data.node_id || data.url}`);
+          window.location.href = data.url;
+          return;
+        }
+        throw new Error(data.message || "没有可用 Hub");
+      } catch (error) {
+        if (fallbackUrl && !sameOriginUrl(fallbackUrl)) {
+          log(friendlyError(error, "Hub 探测失败，尝试直接打开目标地址"));
+          window.location.href = fallbackUrl;
+          return;
+        }
+        alert(friendlyError(error, "没有可用 Hub 可切换"));
       }
     }
 
@@ -3608,12 +3646,6 @@ HTML = r"""
       renderMedia();
       renderStreamControls();
     });
-    refs.nodeList.addEventListener("contextmenu", (event) => {
-      const row = event.target.closest("[data-node-row]");
-      if (!row) return;
-      event.preventDefault();
-      deleteNodeRecord(row.dataset.nodeId);
-    });
     refs.hubNodeList.addEventListener("click", (event) => {
       const settingsButton = event.target.closest("[data-role-settings]");
       if (settingsButton) {
@@ -3631,8 +3663,7 @@ HTML = r"""
       }
       const row = event.target.closest("[data-hub-row]");
       if (!row) return;
-      const node = nodes.find((item) => String(item.id) === String(row.dataset.nodeId));
-      if (node?.roles?.hub?.enabled && node.roles.hub.url) window.location.href = node.roles.hub.url;
+      switchHubWithFallback(row.dataset.nodeId);
     });
     refs.roleSettingsClose.addEventListener("click", () => setRoleSettingsOpen(false));
     refs.roleSettingsModal.addEventListener("click", (event) => {
@@ -3645,6 +3676,7 @@ HTML = r"""
       handleRoleAction(button.dataset.roleAction, button.dataset.settingsRole, roleSettingsNodeId, button);
     });
     refs.roleSettingsSaveNameBtn.addEventListener("click", saveRoleSettingsName);
+    refs.roleSettingsDeleteNodeBtn.addEventListener("click", () => deleteNodeRecord(roleSettingsNodeId));
     refs.transferHubNodesBtn.addEventListener("click", transferHubNodes);
     refs.syncAllHubsBtn.addEventListener("click", syncAllHubs);
     refs.roleSettingsNameInput.addEventListener("keydown", (event) => {
@@ -3665,12 +3697,6 @@ HTML = r"""
     refs.nodeSpaceRings.addEventListener("dblclick", (event) => {
       const card = event.target.closest("[data-space-node-id]");
       if (card) openNodeResources(card.dataset.spaceNodeId);
-    });
-    refs.nodeSpaceRings.addEventListener("contextmenu", (event) => {
-      const card = event.target.closest("[data-space-node-id]");
-      if (!card) return;
-      event.preventDefault();
-      deleteNodeRecord(card.dataset.spaceNodeId);
     });
     refs.nodeSpaceRings.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
@@ -5753,6 +5779,38 @@ def api_sync_all_hubs():
         "ok_count": ok_count,
         "results": results,
     })
+
+
+@APP.post("/api/hubs/switch-target")
+def api_hub_switch_target():
+    payload = request.get_json(silent=True) or {}
+    requested_id = str(payload.get("node_id") or "").strip()
+    nodes = load_nodes()
+
+    def usable_hub(node: dict[str, Any]) -> dict[str, Any] | None:
+        hub = request_hub_role_status(node)
+        if hub.get("enabled") and hub.get("ok") and hub.get("url"):
+            return {
+                "node_id": str(node.get("id") or ""),
+                "node_name": str(node.get("name") or node.get("id") or ""),
+                "url": str(hub.get("url") or "").rstrip("/"),
+                "hub": hub,
+            }
+        return None
+
+    requested_node = next((node for node in nodes if str(node.get("id") or "") == requested_id), None)
+    requested_result = usable_hub(requested_node) if requested_node else None
+    if requested_result:
+        return jsonify({"ok": True, "fallback": False, **requested_result})
+
+    for node in nodes:
+        if str(node.get("id") or "") == requested_id:
+            continue
+        result = usable_hub(node)
+        if result:
+            return jsonify({"ok": True, "fallback": True, "requested_node_id": requested_id, **result})
+
+    return jsonify({"ok": False, "requested_node_id": requested_id, "message": "没有可用 Hub"}), 409
 
 
 @APP.get("/api/role-status")
