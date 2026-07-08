@@ -273,6 +273,29 @@ def normalize_public_origin(value: str) -> str:
     return f"{parsed.scheme}://{parsed.hostname}:{port}"
 
 
+def is_public_transfer_url(value: str) -> bool:
+    """Allow Agent-to-Agent media traffic only over an Internet-routable target."""
+    try:
+        parsed = urlparse(str(value or "").strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        host = parsed.hostname.split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            lowered = host.lower().rstrip(".")
+            return not lowered.endswith((".local", ".ts.net", ".beta.tailscale.net"))
+        return not (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_unspecified
+            or address in TAILSCALE_CGNAT
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def discover_public_origin(*, force: bool = False) -> str:
     configured = normalize_public_origin(PUBLIC_ORIGIN)
     if configured:
@@ -1722,6 +1745,11 @@ def api_share_media():
     target_base_urls = list(dict.fromkeys(target_base_urls))
     if not target_base_urls:
         return jsonify({"ok": False, "message": "missing target_base_url"}), 400
+    if any(not is_public_transfer_url(url) for url in target_base_urls):
+        return jsonify({
+            "ok": False,
+            "message": "共享仅允许公网目标地址；已禁止 Tailscale、局域网和回环地址",
+        }), 400
     try:
         media_path = media_by_name_or_path(str(payload.get("media") or payload.get("video_path") or ""))
     except ValueError as exc:

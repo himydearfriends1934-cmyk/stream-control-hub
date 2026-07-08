@@ -155,6 +155,15 @@ class HubPublicUploadRouteTests(unittest.TestCase):
 
 
 class AgentUploadIntegrityTests(unittest.TestCase):
+    def test_agent_share_accepts_only_public_target_urls(self):
+        from stream_control_hub import headless_agent
+
+        self.assertTrue(headless_agent.is_public_transfer_url("http://165.99.42.174:8787"))
+        self.assertTrue(headless_agent.is_public_transfer_url("https://upload.example.com"))
+        self.assertFalse(headless_agent.is_public_transfer_url("http://100.85.233.24:8787"))
+        self.assertFalse(headless_agent.is_public_transfer_url("http://192.168.1.20:8787"))
+        self.assertFalse(headless_agent.is_public_transfer_url("http://agent.tailnet.ts.net:8787"))
+
     def agent_paths(self, module, root):
         data_dir = Path(root) / "agent_data"
         media_dir = data_dir / "media"

@@ -1458,6 +1458,7 @@ HTML = r"""
         <div class="transfer-grid">
           <div><small>复制源 / 上传源</small><strong>${escapeHtml(state.source || "本机浏览器")}</strong></div>
           <div><small>目标节点</small><strong>${escapeHtml(state.target || "--")}</strong></div>
+          <div><small>传输线路</small><strong>${escapeHtml(state.routeLabel || "公网直连")}</strong></div>
           <div><small>进度</small><strong>${Math.round(percent)}%</strong></div>
           <div><small>已传 / 总量</small><strong>${escapeHtml(fmtBytes(state.doneBytes || 0))} / ${escapeHtml(fmtBytes(state.totalBytes || 0))}</strong></div>
           <div><small>当前速度</small><strong>${escapeHtml(fmtRate(state.currentBps || 0))}</strong></div>
@@ -2887,6 +2888,7 @@ HTML = r"""
             title: last.status === "done" ? "共享完成" : last.status === "failed" ? "共享失败" : `共享到 ${targetLabel}`,
             source: sourceLabel,
             target: targetLabel,
+            routeLabel: last.route_label || "公网直连（禁止内网回退）",
             percent: last.percent || 0,
             doneBytes: last.done_bytes || 0,
             totalBytes: last.total_bytes || 0,
@@ -4646,7 +4648,9 @@ def run_share_task(
             update_share_task(
                 task_id,
                 status="running",
-                message=f"正在共享到 {target_node.get('name') or target_node_id}",
+                message=f"正在通过公网共享到 {target_node.get('name') or target_node_id}",
+                transfer_route=target_upload_base_urls[0],
+                route_label="公网直连（禁止内网回退）",
                 done_bytes=previous_total * target_index if previous_total else int(previous_task.get("done_bytes") or 0),
                 total_bytes=previous_total * len(target_nodes) if previous_total else int(previous_task.get("total_bytes") or 0),
             )
