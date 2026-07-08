@@ -686,6 +686,9 @@ HTML = r"""
     .role-settings-status { display: grid; gap: 8px; }
     .role-settings-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.58); }
     .role-settings-item small { display: block; margin-top: 3px; color: var(--muted); }
+    .control-transfer-box { display: grid; gap: 8px; margin-top: 10px; padding: 10px; border: 1px dashed var(--line); border-radius: 10px; background: rgba(7,18,14,.42); }
+    .control-transfer-box h3 { margin: 0; font-size: 15px; }
+    .control-transfer-box input { width: 100%; }
     .empty-state {
       min-height: 180px;
       display: grid;
@@ -1070,6 +1073,13 @@ HTML = r"""
         <button id="roleSettingsSaveNameBtn">保存名称</button>
       </div>
       <div class="role-settings-status" id="roleSettingsActions"></div>
+      <div class="control-transfer-box">
+        <h3>Hub 控制转移 / 换平台</h3>
+        <p>把当前 Hub 的节点信息合并导入到新 Hub，新 Hub 会接管这些 Agent / Hub 节点的控制入口。</p>
+        <input id="transferHubUrlInput" placeholder="新 Hub 地址，例如 http://100.x.x.x:8788">
+        <input id="transferHubTokenInput" placeholder="新 Hub 控制 Token（如果新 Hub 设置了 Token）">
+        <button id="transferHubNodesBtn" class="primary">转移当前 Hub 节点信息到新 Hub</button>
+      </div>
       <p>保护规则：点击操作后还会显示当前状态与影响范围，必须再次确认才会执行。</p>
     </div>
   </div>
@@ -1211,6 +1221,9 @@ HTML = r"""
       roleSettingsNameInput: document.getElementById("roleSettingsNameInput"),
       roleSettingsSaveNameBtn: document.getElementById("roleSettingsSaveNameBtn"),
       roleSettingsClose: document.getElementById("roleSettingsClose"),
+      transferHubUrlInput: document.getElementById("transferHubUrlInput"),
+      transferHubTokenInput: document.getElementById("transferHubTokenInput"),
+      transferHubNodesBtn: document.getElementById("transferHubNodesBtn"),
       editableHubTitle: document.getElementById("editableHubTitle"),
       themeSelect: document.getElementById("themeSelect"),
       nodeMonitor: document.getElementById("nodeMonitor"),
@@ -3292,14 +3305,17 @@ HTML = r"""
       if (!node) return setRoleSettingsOpen(false);
       refs.roleSettingsTitle.textContent = `${node.name || node.id} · 角色设置`;
       refs.roleSettingsNameInput.value = node.name || node.id;
-      refs.roleSettingsSummary.textContent = "角色维护功能不会直接执行；选择后还需通过保护确认。";
+      refs.roleSettingsSummary.textContent = "角色维护功能不会直接执行；选择后还需通过保护确认。取消角色默认保留数据。";
       refs.roleSettingsActions.innerHTML = ["agent", "hub"].map((role) => {
         const info = node.roles?.[role] || {};
         const enabled = Boolean(info.enabled);
         const label = role === "hub" ? "Hub" : "Agent";
         return `<div class="role-settings-item">
           <span><strong>${label}</strong><small>当前状态：${enabled ? `已激活 · 版本 ${escapeHtml(info.version || "未识别")}` : "未激活"}</small></span>
-          <button class="${enabled ? "" : "primary"}" data-settings-role="${role}" data-role-action="${enabled ? "upgrade-role" : "activate-role"}">${enabled ? `升级 ${label}` : `激活 ${label}`}</button>
+          <span class="actions">
+            <button class="${enabled ? "" : "primary"}" data-settings-role="${role}" data-role-action="${enabled ? "upgrade-role" : "activate-role"}">${enabled ? `升级 ${label}` : `激活 ${label}`}</button>
+            ${enabled ? `<button class="danger" data-settings-role="${role}" data-role-action="deactivate-role">取消 ${label}</button>` : ""}
+          </span>
         </div>`;
       }).join("");
     }
@@ -3319,15 +3335,18 @@ HTML = r"""
         return;
       }
       const activating = action === "activate-role";
+      const deactivating = action === "deactivate-role";
       const roleInfo = node?.roles?.[role] || {};
       const currentStatus = roleInfo.enabled ? `已激活，当前版本 ${roleInfo.version || "未识别"}` : "未激活";
-      const warning = activating
+      const warning = deactivating
+        ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认取消 ${roleLabel} 功能？\n\n系统会停止并卸载该角色服务，默认保留配置/视频/节点数据；另一个角色不会被停止。`
+        : activating
         ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认激活 ${roleLabel}？\n\n安全提示：将新增并启用独立 systemd 服务，开放 Tailscale ${role === "hub" ? "8788" : "8787"} 端口。现有 ${role === "hub" ? "Agent" : "Hub"} 会继续运行，配置与视频不会删除。`
         : `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认升级 ${roleLabel}？\n\n系统会从 GitHub main 拉取最新版，只重启该角色，不停止另一个角色。`;
       if (!confirm(warning)) return;
       setRoleSettingsOpen(false);
       if (sourceButton) sourceButton.disabled = true;
-      const path = activating ? `/api/nodes/roles/${role}/activate` : `/api/nodes/roles/${role}/upgrade`;
+      const path = deactivating ? `/api/nodes/roles/${role}/deactivate` : activating ? `/api/nodes/roles/${role}/activate` : `/api/nodes/roles/${role}/upgrade`;
       const data = await postNodeAction(path, { node_id: nodeId });
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
       log(data.ok ? `${roleLabel} 任务已提交：${nodeName}` : `${roleLabel} 操作失败：${data.message || nodeName}`);
@@ -3353,6 +3372,27 @@ HTML = r"""
         log(friendlyError(error, "节点名称保存失败"));
       } finally {
         refs.roleSettingsSaveNameBtn.disabled = false;
+      }
+    }
+
+    async function transferHubNodes() {
+      const target = refs.transferHubUrlInput.value.trim();
+      const token = refs.transferHubTokenInput.value.trim();
+      if (!target) return alert("请输入新 Hub 地址。");
+      if (!confirm(`把当前 Hub 的节点信息转移到：\n${target}\n\n新 Hub 会合并这些节点信息，用来接管控制。是否继续？`)) return;
+      refs.transferHubNodesBtn.disabled = true;
+      try {
+        const data = await postJson("/api/hub-transfer/nodes", { target_hub_url: target, target_token: token });
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        if (!data.ok) throw new Error(data.message || "控制转移失败");
+        log(`Hub 控制转移已完成：${data.imported_count || 0} 个节点 -> ${target}`);
+        alert(`转移完成：${data.imported_count || 0} 个节点已导入新 Hub。`);
+      } catch (error) {
+        const message = friendlyError(error, "Hub 控制转移失败");
+        log(message);
+        alert(message);
+      } finally {
+        refs.transferHubNodesBtn.disabled = false;
       }
     }
 
@@ -3518,6 +3558,7 @@ HTML = r"""
       handleRoleAction(button.dataset.roleAction, button.dataset.settingsRole, roleSettingsNodeId, button);
     });
     refs.roleSettingsSaveNameBtn.addEventListener("click", saveRoleSettingsName);
+    refs.transferHubNodesBtn.addEventListener("click", transferHubNodes);
     refs.roleSettingsNameInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") saveRoleSettingsName();
     });
@@ -4372,6 +4413,23 @@ def schedule_hub_upgrade() -> dict[str, Any]:
     return {"unit": unit, "role": "hub", "from_version": local_git_version(), "target_branch": "main"}
 
 
+def schedule_hub_deactivation() -> dict[str, Any]:
+    if not shutil.which("systemd-run") or not (ROOT / "scripts" / "install-hub.sh").exists():
+        raise RuntimeError("Hub must be a systemd installation to deactivate from the panel")
+    unit = f"stream-control-hub-deactivate-{int(time.time())}"
+    root = shlex.quote(str(ROOT))
+    script = f"set -eu; sleep 2; ACTION=uninstall REMOVE_DATA=0 sh {root}/scripts/install-hub.sh"
+    result = subprocess.run(
+        ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "failed to schedule Hub deactivation").strip())
+    return {"unit": unit, "role": "hub", "remove_data": False}
+
+
 def is_public_upload_url(value: str) -> bool:
     try:
         host = urlparse(value).hostname or ""
@@ -4453,9 +4511,9 @@ def post_node_json(node: dict[str, Any], path: str, payload: dict[str, Any], *, 
         return {"ok": False, "message": str(exc)}
 
 
-def post_url_json(url: str, payload: dict[str, Any], *, timeout: int = 30) -> dict[str, Any]:
+def post_url_json(url: str, payload: dict[str, Any], *, timeout: int = 30, headers: dict[str, str] | None = None) -> dict[str, Any]:
     try:
-        response = requests.post(url, json=payload, timeout=timeout)
+        response = requests.post(url, json=payload, headers=headers or {}, timeout=timeout)
         try:
             data = response.json()
         except ValueError:
@@ -5366,6 +5424,46 @@ def api_node_name():
     return jsonify({"ok": False, "message": "node not found"}), 404
 
 
+@APP.post("/api/nodes/import")
+def api_import_nodes():
+    payload = request.get_json(silent=True) or {}
+    incoming = payload.get("nodes") or []
+    if not isinstance(incoming, list):
+        return jsonify({"ok": False, "message": "nodes must be a list"}), 400
+    current = load_nodes()
+    by_id = {str(node.get("id") or ""): dict(node) for node in current if str(node.get("id") or "")}
+    imported = 0
+    skipped = 0
+    for raw in incoming:
+        if not isinstance(raw, dict):
+            skipped += 1
+            continue
+        node = dict(raw)
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            skipped += 1
+            continue
+        node["id"] = node_id
+        by_id[node_id] = node
+        imported += 1
+    save_nodes(list(by_id.values()))
+    return jsonify({"ok": True, "imported_count": imported, "skipped_count": skipped, "total_count": len(by_id)})
+
+
+@APP.post("/api/hub-transfer/nodes")
+def api_transfer_nodes_to_hub():
+    payload = request.get_json(silent=True) or {}
+    target = str(payload.get("target_hub_url") or "").strip().rstrip("/")
+    token = str(payload.get("target_token") or "").strip()
+    parsed = urlparse(target)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return jsonify({"ok": False, "message": "target_hub_url must be an http(s) Hub address"}), 400
+    headers = {"X-Control-Token": token} if token else {}
+    result = post_url_json(f"{target}/api/nodes/import", {"nodes": load_nodes(), "source_hub": request.host_url.rstrip("/")}, timeout=30, headers=headers)
+    status_code = 200 if result.get("ok") else int(result.get("status_code") or 502)
+    return jsonify({"target_hub_url": target, **result}), status_code
+
+
 @APP.get("/api/role-status")
 def api_hub_role_status():
     host = (request.host.split(":", 1)[0] or "127.0.0.1").strip("[]")
@@ -5390,6 +5488,20 @@ def api_activate_agent_role():
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
     return jsonify({"ok": True, "accepted": True, "message": "Agent activation scheduled; Hub remains active", "result": result}), 202
+
+
+@APP.post("/api/roles/hub/deactivate")
+def api_deactivate_hub_role():
+    try:
+        result = schedule_hub_deactivation()
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 409
+    return jsonify({"ok": True, "accepted": True, "message": "Hub deactivation scheduled; local data is preserved", "result": result}), 202
+
+
+@APP.post("/api/roles/agent/deactivate")
+def api_deactivate_agent_role_from_hub():
+    return jsonify({"ok": False, "message": "Agent role can only be deactivated through the Agent service"}), 409
 
 
 @APP.post("/api/upgrade")
@@ -6350,6 +6462,26 @@ def api_upgrade_node_role(role: str):
         result = post_url_json(f"{hub_url}/api/upgrade", {}, timeout=30)
     else:
         return jsonify({"ok": False, "message": "unsupported role"}), 404
+    status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
+    return jsonify({"node_id": node_id, "role": role, **result}), status_code
+
+
+@APP.post("/api/nodes/roles/<role>/deactivate")
+def api_deactivate_node_role(role: str):
+    if role not in {"agent", "hub"}:
+        return jsonify({"ok": False, "message": "unsupported role"}), 404
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
+    if role == "agent":
+        result = post_node_json(node, "/api/roles/agent/deactivate", {}, timeout=30)
+    else:
+        result = post_node_json(node, "/api/roles/hub/deactivate", {}, timeout=30)
+        if not result.get("ok"):
+            hub_url = node_role_urls(node)["hub"]
+            result = post_url_json(f"{hub_url}/api/roles/hub/deactivate", {}, timeout=30)
     status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
     return jsonify({"node_id": node_id, "role": role, **result}), status_code
 

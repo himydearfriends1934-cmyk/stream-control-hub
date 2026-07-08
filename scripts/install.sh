@@ -126,6 +126,16 @@ configure_tailscale() {
 hub_installed() { [ -f "$HUB_INSTALL_DIR/.env" ] || [ -d "$HUB_INSTALL_DIR/.git" ]; }
 agent_installed() { [ -f "$AGENT_INSTALL_DIR/.agent.env" ] || [ -d "$AGENT_INSTALL_DIR/.git" ]; }
 
+hub_host_arg() {
+  if [ -n "${STREAM_HUB_HOST:-}" ]; then
+    printf '%s' "$STREAM_HUB_HOST"
+    return 0
+  fi
+  if command -v tailscale >/dev/null 2>&1; then
+    tailscale ip -4 2>/dev/null | awk 'NR==1 {print; exit}'
+  fi
+}
+
 show_status() {
   echo "Hub directory: $HUB_INSTALL_DIR"
   if hub_installed; then echo "Hub files: installed"; else echo "Hub files: not installed"; fi
@@ -147,11 +157,13 @@ need_root
 TMP_DIR="$(mktemp -d)"
 read_choice
 
+HUB_HOST_ARG="$(hub_host_arg || true)"
+
 case "$CHOICE" in
-  1) run_remote_script install-hub.sh ACTION=install CHOICE=1 INSTALL_DIR="$HUB_INSTALL_DIR" ;;
+  1) run_remote_script install-hub.sh ACTION=install CHOICE=1 INSTALL_DIR="$HUB_INSTALL_DIR" STREAM_HUB_HOST="$HUB_HOST_ARG" ;;
   2)
     if ! hub_installed; then echo "Hub is not installed at $HUB_INSTALL_DIR; choose 1 first." >&2; exit 1; fi
-    run_remote_script install-hub.sh ACTION=install CHOICE=1 INSTALL_DIR="$HUB_INSTALL_DIR"
+    run_remote_script install-hub.sh ACTION=install CHOICE=1 INSTALL_DIR="$HUB_INSTALL_DIR" STREAM_HUB_HOST="$HUB_HOST_ARG"
     ;;
   3)
     confirm_remove_data "Hub"

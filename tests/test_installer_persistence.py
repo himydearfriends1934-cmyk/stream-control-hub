@@ -101,6 +101,13 @@ class InstallerPersistenceTests(unittest.TestCase):
 
         self.assertIn("stream-control-agent-upgrade-*.service) continue", script)
 
+    def test_unified_hub_install_prefers_tailscale_host(self):
+        script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+
+        self.assertIn("hub_host_arg()", script)
+        self.assertIn("tailscale ip -4", script)
+        self.assertIn('STREAM_HUB_HOST="$HUB_HOST_ARG"', script)
+
 
 if __name__ == "__main__":
     unittest.main()

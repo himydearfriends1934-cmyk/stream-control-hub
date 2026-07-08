@@ -227,6 +227,44 @@ def schedule_hub_activation() -> dict[str, Any]:
     return {"unit": unit, "role": "hub", "url": f"http://{tailscale_ip}:8788"}
 
 
+def schedule_hub_deactivation() -> dict[str, Any]:
+    if not shutil.which("systemd-run"):
+        raise RuntimeError("systemd-run is required to deactivate the Hub role")
+    unit = f"stream-control-hub-deactivate-{int(time.time())}"
+    script = (
+        "set -eu; sleep 2; "
+        "if [ -x /opt/stream-control-hub/scripts/install-hub.sh ]; then "
+        "ACTION=uninstall REMOVE_DATA=0 sh /opt/stream-control-hub/scripts/install-hub.sh; "
+        "else systemctl disable --now stream-control-hub.service >/dev/null 2>&1 || true; fi"
+    )
+    result = subprocess.run(
+        ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "failed to schedule Hub deactivation").strip())
+    return {"unit": unit, "role": "hub", "remove_data": False}
+
+
+def schedule_agent_deactivation() -> dict[str, Any]:
+    if not shutil.which("systemd-run"):
+        raise RuntimeError("systemd-run is required to deactivate the Agent role")
+    unit = f"stream-control-agent-deactivate-{int(time.time())}"
+    root = shlex.quote(str(ROOT))
+    script = f"set -eu; sleep 2; ACTION=uninstall REMOVE_DATA=0 sh {root}/scripts/install-agent.sh"
+    result = subprocess.run(
+        ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "failed to schedule Agent deactivation").strip())
+    return {"unit": unit, "role": "agent", "remove_data": False}
+
+
 def systemd_service_active(name: str) -> bool:
     try:
         result = subprocess.run(
@@ -2121,6 +2159,34 @@ def api_activate_hub_role():
         "ok": True,
         "accepted": True,
         "message": "Hub activation scheduled; the Agent role will remain active",
+        "result": result,
+    }), 202
+
+
+@APP.post("/api/roles/hub/deactivate")
+def api_deactivate_hub_role():
+    try:
+        result = schedule_hub_deactivation()
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 409
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "message": "Hub deactivation scheduled; the Agent role will remain active",
+        "result": result,
+    }), 202
+
+
+@APP.post("/api/roles/agent/deactivate")
+def api_deactivate_agent_role():
+    try:
+        result = schedule_agent_deactivation()
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 409
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "message": "Agent deactivation scheduled; local data is preserved",
         "result": result,
     }), 202
 

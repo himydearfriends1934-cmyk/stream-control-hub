@@ -200,6 +200,29 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertTrue(response.get_json()["accepted"])
         schedule.assert_called_once_with()
 
+    def test_agent_can_schedule_role_deactivation(self):
+        from stream_control_hub import headless_agent
+
+        with patch.object(headless_agent, "CONTROL_TOKEN", ""), patch.object(
+            headless_agent, "schedule_hub_deactivation", return_value={"unit": "hub-off", "role": "hub"}
+        ) as hub_deactivate:
+            response = headless_agent.APP.test_client().post(
+                "/api/roles/hub/deactivate", environ_base={"REMOTE_ADDR": "127.0.0.1"}
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.get_json()["accepted"])
+        hub_deactivate.assert_called_once_with()
+
+        with patch.object(headless_agent, "CONTROL_TOKEN", ""), patch.object(
+            headless_agent, "schedule_agent_deactivation", return_value={"unit": "agent-off", "role": "agent"}
+        ) as agent_deactivate:
+            response = headless_agent.APP.test_client().post(
+                "/api/roles/agent/deactivate", environ_base={"REMOTE_ADDR": "127.0.0.1"}
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.get_json()["accepted"])
+        agent_deactivate.assert_called_once_with()
+
     def test_hub_reports_agent_and_hub_roles_per_node(self):
         from stream_control_hub import app
 
@@ -221,6 +244,56 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(roles["agent"]["version"], "abc1234")
         self.assertEqual(roles["hub"]["version"], "def5678")
         self.assertTrue(roles["hub"]["enabled"])
+
+    def test_hub_imports_nodes_and_transfer_posts_to_target_hub(self):
+        from stream_control_hub import app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps([{"id": "old", "base_url": "http://100.64.0.2:8787"}]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file):
+                response = app.APP.test_client().post(
+                    "/api/nodes/import",
+                    json={"nodes": [{"id": "new", "base_url": "http://100.64.0.3:8787", "token": "secret"}]},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()["imported_count"], 1)
+                saved = json.loads(nodes_file.read_text(encoding="utf-8"))
+                self.assertEqual({item["id"] for item in saved}, {"old", "new"})
+
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "post_url_json", return_value={"ok": True, "imported_count": 2}
+            ) as post:
+                response = app.APP.test_client().post(
+                    "/api/hub-transfer/nodes",
+                    json={"target_hub_url": "http://100.64.0.9:8788", "target_token": "hub-token"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.get_json()["ok"])
+                args, kwargs = post.call_args
+                self.assertEqual(args[0], "http://100.64.0.9:8788/api/nodes/import")
+                self.assertEqual(kwargs["headers"], {"X-Control-Token": "hub-token"})
+
+    def test_hub_can_forward_role_deactivation(self):
+        from stream_control_hub import app
+
+        node = {"id": "node-a", "base_url": "http://100.64.0.10:8787", "enabled": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "post_node_json", return_value={"ok": True, "accepted": True}
+            ) as post:
+                response = app.APP.test_client().post(
+                    "/api/nodes/roles/agent/deactivate",
+                    json={"node_id": "node-a"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+        self.assertEqual(response.status_code, 202)
+        post.assert_called_once()
+        self.assertEqual(post.call_args.args[1], "/api/roles/agent/deactivate")
 
 
 if __name__ == "__main__":
