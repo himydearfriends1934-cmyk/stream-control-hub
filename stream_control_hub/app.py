@@ -283,8 +283,10 @@ HTML = r"""
     .node-space-card { padding-bottom: 12px; }
     .node-space-card h2 { margin-bottom: 3px; }
     .node-space-card p { margin: 0 0 9px; font-size: 12px; }
-    .node-space-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); grid-auto-rows: 118px; gap: 8px; max-height: 244px; overflow-x: hidden; overflow-y: auto; }
-    .node-space-ring-item { min-width: 0; height: 118px; display: grid; justify-items: center; align-content: center; gap: 4px; padding: 7px 5px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; }
+    .node-space-rings { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-auto-rows: 112px; gap: 8px; max-height: 244px; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
+    .node-space-ring-item { min-width: 0; height: 112px; display: grid; justify-items: center; align-content: center; gap: 3px; padding: 6px 4px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; cursor: pointer; }
+    .node-space-ring-item:hover, .node-space-ring-item.open { border-color: var(--accent); background: rgba(54,211,153,.09); }
+    .node-space-ring-item strong { font-size: 12px; line-height: 1.2; }
     .node-space-ring-item strong, .node-space-ring-item small { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-space-ring-item small { color: var(--muted); font-size: 11px; }
     .node-space-ring { width: clamp(58px, 5vw, 70px); height: clamp(58px, 5vw, 70px); display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--accent) calc(var(--disk-percent) * 1%), rgba(255,255,255,.09) 0); }
@@ -601,6 +603,12 @@ HTML = r"""
     }
     .monitor-panel h4 { margin: 0 0 5px; font-size: 13px; color: #d6fff0; }
     .node-table-card { min-height: 0; }
+    .node-role-split { display: grid; grid-template-rows: minmax(110px, 1fr) 12px var(--hub-panel-height, 150px); min-height: 330px; max-height: 650px; }
+    .node-role-pane { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    .node-role-pane .node-table { max-height: none; min-height: 0; }
+    .node-role-splitter { position: relative; cursor: ns-resize; touch-action: none; user-select: none; }
+    .node-role-splitter::before { content: ""; position: absolute; left: 0; right: 0; top: 5px; height: 2px; border-radius: 2px; background: var(--line); }
+    .node-role-splitter:hover::before, .node-role-splitter.dragging::before { height: 4px; top: 4px; background: var(--accent); box-shadow: 0 0 8px rgba(54,211,153,.45); }
     .node-table-toolbar {
       display: flex;
       justify-content: space-between;
@@ -790,6 +798,7 @@ HTML = r"""
       color: #c9f7e7;
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    @media (max-width: 760px) { .node-space-rings { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @media (max-width: 1080px) {
       .grid, .split, .hero, .node-detail, .bottom-section, .media-workspace, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .bottom-section { grid-column: auto; }
@@ -935,13 +944,16 @@ HTML = r"""
             </div>
             <span class="pill warn">protected</span>
           </div>
-          <div class="role-group">
+          <div class="node-role-split" id="nodeRoleSplit">
+          <div class="role-group node-role-pane">
             <h3 class="role-group-title"><span>Agent 组 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>推流 / 媒体 / Agent 更新</small></h3>
             <div class="node-table" id="nodeList">加载中...</div>
           </div>
-          <div class="role-group">
+          <div class="node-role-splitter" id="nodeRoleSplitter" role="separator" aria-orientation="horizontal" aria-label="拖动调节 Agent 与 Hub 组高度" tabindex="0"></div>
+          <div class="role-group node-role-pane">
             <h3 class="role-group-title"><span>Hub 组 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></h3>
             <div class="node-table" id="hubNodeList">加载中...</div>
+          </div>
           </div>
         </div>
 
@@ -989,7 +1001,7 @@ HTML = r"""
         <div class="upload-stack">
           <div class="card node-space-card">
             <h2>节点空间</h2>
-            <p>各 Agent 媒体磁盘的已用比例与剩余容量。</p>
+            <p>各 Agent 媒体磁盘的已用比例与剩余容量；双击节点可在左侧筛出它的视频。</p>
             <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
           </div>
           <div class="card upload-card">
@@ -1188,6 +1200,8 @@ HTML = r"""
     const refs = {
       nodeList: document.getElementById("nodeList"),
       hubNodeList: document.getElementById("hubNodeList"),
+      nodeRoleSplit: document.getElementById("nodeRoleSplit"),
+      nodeRoleSplitter: document.getElementById("nodeRoleSplitter"),
       agentNodeCount: document.getElementById("agentNodeCount"),
       hubNodeCount: document.getElementById("hubNodeCount"),
       roleSettingsModal: document.getElementById("roleSettingsModal"),
@@ -1299,6 +1313,49 @@ HTML = r"""
     let youtubeOauthSession = "";
     let youtubeOauthPollTimer = null;
 
+    const HUB_HEIGHT_STORAGE_KEY = "streamHubHubPanelHeight";
+    function setHubPanelHeight(height) {
+      const split = refs.nodeRoleSplit;
+      if (!split) return;
+      const available = Math.max(220, split.getBoundingClientRect().height - 12);
+      const value = Math.max(90, Math.min(available - 110, Number(height) || 150));
+      split.style.setProperty("--hub-panel-height", `${value}px`);
+      refs.nodeRoleSplitter?.setAttribute("aria-valuenow", String(Math.round(value)));
+      localStorage.setItem(HUB_HEIGHT_STORAGE_KEY, String(Math.round(value)));
+    }
+
+    function initNodeRoleSplitter() {
+      if (!refs.nodeRoleSplitter || !refs.nodeRoleSplit) return;
+      setHubPanelHeight(localStorage.getItem(HUB_HEIGHT_STORAGE_KEY) || 150);
+      let dragging = false;
+      const move = (event) => {
+        if (!dragging) return;
+        const bounds = refs.nodeRoleSplit.getBoundingClientRect();
+        setHubPanelHeight(bounds.bottom - event.clientY);
+      };
+      const stop = () => {
+        dragging = false;
+        refs.nodeRoleSplitter.classList.remove("dragging");
+        document.body.style.cursor = "";
+      };
+      refs.nodeRoleSplitter.addEventListener("pointerdown", (event) => {
+        dragging = true;
+        refs.nodeRoleSplitter.classList.add("dragging");
+        refs.nodeRoleSplitter.setPointerCapture(event.pointerId);
+        document.body.style.cursor = "ns-resize";
+        event.preventDefault();
+      });
+      refs.nodeRoleSplitter.addEventListener("pointermove", move);
+      refs.nodeRoleSplitter.addEventListener("pointerup", stop);
+      refs.nodeRoleSplitter.addEventListener("pointercancel", stop);
+      refs.nodeRoleSplitter.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        const current = parseFloat(getComputedStyle(refs.nodeRoleSplit).getPropertyValue("--hub-panel-height")) || 150;
+        setHubPanelHeight(current + (event.key === "ArrowUp" ? 20 : -20));
+        event.preventDefault();
+      });
+    }
+
     renderTransfer({
       title: "传输状态",
       badge: "ready",
@@ -1399,12 +1456,13 @@ HTML = r"""
         </div>
         <div class="progress-track"><div class="progress-fill" style="--value:${percent}%"></div></div>
         <div class="transfer-grid">
+          <div><small>复制源 / 上传源</small><strong>${escapeHtml(state.source || "本机浏览器")}</strong></div>
+          <div><small>目标节点</small><strong>${escapeHtml(state.target || "--")}</strong></div>
           <div><small>进度</small><strong>${Math.round(percent)}%</strong></div>
           <div><small>已传 / 总量</small><strong>${escapeHtml(fmtBytes(state.doneBytes || 0))} / ${escapeHtml(fmtBytes(state.totalBytes || 0))}</strong></div>
           <div><small>当前速度</small><strong>${escapeHtml(fmtRate(state.currentBps || 0))}</strong></div>
           <div><small>平均速度</small><strong>${escapeHtml(fmtRate(state.averageBps || 0))}</strong></div>
           <div><small>预计剩余</small><strong>${escapeHtml(fmtDuration(state.etaSeconds))}</strong></div>
-          <div><small>目标</small><strong>${escapeHtml(state.target || "--")}</strong></div>
         </div>
         <div class="transfer-message">${escapeHtml(state.message || "等待操作。")}</div>
       `;
@@ -1810,7 +1868,8 @@ HTML = r"""
       refs.nodeSpaceRings.innerHTML = nodeDisks.map((item) => {
         const percent = Math.max(0, Math.min(100, Number(item.percent || 0)));
         const online = Boolean(item.online);
-        return `<div class="node-space-ring-item" title="${escapeHtml(item.node_name)}：已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}">
+        const open = String(item.node_id || "") === String(openResourceNodeId || "");
+        return `<div class="node-space-ring-item ${open ? "open" : ""}" role="button" tabindex="0" data-space-node-id="${escapeHtml(item.node_id || "")}" title="双击在资源管理模块查看 ${escapeHtml(item.node_name)} 的视频；已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}">
           <div class="node-space-ring ${online ? "" : "offline"}" style="--disk-percent:${percent.toFixed(1)}"><span>${online ? `${percent.toFixed(0)}%` : "离线"}</span></div>
           <strong>${escapeHtml(item.node_name)}</strong>
           <small>${online ? `剩余 ${escapeHtml(fmtBytes(item.free))}` : "无法读取空间"}</small>
@@ -2782,6 +2841,7 @@ HTML = r"""
       const targetLabel = target_node_ids
         .map((id) => nodes.find((item) => String(item.id) === String(id))?.name || id)
         .join(", ");
+      const sourceLabel = sourceNode?.name || sourceNode?.id || "--";
       if (!sourceNode?.id || !target_node_ids.length || !media) {
         renderTransfer({
           status: "failed",
@@ -2796,6 +2856,7 @@ HTML = r"""
         status: "running",
         badge: "共享中",
         title: `共享到 ${targetLabel}`,
+        source: sourceLabel,
         target: targetLabel,
         message: `正在创建共享任务：${media}`,
       });
@@ -2811,6 +2872,7 @@ HTML = r"""
             status: "failed",
             badge: "失败",
             title: "共享启动失败",
+            source: sourceLabel,
             target: targetLabel,
             message: friendlyError(first.message || first.error || "Hub 未能创建共享任务"),
           });
@@ -2823,6 +2885,7 @@ HTML = r"""
             status: last.status === "done" ? "done" : last.status === "failed" ? "failed" : "running",
             badge: last.status === "done" ? "完成" : last.status === "failed" ? "失败" : "共享中",
             title: last.status === "done" ? "共享完成" : last.status === "failed" ? "共享失败" : `共享到 ${targetLabel}`,
+            source: sourceLabel,
             target: targetLabel,
             percent: last.percent || 0,
             doneBytes: last.done_bytes || 0,
@@ -2857,6 +2920,7 @@ HTML = r"""
           status: "failed",
           badge: "失败",
           title: "共享失败",
+          source: sourceLabel,
           target: targetLabel,
           message: friendlyError(error, "共享失败"),
         });
@@ -2902,6 +2966,7 @@ HTML = r"""
     async function ensureSmartStartMedia(payload) {
       if (!payload.library_media_name || payload.media_local) return { ok: true, copied: false };
       if (!payload.source_node_id) throw new Error(`媒体库没有可用源副本：${payload.library_media_name}`);
+      const copySourceLabel = nodes.find((item) => String(item.id) === String(payload.source_node_id))?.name || payload.source_node_id;
       refs.tuneBox.textContent = `目标节点没有 ${payload.library_media_name}，正在创建自动复制任务...`;
       const task = await postJson("/api/media/share", {
         source_node_id: payload.source_node_id,
@@ -2924,8 +2989,14 @@ HTML = r"""
           status: status.status === "failed" ? "failed" : "uploading",
           badge: status.status === "failed" ? "失败" : "自动复制",
           title: `开播前复制 · ${payload.library_media_name}`,
+          source: copySourceLabel,
           target: selectedNode()?.name || payload.node_id,
           percent,
+          doneBytes: status.done_bytes || 0,
+          totalBytes: status.total_bytes || 0,
+          currentBps: status.current_bps || 0,
+          averageBps: status.average_bps || 0,
+          etaSeconds: status.eta_seconds || 0,
           message: status.message || "复制完成后自动开播",
         });
         if (status.status === "done") return { ok: true, copied: true, task_id: task.task_id };
@@ -3454,6 +3525,23 @@ HTML = r"""
       openResourceNodeId = card.dataset.resourceNodeId || "";
       renderMedia();
     });
+    function openNodeResources(nodeId) {
+      openResourceNodeId = String(nodeId || "");
+      renderMedia();
+      document.querySelector(".resource-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      refs.mediaList.querySelector('[data-resource-filter="ownerNode"]')?.focus({ preventScroll: true });
+    }
+    refs.nodeSpaceRings.addEventListener("dblclick", (event) => {
+      const card = event.target.closest("[data-space-node-id]");
+      if (card) openNodeResources(card.dataset.spaceNodeId);
+    });
+    refs.nodeSpaceRings.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const card = event.target.closest("[data-space-node-id]");
+      if (!card) return;
+      event.preventDefault();
+      openNodeResources(card.dataset.spaceNodeId);
+    });
     refs.mediaDiskList.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       const card = event.target.closest("[data-resource-node-id]");
@@ -3566,6 +3654,7 @@ HTML = r"""
             status: data.ok ? "done" : "failed",
             badge: data.ok ? "移动完成" : "源文件保留",
             title: data.ok ? "资源移动完成" : "传输成功，但删除源文件失败",
+            source: sourceLabel,
             target: targetLabel,
             percent: 100,
             message: data.ok ? `${row.dataset.mediaName} 已移动到 ${targetLabel}。` : friendlyError(data.message || "源文件删除失败"),
@@ -3693,6 +3782,7 @@ HTML = r"""
     [refs.presetInput, refs.videoBitrateInput, refs.audioBitrateInput, refs.fpsInput, refs.resolutionInput, refs.keyframeInput].forEach((el) => {
       el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
     });
+    initNodeRoleSplitter();
     refreshAll();
   </script>
 </body>
