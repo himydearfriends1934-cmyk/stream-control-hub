@@ -196,7 +196,7 @@ def schedule_agent_upgrade() -> dict[str, Any]:
     }
 
 
-def schedule_hub_activation() -> dict[str, Any]:
+def schedule_hub_activation(seed_nodes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     if not shutil.which("systemd-run"):
         raise RuntimeError("systemd-run is required to activate the Hub role")
     status = tailscale_status()
@@ -209,12 +209,27 @@ def schedule_hub_activation() -> dict[str, Any]:
     repo = shlex.quote(AGENT_SOURCE_REPO)
     branch = shlex.quote(AGENT_SOURCE_BRANCH)
     host = shlex.quote(tailscale_ip)
+    seed_count = 0
+    seed_file = DATA_DIR / "hub-seed-nodes.json"
+    if seed_nodes is not None:
+        ensure_dirs()
+        clean_nodes = [dict(item) for item in seed_nodes if isinstance(item, dict)]
+        seed_count = len(clean_nodes)
+        seed_file.write_text(json.dumps(clean_nodes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        seed_file.chmod(0o600)
+    seed_path = shlex.quote(str(seed_file))
     script = (
         "set -eu; sleep 2; tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT; "
         f"git clone --quiet --depth 1 --branch {branch} {repo} \"$tmp/repo\"; "
         f"env INSTALL_DIR=/opt/stream-control-hub STREAM_HUB_HOST={host} "
         "STREAM_HUB_TRUSTED_REMOTE_WRITES=1 STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 "
-        "CHOICE=1 sh \"$tmp/repo/scripts/install-hub.sh\""
+        "CHOICE=1 sh \"$tmp/repo/scripts/install-hub.sh\"; "
+        f"if [ -s {seed_path} ]; then "
+        "mkdir -p /opt/stream-control-hub/data; "
+        f"cp {seed_path} /opt/stream-control-hub/data/nodes.local.json; "
+        "chmod 600 /opt/stream-control-hub/data/nodes.local.json; "
+        "systemctl restart stream-control-hub.service >/dev/null 2>&1 || true; "
+        "fi"
     )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
@@ -224,7 +239,7 @@ def schedule_hub_activation() -> dict[str, Any]:
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "failed to schedule Hub activation").strip())
-    return {"unit": unit, "role": "hub", "url": f"http://{tailscale_ip}:8788"}
+    return {"unit": unit, "role": "hub", "url": f"http://{tailscale_ip}:8788", "seed_node_count": seed_count}
 
 
 def schedule_hub_deactivation() -> dict[str, Any]:
@@ -2151,8 +2166,12 @@ def api_role_status():
 
 @APP.post("/api/roles/hub/activate")
 def api_activate_hub_role():
+    payload = request.get_json(silent=True) or {}
+    seed_nodes = payload.get("nodes")
+    if seed_nodes is not None and not isinstance(seed_nodes, list):
+        return jsonify({"ok": False, "message": "nodes must be a list"}), 400
     try:
-        result = schedule_hub_activation()
+        result = schedule_hub_activation(seed_nodes if isinstance(seed_nodes, list) else None)
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
     return jsonify({

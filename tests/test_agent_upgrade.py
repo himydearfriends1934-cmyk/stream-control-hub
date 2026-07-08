@@ -42,6 +42,22 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertTrue(response.get_json()["accepted"])
         schedule.assert_called_once_with()
 
+    def test_agent_hub_activation_accepts_seed_nodes(self):
+        from stream_control_hub import headless_agent
+
+        seed = [{"id": "node-a", "base_url": "http://100.64.0.10:8787"}]
+        with patch.object(headless_agent, "CONTROL_TOKEN", ""), patch.object(
+            headless_agent, "schedule_hub_activation", return_value={"unit": "hub-activate-1", "role": "hub"}
+        ) as schedule:
+            response = headless_agent.APP.test_client().post(
+                "/api/roles/hub/activate",
+                json={"nodes": seed},
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        schedule.assert_called_once_with(seed)
+
     def test_unmanaged_agent_can_bootstrap_in_place(self):
         from stream_control_hub import headless_agent
 
@@ -163,7 +179,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("data-node-note", app.HTML)
         self.assertIn("/api/nodes/note", app.HTML)
         self.assertNotIn("升级 Agent</button>", app.HTML)
-        self.assertNotIn("激活 Hub</button>", app.HTML)
+        self.assertIn("同步节点信息到所有已激活 Hub", app.HTML)
         self.assertIn('id="hubNodeList"', app.HTML)
         self.assertIn('id="agentNodeCount"', app.HTML)
         self.assertIn('id="hubNodeCount"', app.HTML)
@@ -202,7 +218,7 @@ class AgentUpgradeTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertTrue(response.get_json()["accepted"])
-        schedule.assert_called_once_with()
+        schedule.assert_called_once_with(None)
 
     def test_agent_can_schedule_role_deactivation(self):
         from stream_control_hub import headless_agent
@@ -280,6 +296,56 @@ class AgentUpgradeTests(unittest.TestCase):
                 self.assertEqual(args[0], "http://100.64.0.9:8788/api/nodes/import")
                 self.assertEqual(kwargs["headers"], {"X-Control-Token": "hub-token"})
 
+    def test_hub_syncs_nodes_to_all_active_hubs(self):
+        from stream_control_hub import app
+
+        nodes = [
+            {"id": "hub-a", "base_url": "http://100.64.0.2:8787"},
+            {"id": "agent-b", "base_url": "http://100.64.0.3:8787"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app,
+                "request_hub_role_status",
+                side_effect=[
+                    {"ok": True, "enabled": True, "url": "http://100.64.0.2:8788"},
+                    {"ok": False, "enabled": False, "url": "http://100.64.0.3:8788"},
+                ],
+            ), patch.object(app, "post_url_json", return_value={"ok": True, "imported_count": 2}) as post:
+                response = app.APP.test_client().post(
+                    "/api/hubs/sync",
+                    json={},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+        self.assertEqual(response.get_json()["target_count"], 1)
+        self.assertEqual(post.call_args.args[0], "http://100.64.0.2:8788/api/nodes/import")
+        self.assertEqual(post.call_args.args[1]["nodes"], nodes)
+
+    def test_hub_activation_forwards_current_nodes_as_seed(self):
+        from stream_control_hub import app
+
+        nodes = [{"id": "node-a", "base_url": "http://100.64.0.10:8787", "token": "secret"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "post_node_json", return_value={"ok": True, "accepted": True}
+            ) as post:
+                response = app.APP.test_client().post(
+                    "/api/nodes/roles/hub/activate",
+                    json={"node_id": "node-a"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(post.call_args.args[1], "/api/roles/hub/activate")
+        self.assertEqual(post.call_args.args[2]["nodes"], nodes)
+
     def test_hub_deletes_node_record_only_from_config(self):
         from stream_control_hub import app
 
@@ -295,13 +361,81 @@ class AgentUpgradeTests(unittest.TestCase):
             with patch.object(app, "NODES_FILE", nodes_file):
                 response = app.APP.test_client().post(
                     "/api/nodes/delete",
-                    json={"node_id": "remove"},
+                    json={"node_id": "remove", "migrate_resources": False},
                     environ_base={"REMOTE_ADDR": "127.0.0.1"},
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertTrue(response.get_json()["deleted"])
                 saved = json.loads(nodes_file.read_text(encoding="utf-8"))
                 self.assertEqual([item["id"] for item in saved], ["keep"])
+
+    def test_node_delete_plans_unique_resources_by_largest_free_capacity(self):
+        from stream_control_hub import app
+
+        source = {"id": "source", "base_url": "http://100.64.0.2:8787"}
+        big = {"id": "big", "base_url": "http://100.64.0.3:8787"}
+        second = {"id": "second", "base_url": "http://100.64.0.4:8787"}
+        library = {
+            "nodes": [
+                {"node_id": "source", "online": True, "free": 100},
+                {"node_id": "big", "online": True, "free": 1000},
+                {"node_id": "second", "online": True, "free": 500},
+            ],
+            "resources": [
+                {
+                    "name": "large.mp4",
+                    "size": 800,
+                    "copies": [{"node_id": "source", "video_path": "large.mp4"}],
+                },
+                {
+                    "name": "small.mp4",
+                    "size": 400,
+                    "copies": [{"node_id": "source", "video_path": "small.mp4"}],
+                },
+                {
+                    "name": "already-safe.mp4",
+                    "size": 300,
+                    "copies": [
+                        {"node_id": "source", "video_path": "already-safe.mp4"},
+                        {"node_id": "big", "video_path": "already-safe.mp4"},
+                    ],
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps([source, big, second]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(app, "media_library_payload", return_value=library):
+                plan = app.node_delete_migration_plan(source)
+
+        self.assertTrue(plan["ok"])
+        self.assertEqual([(item["name"], item["target_node_id"]) for item in plan["plan"]], [
+            ("large.mp4", "big"),
+            ("small.mp4", "second"),
+        ])
+
+    def test_node_delete_creates_migration_task_before_removing_record(self):
+        from stream_control_hub import app
+
+        source = {"id": "source", "base_url": "http://100.64.0.2:8787"}
+        target = {"id": "target", "base_url": "http://100.64.0.3:8787"}
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps([source, target]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app,
+                "node_delete_migration_plan",
+                return_value={"ok": True, "online": True, "plan": [{"name": "a.mp4", "video_path": "a.mp4", "size": 10, "target_node": target, "target_node_id": "target"}]},
+            ), patch.object(app.threading.Thread, "start", return_value=None) as start:
+                response = app.APP.test_client().post(
+                    "/api/nodes/delete",
+                    json={"node_id": "source"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.get_json()["migration_required"])
+        start.assert_called_once()
 
     def test_hub_can_forward_role_deactivation(self):
         from stream_control_hub import app

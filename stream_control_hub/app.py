@@ -1081,6 +1081,7 @@ HTML = r"""
         <input id="transferHubUrlInput" placeholder="新 Hub 地址，例如 http://100.x.x.x:8788">
         <input id="transferHubTokenInput" placeholder="新 Hub 控制 Token（如果新 Hub 设置了 Token）">
         <button id="transferHubNodesBtn" class="primary">转移当前 Hub 节点信息到新 Hub</button>
+        <button id="syncAllHubsBtn">同步节点信息到所有已激活 Hub</button>
       </div>
       <p>保护规则：点击操作后还会显示当前状态与影响范围，必须再次确认才会执行。</p>
     </div>
@@ -1226,6 +1227,7 @@ HTML = r"""
       transferHubUrlInput: document.getElementById("transferHubUrlInput"),
       transferHubTokenInput: document.getElementById("transferHubTokenInput"),
       transferHubNodesBtn: document.getElementById("transferHubNodesBtn"),
+      syncAllHubsBtn: document.getElementById("syncAllHubsBtn"),
       editableHubTitle: document.getElementById("editableHubTitle"),
       themeSelect: document.getElementById("themeSelect"),
       nodeMonitor: document.getElementById("nodeMonitor"),
@@ -3394,10 +3396,42 @@ HTML = r"""
     async function deleteNodeRecord(nodeId) {
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const label = node?.name || nodeId;
-      if (!nodeId || !confirm(`删除节点记录：${label}？\n\n这只会从当前 Hub 的节点列表移除，不会删除 VPS 上的视频、配置或服务。`)) return;
-      const data = await postJson("/api/nodes/delete", { node_id: nodeId });
+      if (!nodeId || !confirm(`删除节点：${label}？\n\n在线节点会先把只存在于该节点的视频自动同步到剩余容量最大的其它 Agent；容量不够时继续选择第二大的节点。迁移失败则不会删除节点记录。\n\n离线节点只能删除 Hub 里的记录。`)) return;
+      const data = await postJson("/api/nodes/delete", { node_id: nodeId, migrate_resources: true });
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
       if (!data.ok) return alert(data.message || "节点删除失败");
+      if (data.task_id) {
+        log(`节点删除前资源迁移已开始：${label}`);
+        renderTransfer({
+          status: "running",
+          badge: "迁移中",
+          title: `正在迁移 ${label} 的资源`,
+          source: label,
+          target: "容量最大的可用 Agent",
+          percent: data.percent || 0,
+          message: data.message || "正在迁移资源，完成后会自动删除节点记录。",
+        });
+        while (true) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          const statusResp = await fetch(`/api/media/share/status/${encodeURIComponent(data.task_id)}`);
+          const status = await statusResp.json();
+          refs.updateBox.textContent = JSON.stringify(status, null, 2);
+          renderTransfer({
+            status: status.status,
+            badge: status.status === "done" ? "已删除" : status.status === "failed" ? "失败" : "迁移中",
+            title: status.status === "done" ? `节点已删除：${label}` : `正在迁移 ${label} 的资源`,
+            source: label,
+            target: (status.target_node_ids || []).join("、") || "容量最大的可用 Agent",
+            percent: status.percent || 0,
+            message: status.message || "",
+          });
+          if (status.status === "done") break;
+          if (status.status === "failed") {
+            alert(status.error || status.message || "资源迁移失败，节点记录已保留");
+            return;
+          }
+        }
+      }
       if (String(selectedNodeId) === String(nodeId)) rememberSelectedNode("");
       if (String(openResourceNodeId) === String(nodeId)) openResourceNodeId = "";
       log(`节点记录已删除：${label}`);
@@ -3422,6 +3456,24 @@ HTML = r"""
         alert(message);
       } finally {
         refs.transferHubNodesBtn.disabled = false;
+      }
+    }
+
+    async function syncAllHubs() {
+      if (!confirm("把当前节点信息同步到所有已激活 Hub？\n\n用于无缝切换控制台；不会删除 VPS 上的任何文件或服务。")) return;
+      refs.syncAllHubsBtn.disabled = true;
+      try {
+        const data = await postJson("/api/hubs/sync", {});
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        if (!data.ok) throw new Error(data.message || "Hub 同步失败");
+        log(`Hub 节点信息同步完成：${data.ok_count || 0}/${data.target_count || 0}`);
+        alert(`同步完成：${data.ok_count || 0}/${data.target_count || 0} 个 Hub 已更新。`);
+      } catch (error) {
+        const message = friendlyError(error, "Hub 同步失败");
+        log(message);
+        alert(message);
+      } finally {
+        refs.syncAllHubsBtn.disabled = false;
       }
     }
 
@@ -3594,6 +3646,7 @@ HTML = r"""
     });
     refs.roleSettingsSaveNameBtn.addEventListener("click", saveRoleSettingsName);
     refs.transferHubNodesBtn.addEventListener("click", transferHubNodes);
+    refs.syncAllHubsBtn.addEventListener("click", syncAllHubs);
     refs.roleSettingsNameInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") saveRoleSettingsName();
     });
@@ -4623,6 +4676,11 @@ def share_task_payload(task: dict[str, Any]) -> dict[str, Any]:
         "eta_seconds": eta,
         "results": task.get("results") or [],
         "error": task.get("error") or "",
+        "deleted_node_id": task.get("deleted_node_id") or "",
+        "migration_total_files": int(task.get("migration_total_files") or 0),
+        "migration_done_files": int(task.get("migration_done_files") or 0),
+        "route_label": task.get("route_label") or "",
+        "transfer_route": task.get("transfer_route") or "",
     }
 
 
@@ -4792,6 +4850,114 @@ def run_share_task(
             status="failed",
             message="共享失败",
             error=str(exc),
+            results=results,
+        )
+
+
+def remove_node_record(node_id: str) -> dict[str, Any]:
+    nodes = load_nodes()
+    remaining = [node for node in nodes if str(node.get("id") or "") != node_id]
+    if len(remaining) == len(nodes):
+        return {"ok": False, "node_id": node_id, "message": "node not found"}
+    save_nodes(remaining)
+    return {"ok": True, "node_id": node_id, "deleted": True, "remaining_count": len(remaining)}
+
+
+def node_delete_migration_plan(source_node: dict[str, Any]) -> dict[str, Any]:
+    source_id = str(source_node.get("id") or "")
+    library = media_library_payload()
+    source_disk = next((item for item in library.get("nodes") or [] if str(item.get("node_id") or "") == source_id), {})
+    if not source_disk.get("online"):
+        return {"ok": True, "online": False, "plan": [], "message": "source node offline; only the Hub record can be deleted"}
+    candidates: list[dict[str, Any]] = []
+    for disk in library.get("nodes") or []:
+        node_id = str(disk.get("node_id") or "")
+        if node_id == source_id or not disk.get("online"):
+            continue
+        node = node_by_id(node_id)
+        if node and node.get("enabled", True):
+            candidates.append({"node": node, "node_id": node_id, "free": int(disk.get("free") or 0)})
+    candidates.sort(key=lambda item: int(item.get("free") or 0), reverse=True)
+    if not candidates:
+        return {"ok": False, "message": "没有其它在线 Agent 可承接该节点资源"}
+
+    required: list[dict[str, Any]] = []
+    for resource in library.get("resources") or []:
+        copies = resource.get("copies") or []
+        source_copy = next((copy for copy in copies if str(copy.get("node_id") or "") == source_id), None)
+        if not source_copy or any(str(copy.get("node_id") or "") != source_id for copy in copies):
+            continue
+        required.append({
+            "name": str(resource.get("name") or source_copy.get("video_path") or "").strip(),
+            "video_path": str(source_copy.get("video_path") or resource.get("name") or "").strip(),
+            "size": int(resource.get("size") or 0),
+        })
+
+    plan: list[dict[str, Any]] = []
+    for item in sorted(required, key=lambda value: int(value.get("size") or 0), reverse=True):
+        size = int(item.get("size") or 0)
+        target = next((candidate for candidate in candidates if int(candidate.get("free") or 0) >= size), None)
+        if not target:
+            return {
+                "ok": False,
+                "message": f"没有足够容量迁移：{item.get('name') or item.get('video_path')} ({file_size_label(size)})",
+                "required_count": len(required),
+            }
+        target["free"] = int(target.get("free") or 0) - size
+        plan.append({**item, "target_node": target["node"], "target_node_id": target["node_id"]})
+    return {"ok": True, "online": True, "plan": plan, "required_count": len(required)}
+
+
+def run_node_delete_migration_task(task_id: str, source_node: dict[str, Any], plan: list[dict[str, Any]], progress_base_url: str) -> None:
+    source_id = str(source_node.get("id") or "")
+    results: list[dict[str, Any]] = []
+    try:
+        for index, item in enumerate(plan):
+            target_node = item["target_node"]
+            target_id = str(target_node.get("id") or "")
+            update_share_task(
+                task_id,
+                status="running",
+                source_node_id=source_id,
+                target_node_ids=[target_id],
+                media=item.get("video_path") or item.get("name"),
+                message=f"删除节点前迁移资源 {index + 1}/{len(plan)}：{item.get('name')}",
+                migration_total_files=len(plan),
+                migration_done_files=index,
+                done_bytes=0,
+                total_bytes=0,
+            )
+            run_share_task(
+                task_id,
+                source_node,
+                [target_node],
+                str(item.get("video_path") or item.get("name") or ""),
+                f"{progress_base_url}/api/media/share/progress/{task_id}",
+            )
+            snapshot = share_task_snapshot(task_id) or {}
+            if snapshot.get("status") == "failed":
+                raise RuntimeError(snapshot.get("error") or snapshot.get("message") or "resource migration failed")
+            results.append({"ok": True, "media": item.get("name") or item.get("video_path"), "target_node_id": target_id})
+
+        removed = remove_node_record(source_id)
+        if not removed.get("ok"):
+            raise RuntimeError(removed.get("message") or "node record delete failed after migration")
+        update_share_task(
+            task_id,
+            status="done",
+            message=f"资源迁移完成，节点记录已删除：{source_node.get('name') or source_id}",
+            migration_total_files=len(plan),
+            migration_done_files=len(plan),
+            deleted_node_id=source_id,
+            results=results,
+        )
+    except Exception as exc:
+        update_share_task(
+            task_id,
+            status="failed",
+            message="删除节点前资源迁移失败；节点记录已保留",
+            error=str(exc),
+            migration_total_files=len(plan),
             results=results,
         )
 
@@ -5471,12 +5637,52 @@ def api_node_delete():
     node_id = str(payload.get("node_id") or "").strip()
     if not node_id:
         return jsonify({"ok": False, "message": "node_id is required"}), 400
-    nodes = load_nodes()
-    remaining = [node for node in nodes if str(node.get("id") or "") != node_id]
-    if len(remaining) == len(nodes):
+    node = node_by_id(node_id)
+    if not node:
         return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
-    save_nodes(remaining)
-    return jsonify({"ok": True, "node_id": node_id, "deleted": True, "remaining_count": len(remaining)})
+    migrate = payload.get("migrate_resources", True) is not False
+    if not migrate:
+        result = remove_node_record(node_id)
+        return jsonify(result), 200 if result.get("ok") else 404
+
+    plan_result = node_delete_migration_plan(node)
+    if not plan_result.get("ok"):
+        return jsonify({"ok": False, "node_id": node_id, **plan_result}), 409
+    plan = plan_result.get("plan") or []
+    if not plan:
+        result = remove_node_record(node_id)
+        return jsonify({
+            **result,
+            "migration_required": False,
+            "migration_message": plan_result.get("message") or "没有只存在于该节点的资源需要迁移",
+        }), 200 if result.get("ok") else 404
+
+    task_id = f"delete_node_{uuid.uuid4().hex}"
+    with SHARE_TASKS_LOCK:
+        SHARE_TASKS[task_id] = {
+            "task_id": task_id,
+            "status": "queued",
+            "source_node_id": node_id,
+            "target_node_ids": [str(item.get("target_node_id") or "") for item in plan],
+            "media": "node-delete-migration",
+            "message": "删除节点前资源迁移任务已创建",
+            "done_bytes": 0,
+            "total_bytes": 0,
+            "current_bps": 0,
+            "average_bps": 0,
+            "migration_total_files": len(plan),
+            "migration_done_files": 0,
+            "results": [],
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+    worker = threading.Thread(
+        target=run_node_delete_migration_task,
+        args=(task_id, node, plan, request.host_url.rstrip("/")),
+        daemon=True,
+    )
+    worker.start()
+    return jsonify({"ok": True, "accepted": True, "migration_required": True, **share_task_payload(share_task_snapshot(task_id) or {})}), 202
 
 
 @APP.post("/api/nodes/import")
@@ -5517,6 +5723,36 @@ def api_transfer_nodes_to_hub():
     result = post_url_json(f"{target}/api/nodes/import", {"nodes": load_nodes(), "source_hub": request.host_url.rstrip("/")}, timeout=30, headers=headers)
     status_code = 200 if result.get("ok") else int(result.get("status_code") or 502)
     return jsonify({"target_hub_url": target, **result}), status_code
+
+
+@APP.post("/api/hubs/sync")
+def api_sync_all_hubs():
+    current_nodes = load_nodes()
+    source_hub = request.host_url.rstrip("/")
+    results: list[dict[str, Any]] = []
+    for node in current_nodes:
+        hub = request_hub_role_status(node)
+        if not hub.get("enabled") or not hub.get("url"):
+            continue
+        hub_url = str(hub.get("url") or "").rstrip("/")
+        result = post_url_json(
+            f"{hub_url}/api/nodes/import",
+            {"nodes": current_nodes, "source_hub": source_hub},
+            timeout=30,
+        )
+        results.append({
+            "node_id": str(node.get("id") or ""),
+            "node_name": str(node.get("name") or node.get("id") or ""),
+            "hub_url": hub_url,
+            **result,
+        })
+    ok_count = sum(1 for item in results if item.get("ok"))
+    return jsonify({
+        "ok": ok_count == len(results),
+        "target_count": len(results),
+        "ok_count": ok_count,
+        "results": results,
+    })
 
 
 @APP.get("/api/role-status")
@@ -6489,7 +6725,7 @@ def api_activate_node_role(role: str):
     if not node:
         return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
     if role == "hub":
-        result = post_node_json(node, "/api/roles/hub/activate", {}, timeout=30)
+        result = post_node_json(node, "/api/roles/hub/activate", {"nodes": load_nodes(), "source_hub": request.host_url.rstrip("/")}, timeout=30)
     else:
         hub_url = node_role_urls(node)["hub"]
         if not hub_url:
