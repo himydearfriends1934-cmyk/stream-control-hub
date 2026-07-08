@@ -693,6 +693,13 @@ HTML = r"""
     .control-transfer-box { display: grid; gap: 8px; margin-top: 10px; padding: 10px; border: 1px dashed var(--line); border-radius: 10px; background: rgba(7,18,14,.42); }
     .control-transfer-box h3 { margin: 0; font-size: 15px; }
     .control-transfer-box input { width: 100%; }
+    .choice-modal { width: min(560px, calc(100vw - 28px)); text-align: left; }
+    .choice-modal .choice-icon { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 16px; background: rgba(251, 191, 36, .16); color: #ffd166; font-size: 24px; box-shadow: inset 0 0 0 1px rgba(251, 191, 36, .32); }
+    .choice-modal .wizard-head { align-items: center; }
+    .choice-message { padding: 12px; border: 1px solid rgba(49, 89, 76, .78); border-radius: 12px; background: rgba(7,18,14,.58); color: var(--muted); white-space: pre-line; line-height: 1.55; }
+    .choice-actions { display: grid; grid-template-columns: 1fr; gap: 8px; }
+    .choice-actions button { width: 100%; min-height: 44px; }
+    .choice-actions .danger-soft { border-color: rgba(251,113,133,.55); background: rgba(111,29,45,.7); color: #ffe4ea; }
     .empty-state {
       min-height: 180px;
       display: grid;
@@ -1093,6 +1100,20 @@ HTML = r"""
     </div>
   </div>
 
+  <div class="modal-backdrop" id="choiceModal" aria-hidden="true">
+    <div class="wizard-modal choice-modal" role="dialog" aria-modal="true" aria-labelledby="choiceTitle">
+      <div class="wizard-head">
+        <div class="choice-icon" id="choiceIcon">!</div>
+        <div>
+          <h2 id="choiceTitle">确认操作</h2>
+          <p id="choiceSubtitle">请选择处理方式。</p>
+        </div>
+      </div>
+      <div class="choice-message" id="choiceMessage"></div>
+      <div class="choice-actions" id="choiceActions"></div>
+    </div>
+  </div>
+
   <div class="modal-backdrop" id="resourceToolsModal" aria-hidden="true">
     <div class="wizard-modal role-settings-modal" role="dialog" aria-modal="true" aria-labelledby="resourceToolsTitle">
       <div class="wizard-head">
@@ -1240,6 +1261,12 @@ HTML = r"""
       roleSettingsSaveNameBtn: document.getElementById("roleSettingsSaveNameBtn"),
       roleSettingsDeleteNodeBtn: document.getElementById("roleSettingsDeleteNodeBtn"),
       roleSettingsClose: document.getElementById("roleSettingsClose"),
+      choiceModal: document.getElementById("choiceModal"),
+      choiceIcon: document.getElementById("choiceIcon"),
+      choiceTitle: document.getElementById("choiceTitle"),
+      choiceSubtitle: document.getElementById("choiceSubtitle"),
+      choiceMessage: document.getElementById("choiceMessage"),
+      choiceActions: document.getElementById("choiceActions"),
       transferHubUrlInput: document.getElementById("transferHubUrlInput"),
       transferHubTokenInput: document.getElementById("transferHubTokenInput"),
       transferHubNodesBtn: document.getElementById("transferHubNodesBtn"),
@@ -3360,6 +3387,34 @@ HTML = r"""
       refs.resourceToolsModal.setAttribute("aria-hidden", open ? "false" : "true");
     }
 
+    function showChoiceDialog({ title, subtitle = "请选择处理方式。", message = "", icon = "!", choices = [] }) {
+      return new Promise((resolve) => {
+        refs.choiceTitle.textContent = title || "确认操作";
+        refs.choiceSubtitle.textContent = subtitle;
+        refs.choiceMessage.textContent = message;
+        refs.choiceIcon.textContent = icon;
+        refs.choiceActions.innerHTML = choices.map((choice, index) => (
+          `<button class="${escapeHtml(choice.className || "")}" data-choice-index="${index}">${escapeHtml(choice.label)}</button>`
+        )).join("") + `<button data-choice-cancel>取消</button>`;
+        const close = (value) => {
+          refs.choiceModal.classList.remove("open");
+          refs.choiceModal.setAttribute("aria-hidden", "true");
+          refs.choiceActions.onclick = null;
+          resolve(value);
+        };
+        refs.choiceActions.onclick = (event) => {
+          const cancel = event.target.closest("[data-choice-cancel]");
+          if (cancel) return close(null);
+          const button = event.target.closest("[data-choice-index]");
+          if (!button) return;
+          const choice = choices[Number(button.dataset.choiceIndex)];
+          close(choice?.value ?? null);
+        };
+        refs.choiceModal.classList.add("open");
+        refs.choiceModal.setAttribute("aria-hidden", "false");
+      });
+    }
+
     async function handleRoleAction(action, role, nodeId, sourceButton) {
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const nodeName = node?.name || nodeId;
@@ -3372,14 +3427,44 @@ HTML = r"""
       const deactivating = action === "deactivate-role";
       const roleInfo = node?.roles?.[role] || {};
       const currentStatus = roleInfo.enabled ? `已激活，当前版本 ${roleInfo.version || "未识别"}` : "未激活";
+      let migrateBeforeDeactivate = false;
+      let directDeactivate = false;
+      if (deactivating) {
+        const choice = await showChoiceDialog({
+          title: `取消 ${roleLabel} 功能`,
+          subtitle: nodeName,
+          icon: "⚠",
+          message: role === "agent"
+            ? `${roleLabel} 当前状态：${currentStatus}\n\n请选择处理方式：\n- 先迁移资源再关闭：会把该 Agent 独有视频同步到容量最大的其它 Agent，成功后再关闭 Agent。\n- 直接关闭：只停止 Agent 功能，不迁移资源。`
+            : `${roleLabel} 当前状态：${currentStatus}\n\nHub 不保存视频资源。你可以直接关闭 Hub 功能，Agent 不受影响。`,
+          choices: role === "agent"
+            ? [
+                { label: "先迁移资源，再关闭 Agent", value: "migrate", className: "primary" },
+                { label: "直接关闭 Agent", value: "direct", className: "danger-soft" },
+              ]
+            : [
+                { label: "直接关闭 Hub", value: "direct", className: "danger-soft" },
+              ],
+        });
+        if (!choice) return;
+        migrateBeforeDeactivate = choice === "migrate";
+        directDeactivate = choice === "direct";
+      }
       const warning = deactivating
         ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认取消 ${roleLabel} 功能？\n\n系统会停止并卸载该角色服务，默认保留配置/视频/节点数据；另一个角色不会被停止。`
         : activating
         ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认激活 ${roleLabel}？\n\n安全提示：将新增并启用独立 systemd 服务，开放 Tailscale ${role === "hub" ? "8788" : "8787"} 端口。现有 ${role === "hub" ? "Agent" : "Hub"} 会继续运行，配置与视频不会删除。`
         : `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认升级 ${roleLabel}？\n\n系统会从 GitHub main 拉取最新版，只重启该角色，不停止另一个角色。`;
-      if (!confirm(warning)) return;
+      if (!deactivating && !confirm(warning)) return;
       setRoleSettingsOpen(false);
       if (sourceButton) sourceButton.disabled = true;
+      if (migrateBeforeDeactivate) {
+        const migrated = await migrateNodeResourcesBeforeAction(nodeId, nodeName);
+        if (!migrated) {
+          if (sourceButton) sourceButton.disabled = false;
+          return;
+        }
+      }
       const path = deactivating ? `/api/nodes/roles/${role}/deactivate` : activating ? `/api/nodes/roles/${role}/activate` : `/api/nodes/roles/${role}/upgrade`;
       const data = await postNodeAction(path, { node_id: nodeId });
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
@@ -3434,8 +3519,19 @@ HTML = r"""
     async function deleteNodeRecord(nodeId) {
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const label = node?.name || nodeId;
-      if (!nodeId || !confirm(`删除节点：${label}？\n\n在线节点会先把只存在于该节点的视频自动同步到剩余容量最大的其它 Agent；容量不够时继续选择第二大的节点。迁移失败则不会删除节点记录。\n\n离线节点只能删除 Hub 里的记录。`)) return;
-      const data = await postJson("/api/nodes/delete", { node_id: nodeId, migrate_resources: true });
+      if (!nodeId) return;
+      const choice = await showChoiceDialog({
+        title: "删除节点",
+        subtitle: label,
+        icon: "⚠",
+        message: "请选择处理方式：\n- 先迁移资源再删除：在线节点会把独有视频同步到容量最大的其它 Agent，成功后删除节点记录。\n- 直接删除记录：只从当前 Hub 移除节点，不迁移资源，不删除 VPS 上文件。",
+        choices: [
+          { label: "先迁移资源，再删除节点", value: "migrate", className: "primary" },
+          { label: "直接删除节点记录", value: "direct", className: "danger-soft" },
+        ],
+      });
+      if (!choice) return;
+      const data = await postJson("/api/nodes/delete", { node_id: nodeId, migrate_resources: choice === "migrate" });
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
       if (!data.ok) return alert(data.message || "节点删除失败");
       if (data.task_id) {
@@ -3474,6 +3570,48 @@ HTML = r"""
       if (String(openResourceNodeId) === String(nodeId)) openResourceNodeId = "";
       log(`节点记录已删除：${label}`);
       await refreshAll();
+    }
+
+    async function migrateNodeResourcesBeforeAction(nodeId, label) {
+      const data = await postJson("/api/nodes/resources/migrate", { node_id: nodeId });
+      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      if (!data.ok) {
+        alert(data.message || "资源迁移失败");
+        return false;
+      }
+      if (!data.task_id) {
+        log(`无需迁移资源：${label}`);
+        return true;
+      }
+      renderTransfer({
+        status: "running",
+        badge: "迁移中",
+        title: `正在迁移 ${label} 的资源`,
+        source: label,
+        target: "容量最大的可用 Agent",
+        percent: data.percent || 0,
+        message: data.message || "正在迁移资源，完成后继续执行操作。",
+      });
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const statusResp = await fetch(`/api/media/share/status/${encodeURIComponent(data.task_id)}`);
+        const status = await statusResp.json();
+        refs.updateBox.textContent = JSON.stringify(status, null, 2);
+        renderTransfer({
+          status: status.status,
+          badge: status.status === "done" ? "迁移完成" : status.status === "failed" ? "失败" : "迁移中",
+          title: status.status === "done" ? `资源迁移完成：${label}` : `正在迁移 ${label} 的资源`,
+          source: label,
+          target: (status.target_node_ids || []).join("、") || "容量最大的可用 Agent",
+          percent: status.percent || 0,
+          message: status.message || "",
+        });
+        if (status.status === "done") return true;
+        if (status.status === "failed") {
+          alert(status.error || status.message || "资源迁移失败，操作已取消");
+          return false;
+        }
+      }
     }
 
     async function transferHubNodes() {
@@ -4934,7 +5072,14 @@ def node_delete_migration_plan(source_node: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "online": True, "plan": plan, "required_count": len(required)}
 
 
-def run_node_delete_migration_task(task_id: str, source_node: dict[str, Any], plan: list[dict[str, Any]], progress_base_url: str) -> None:
+def run_node_delete_migration_task(
+    task_id: str,
+    source_node: dict[str, Any],
+    plan: list[dict[str, Any]],
+    progress_base_url: str,
+    *,
+    delete_after: bool = True,
+) -> None:
     source_id = str(source_node.get("id") or "")
     results: list[dict[str, Any]] = []
     try:
@@ -4965,16 +5110,23 @@ def run_node_delete_migration_task(task_id: str, source_node: dict[str, Any], pl
                 raise RuntimeError(snapshot.get("error") or snapshot.get("message") or "resource migration failed")
             results.append({"ok": True, "media": item.get("name") or item.get("video_path"), "target_node_id": target_id})
 
-        removed = remove_node_record(source_id)
-        if not removed.get("ok"):
-            raise RuntimeError(removed.get("message") or "node record delete failed after migration")
+        deleted_node_id = ""
+        if delete_after:
+            removed = remove_node_record(source_id)
+            if not removed.get("ok"):
+                raise RuntimeError(removed.get("message") or "node record delete failed after migration")
+            deleted_node_id = source_id
         update_share_task(
             task_id,
             status="done",
-            message=f"资源迁移完成，节点记录已删除：{source_node.get('name') or source_id}",
+            message=(
+                f"资源迁移完成，节点记录已删除：{source_node.get('name') or source_id}"
+                if delete_after
+                else f"资源迁移完成：{source_node.get('name') or source_id}"
+            ),
             migration_total_files=len(plan),
             migration_done_files=len(plan),
-            deleted_node_id=source_id,
+            deleted_node_id=deleted_node_id,
             results=results,
         )
     except Exception as exc:
@@ -5705,6 +5857,55 @@ def api_node_delete():
     worker = threading.Thread(
         target=run_node_delete_migration_task,
         args=(task_id, node, plan, request.host_url.rstrip("/")),
+        daemon=True,
+    )
+    worker.start()
+    return jsonify({"ok": True, "accepted": True, "migration_required": True, **share_task_payload(share_task_snapshot(task_id) or {})}), 202
+
+
+@APP.post("/api/nodes/resources/migrate")
+def api_node_resources_migrate():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    if not node_id:
+        return jsonify({"ok": False, "message": "node_id is required"}), 400
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
+    plan_result = node_delete_migration_plan(node)
+    if not plan_result.get("ok"):
+        return jsonify({"ok": False, "node_id": node_id, **plan_result}), 409
+    plan = plan_result.get("plan") or []
+    if not plan:
+        return jsonify({
+            "ok": True,
+            "node_id": node_id,
+            "migration_required": False,
+            "message": plan_result.get("message") or "没有只存在于该节点的资源需要迁移",
+        })
+    task_id = f"migrate_node_{uuid.uuid4().hex}"
+    with SHARE_TASKS_LOCK:
+        SHARE_TASKS[task_id] = {
+            "task_id": task_id,
+            "status": "queued",
+            "source_node_id": node_id,
+            "target_node_ids": [str(item.get("target_node_id") or "") for item in plan],
+            "media": "node-resource-migration",
+            "message": "节点资源迁移任务已创建",
+            "done_bytes": 0,
+            "total_bytes": 0,
+            "current_bps": 0,
+            "average_bps": 0,
+            "migration_total_files": len(plan),
+            "migration_done_files": 0,
+            "results": [],
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+    worker = threading.Thread(
+        target=run_node_delete_migration_task,
+        args=(task_id, node, plan, request.host_url.rstrip("/")),
+        kwargs={"delete_after": False},
         daemon=True,
     )
     worker.start()
