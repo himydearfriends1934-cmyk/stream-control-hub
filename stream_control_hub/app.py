@@ -424,6 +424,49 @@ HTML = r"""
       white-space: nowrap;
     }
     .youtube-import-panel textarea { min-height: 76px; }
+    .youtube-details {
+      display: grid;
+      gap: 10px;
+      padding: 10px;
+      border: 1px solid rgba(49, 89, 76, 0.78);
+      border-radius: 12px;
+      background: rgba(7, 18, 14, 0.58);
+    }
+    .youtube-details-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .youtube-details-head strong { color: #d6fff0; }
+    .youtube-details-head span { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .youtube-details-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .youtube-detail-card {
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid rgba(54, 211, 153, .28);
+      border-radius: 10px;
+      background: rgba(11, 31, 25, .78);
+    }
+    .youtube-detail-card strong {
+      display: block;
+      margin-bottom: 6px;
+      color: #effdf6;
+      overflow-wrap: anywhere;
+    }
+    .youtube-detail-card dl {
+      display: grid;
+      grid-template-columns: minmax(94px, .42fr) minmax(0, 1fr);
+      gap: 4px 8px;
+      margin: 0;
+      font-size: 12px;
+    }
+    .youtube-detail-card dt { color: var(--muted); font-weight: 800; }
+    .youtube-detail-card dd { margin: 0; color: #dffcf0; overflow-wrap: anywhere; }
+    .youtube-detail-card a { color: #77e7ff; }
+    .youtube-detail-empty { color: var(--muted); font-size: 13px; }
+    @media (max-width: 760px) { .youtube-details-grid { grid-template-columns: 1fr; } }
     .wizard-step-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
     .wizard-step {
       display: grid;
@@ -1294,6 +1337,13 @@ HTML = r"""
         <button id="youtubeHealthBtn">读取健康反馈</button>
         <button class="danger" id="youtubeRevokeBtn">断开授权</button>
       </div>
+      <div class="youtube-details" id="youtubeResourceDetails">
+        <div class="youtube-details-head">
+          <strong>YouTube Studio Details</strong>
+          <span>Click refresh to load broadcast and stream settings.</span>
+        </div>
+        <div class="youtube-detail-empty">No YouTube resources loaded yet.</div>
+      </div>
       <div class="wizard-status" id="youtubeWizardLog">
         <div class="wizard-status-line">选择要分配的 Agent 后检查状态。首次使用需要在 Hub 保存 YouTube OAuth Client ID。</div>
       </div>
@@ -1416,6 +1466,7 @@ HTML = r"""
       youtubeWizardModal: document.getElementById("youtubeWizardModal"),
       youtubeWizardClose: document.getElementById("youtubeWizardClose"),
       youtubeWizardLog: document.getElementById("youtubeWizardLog"),
+      youtubeResourceDetails: document.getElementById("youtubeResourceDetails"),
       youtubeNodeInput: document.getElementById("youtubeNodeInput"),
       youtubePrepareStreamSelect: document.getElementById("youtubePrepareStreamSelect"),
       youtubeTitleInput: document.getElementById("youtubeTitleInput"),
@@ -2351,6 +2402,82 @@ HTML = r"""
       return date.toLocaleString();
     }
 
+    function renderDefinitionRows(rows = []) {
+      return rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(compactValue(value))}</dd>`).join("");
+    }
+
+    function renderYouTubeResourceDetails(data = {}) {
+      if (!refs.youtubeResourceDetails) return;
+      const streams = data.streams || [];
+      const broadcasts = data.broadcasts || [];
+      const streamById = new Map(streams.map((item) => [item.id, item]));
+      const streamCards = streams.slice(0, 4).map((item) => `
+        <div class="youtube-detail-card">
+          <strong>${escapeHtml(item.title || item.id)}</strong>
+          <dl>${renderDefinitionRows([
+            ["Status", item.stream_status || "--"],
+            ["Health", item.health_status || "--"],
+            ["Resolution", item.resolution || "--"],
+            ["Frame rate", item.frame_rate || "--"],
+            ["Reusable", item.is_reusable],
+            ["Issues", (item.configuration_issues || []).length],
+          ])}</dl>
+        </div>
+      `).join("");
+      const broadcastCards = broadcasts.slice(0, 6).map((item) => {
+        const stream = streamById.get(item.bound_stream_id) || {};
+        const watch = item.watch_url ? `<dt>Watch</dt><dd><a href="${escapeHtml(item.watch_url)}" target="_blank" rel="noopener">${escapeHtml(item.id)}</a></dd>` : "";
+        return `
+          <div class="youtube-detail-card">
+            <strong>${escapeHtml(item.title || item.id)}</strong>
+            <dl>
+              ${renderDefinitionRows([
+                ["Lifecycle", item.life_cycle_status || "--"],
+                ["Privacy", item.privacy_status || "--"],
+                ["Recording", item.recording_status || "--"],
+                ["Scheduled", shortDateTime(item.scheduled_start_time)],
+                ["Actual start", shortDateTime(item.actual_start_time)],
+                ["End", shortDateTime(item.actual_end_time || item.scheduled_end_time)],
+                ["DVR", item.enable_dvr],
+                ["Record", item.record_from_start],
+                ["Embed", item.enable_embed],
+                ["Auto start", item.enable_auto_start],
+                ["Auto stop", item.enable_auto_stop],
+                ["Captions", item.enable_closed_captions],
+                ["Latency", item.latency_preference || "--"],
+                ["Monitor delay", item.broadcast_stream_delay_ms],
+                ["Made for kids", item.made_for_kids ?? item.self_declared_made_for_kids],
+                ["Live chat", item.live_chat_id ? "available" : "--"],
+                ["Ads", item.ads_monetization_status || item.eligible_for_ads_monetization || "--"],
+                ["Bound stream", item.bound_stream_id || "--"],
+                ["Stream health", stream.health_status || "--"],
+              ])}
+              ${watch}
+            </dl>
+          </div>
+        `;
+      }).join("");
+      refs.youtubeResourceDetails.innerHTML = `
+        <div class="youtube-details-head">
+          <strong>YouTube Studio Details</strong>
+          <span>${escapeHtml(data.channel?.title || "--")} · ${streams.length} streams · ${broadcasts.length} broadcasts</span>
+        </div>
+        ${streamCards ? `<div class="youtube-details-grid">${streamCards}</div>` : `<div class="youtube-detail-empty">No reusable live streams returned.</div>`}
+        ${broadcastCards ? `<div class="youtube-details-grid">${broadcastCards}</div>` : `<div class="youtube-detail-empty">No broadcasts returned.</div>`}
+      `;
+    }
+
+    function clearYouTubeResourceDetails(message = "No YouTube resources loaded yet.") {
+      if (!refs.youtubeResourceDetails) return;
+      refs.youtubeResourceDetails.innerHTML = `
+        <div class="youtube-details-head">
+          <strong>YouTube Studio Details</strong>
+          <span>Click refresh to load broadcast and stream settings.</span>
+        </div>
+        <div class="youtube-detail-empty">${escapeHtml(message)}</div>
+      `;
+    }
+
     function renderYouTubeResourceSummary(data = {}) {
       const streams = data.streams || [];
       const broadcasts = data.broadcasts || [];
@@ -2419,6 +2546,7 @@ HTML = r"""
         }
         const selectedId = selectedNode()?.health?.stream_config?.youtube_stream_id || "";
         renderYouTubeStreams(data.streams || [], selectedId);
+        renderYouTubeResourceDetails(data);
         const lines = [
           `频道：${data.channel?.title || "--"}`,
           `直播流：${(data.streams || []).length} 个`,
