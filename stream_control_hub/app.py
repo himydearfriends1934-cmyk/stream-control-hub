@@ -6278,20 +6278,48 @@ def api_tailscale_connect_existing_ip():
         hub_status = request_hub_status_url(hub_url)
         if hub_status.get("ok") and (hub_status.get("roles") or {}).get("hub"):
             node_id_for_ip = node_id
+            nodes = load_nodes()
+            target_index = -1
             if not node_id_for_ip:
-                for item in load_nodes():
+                for index, item in enumerate(nodes):
                     if str(item.get("tailscale_ip") or "") == str(ip) or node_base_url(item) == base_url or node_role_urls(item)["hub"] == hub_url:
                         node_id_for_ip = str(item.get("id") or "")
+                        target_index = index
                         break
+            else:
+                target_index = next((index for index, item in enumerate(nodes) if str(item.get("id") or "") == node_id_for_ip), -1)
+            if target_index >= 0:
+                node = dict(nodes[target_index])
+            else:
+                peer_name = str(peer.get("hostname") or peer.get("name") or peer.get("dns_name") or "").split(".", 1)[0].strip()
+                base_id = secure_filename(node_id_for_ip or agent_name or peer_name or f"hub-{str(ip).replace('.', '-')}")
+                node_id_for_ip = base_id or f"hub-{str(ip).replace('.', '-')}"
+                suffix = 2
+                existing_ids = {str(item.get("id") or "") for item in nodes}
+                while node_id_for_ip in existing_ids:
+                    node_id_for_ip = f"{base_id}-{suffix}"
+                    suffix += 1
+                node = {"id": node_id_for_ip, "name": agent_name or peer_name or node_id_for_ip, "role": "stream-node", "enabled": True}
+            node["base_url"] = base_url
+            node["hub_url"] = hub_url
+            node["tailscale_ip"] = str(ip)
+            node["hub_only"] = True
+            node["hub_connected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            if target_index >= 0:
+                nodes[target_index] = node
+            else:
+                nodes.append(node)
+            save_nodes(nodes)
             return jsonify({
                 "ok": True,
                 "hub_only": True,
-                "message": "?? VPS ? Hub ???? Agent 8787 ??????? Hub-only ???????????/??/???????????? Agent?",
+                "message": "?? VPS ? Hub ???? Agent 8787 ?????? Hub-only ?????????????/??/???????????? Agent?",
                 "tailscale_ip": str(ip),
                 "node_id": node_id_for_ip,
                 "hub_url": hub_url,
                 "hub_status": hub_status,
                 "peer": peer,
+                "created": target_index < 0,
             })
         status_code = int(pairing.get("status_code") or 502)
         message = pairing.get("message") or "目标设备未检测到兼容的 Headless Agent"

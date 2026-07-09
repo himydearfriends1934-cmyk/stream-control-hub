@@ -130,12 +130,15 @@ class HubAgentConnectionTests(unittest.TestCase):
                     "/api/tailscale/connect-existing-ip",
                     json={"tailscale_ip": "100.98.19.85"},
                 )
+            saved = json.loads(nodes_file.read_text(encoding="utf-8"))
 
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertTrue(data["hub_only"])
         self.assertEqual(data["node_id"], "tokyo")
         self.assertEqual(data["hub_url"], "http://100.98.19.85:8788")
+        self.assertEqual(saved[0]["hub_url"], "http://100.98.19.85:8788")
+        self.assertTrue(saved[0]["hub_only"])
 
 
 if __name__ == "__main__":
