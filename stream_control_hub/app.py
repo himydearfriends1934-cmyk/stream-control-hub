@@ -769,10 +769,23 @@ HTML = r"""
       display: grid;
       grid-template-columns: 112px minmax(0, 1fr);
       gap: 7px;
+      align-items: start;
       padding: 4px 0;
       border-bottom: 1px solid rgba(49, 89, 76, 0.4);
     }
+    .mini-row > span { justify-self: stretch; text-align: left; }
     .mini-row:last-child { border-bottom: none; }
+    .health-summary {
+      display: grid;
+      gap: 5px;
+      justify-items: start;
+      text-align: left;
+      line-height: 1.45;
+    }
+    .health-summary strong { color: #d6fff0; }
+    .health-summary ul { margin: 2px 0 0 0; padding-left: 1.1em; color: var(--muted); }
+    .health-summary li { margin: 2px 0; }
+    .health-summary.bad strong { color: #fecdd3; }
     .mono { font-family: "Cascadia Mono", "Consolas", monospace; word-break: break-word; }
     .compact-card { padding: 10px; }
     .log-card { display: grid; gap: 8px; }
@@ -1736,6 +1749,50 @@ HTML = r"""
       return `<div class="mini-row"><small>${escapeHtml(label)}</small><span>${html}</span></div>`;
     }
 
+    function healthSummaryHtml(node) {
+      const h = node?.health || {};
+      const stream = h.stream || {};
+      const autoRestart = stream.auto_restart || {};
+      const adaptive = stream.adaptive || {};
+      const transfer = h.transfer || {};
+      const youtube = h.youtube || {};
+      const lines = [];
+      let headline = "健康采集正常，节点可以参与调度。";
+      let bad = false;
+      if (!h.ok) {
+        bad = true;
+        headline = h.message ? `健康采集失败：${h.message}` : "健康采集失败：节点不可达。";
+        lines.push("Hub 暂时无法读取该 Agent 的状态；请检查 Agent 服务、端口和网络。");
+      } else {
+        lines.push(`Agent 在线，模式：${h.agent?.mode || "compatible"}，版本：${h.agent?.version || "--"}。`);
+        lines.push(stream.running ? `FFmpeg 正在推流，当前码率：${stream.current_bitrate_label || "待采集"}。` : "FFmpeg 当前未推流。");
+      }
+      if (autoRestart.enabled) {
+        lines.push(autoRestart.last_error
+          ? `自动恢复已开启，但最近错误：${autoRestart.last_error}。`
+          : `自动恢复已开启，状态：${autoRestart.status || "正常"}。`);
+      }
+      if (adaptive.enabled) {
+        lines.push(adaptive.last_error
+          ? `智能调参有错误：${adaptive.last_error}。`
+          : `智能调参状态：${adaptive.status || "待命"}。`);
+      }
+      if (youtube.configured || youtube.authorized) {
+        lines.push(youtube.authorized ? "YouTube API 已授权，可读取直播资源和健康反馈。" : "YouTube API 已配置，但频道尚未授权。");
+      }
+      if (transfer.last_error) {
+        bad = true;
+        lines.push(`最近传输错误：${transfer.last_error}。`);
+      }
+      if (!lines.length) lines.push("暂无更多采集信息。");
+      return `
+        <div class="health-summary ${bad ? "bad" : ""}">
+          <strong>${escapeHtml(headline)}</strong>
+          <ul>${lines.slice(0, 7).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+        </div>
+      `;
+    }
+
     function nodeOnline(node) {
       return Boolean(node.enabled !== false && node.health?.ok);
     }
@@ -1849,7 +1906,7 @@ HTML = r"""
             <div class="mini-table" style="margin-top: 10px;">
               ${miniRow("节点 ID", node.id || "--")}
               ${miniRow("启用状态", node.enabled === false ? "已禁用" : "已启用")}
-              ${miniRow("健康采集", h.ok ? "正常" : (h.message || "不可达"))}
+              ${miniRowHtml("健康采集", healthSummaryHtml(node))}
               ${miniRowHtml("服务器视频", `<span class="mono">${videoList}</span>`)}
             </div>
           </div>
