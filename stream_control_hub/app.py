@@ -1107,9 +1107,10 @@ HTML = r"""
         </div>
         <div class="card compact-card">
           <h2>YouTube API</h2>
-          <p>在选中 Agent 上授权频道、创建直播并绑定可复用推流。</p>
+          <p>Hub 统一保存 YouTube 授权；可上传 Google OAuth JSON，自动填入 Client ID / Secret。</p>
           <div class="actions">
             <button class="primary" id="youtubeWizardBtn">打开 YouTube 向导</button>
+            <button id="youtubeImportJsonBtn">上传 API JSON</button>
           </div>
         </div>
         <div class="card compact-card">
@@ -1410,6 +1411,7 @@ HTML = r"""
       commandAdvanced: document.getElementById("commandAdvanced"),
       tuneBox: document.getElementById("tuneBox"),
       youtubeWizardBtn: document.getElementById("youtubeWizardBtn"),
+      youtubeImportJsonBtn: document.getElementById("youtubeImportJsonBtn"),
       youtubeWizardModal: document.getElementById("youtubeWizardModal"),
       youtubeWizardClose: document.getElementById("youtubeWizardClose"),
       youtubeWizardLog: document.getElementById("youtubeWizardLog"),
@@ -2311,6 +2313,12 @@ HTML = r"""
       }
     }
 
+    function openYouTubeJsonImport() {
+      setYouTubeModalOpen(true);
+      refs.youtubeWizardLog.textContent = "请选择 Google 下载的 client_secret_*.json，系统会自动读取 Client ID / Secret。";
+      window.setTimeout(() => refs.youtubeJsonFileInput.click(), 120);
+    }
+
     function renderYouTubeStreams(streams = [], selectedStreamId = "") {
       const previousMain = selectedStreamId || refs.youtubeStreamSelect.value;
       const previousPrepare = refs.youtubePrepareStreamSelect.value;
@@ -2504,7 +2512,7 @@ HTML = r"""
         return;
       }
       refs.youtubeSaveConfigBtn.disabled = true;
-      refs.youtubeWizardLog.textContent = "正在把 YouTube API 配置保存到当前 Agent...";
+      refs.youtubeWizardLog.textContent = "正在把 YouTube API 配置保存到当前 Hub...";
       try {
         const data = await postNodeAction("/api/nodes/youtube/config", {
           node_id: selectedNodeId,
@@ -4392,6 +4400,7 @@ HTML = r"""
       if (event.target === refs.tailscaleWizardModal) setTailscaleWizardOpen(false);
     });
     refs.youtubeWizardBtn.addEventListener("click", () => setYouTubeModalOpen(true));
+    refs.youtubeImportJsonBtn.addEventListener("click", openYouTubeJsonImport);
     refs.youtubeWizardClose.addEventListener("click", () => setYouTubeModalOpen(false));
     refs.youtubeWizardModal.addEventListener("click", (event) => {
       if (event.target === refs.youtubeWizardModal) setYouTubeModalOpen(false);
@@ -4438,7 +4447,7 @@ def index():
         response = make_response(HTML)
     response.headers["ETag"] = f'"{etag}"'
     response.headers["X-Stream-Hub-Version"] = version
-    response.headers["Cache-Control"] = "private, max-age=3600, stale-while-revalidate=86400"
+    response.headers["Cache-Control"] = "private, no-cache, max-age=0, must-revalidate"
     return response
 
 
