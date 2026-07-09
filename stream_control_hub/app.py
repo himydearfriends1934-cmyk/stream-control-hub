@@ -396,6 +396,33 @@ HTML = r"""
     .wizard-existing-grid .wide-action { grid-column: 1 / -1; }
     .wizard-field { display: grid; gap: 5px; min-width: 0; }
     .wizard-field label { color: var(--muted); font-size: 12px; font-weight: 900; }
+    .youtube-import-panel {
+      display: grid;
+      gap: 8px;
+      margin: 8px 0 10px;
+      padding: 10px;
+      border: 1px solid rgba(54, 211, 153, .48);
+      border-radius: 12px;
+      background: linear-gradient(135deg, rgba(54, 211, 153, .12), rgba(84, 198, 235, .08));
+    }
+    .youtube-import-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .youtube-import-head strong { color: #d6fff0; font-size: 15px; }
+    .youtube-import-head small { display: block; margin-top: 2px; color: var(--muted); }
+    .youtube-json-file-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+    .youtube-json-upload-label {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      padding: 9px 14px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #04100c;
+      font-weight: 900;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .youtube-import-panel textarea { min-height: 76px; }
     .wizard-step-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
     .wizard-step {
       display: grid;
@@ -1203,9 +1230,20 @@ HTML = r"""
       <div class="wizard-head">
         <div>
           <h2 id="youtubeWizardTitle">YouTube Live API</h2>
-          <p>授权和直播码都留在当前 Agent；Hub 只保存 YouTube stream ID。</p>
+          <p>授权保存在当前 Hub；Hub 可把 YouTube 直播流分配给一台或多台 Agent。</p>
         </div>
         <button class="wizard-close" id="youtubeWizardClose" title="关闭">X</button>
+      </div>
+      <div class="youtube-import-panel">
+        <div class="youtube-import-head">
+          <div>
+            <strong>导入 Google OAuth JSON</strong>
+            <small>上传下载的 client_secret_*.json，或把 JSON 粘贴到下面；Hub 会自动填入 Client ID / Secret。</small>
+          </div>
+          <label class="youtube-json-upload-label" for="youtubeJsonFileInput">上传 JSON 文件</label>
+          <input class="youtube-json-file-hidden" id="youtubeJsonFileInput" type="file" accept=".json,application/json">
+        </div>
+        <textarea id="youtubeJsonInput" spellcheck="false" placeholder="也可以把 Google OAuth client JSON 直接粘贴到这里。"></textarea>
       </div>
       <div class="wizard-grid">
         <div class="wizard-field">
@@ -1229,14 +1267,6 @@ HTML = r"""
         <div class="wizard-field">
           <label>Client Secret（可选）</label>
           <input id="youtubeClientSecretInput" type="password" autocomplete="off" placeholder="部分 OAuth 客户端没有 secret">
-        </div>
-        <div class="wizard-field">
-          <label>OAuth JSON 自动读取</label>
-          <input id="youtubeJsonFileInput" type="file" accept=".json,application/json">
-        </div>
-        <div class="wizard-field">
-          <label>粘贴 JSON</label>
-          <textarea id="youtubeJsonInput" spellcheck="false" placeholder="把 Google OAuth client JSON 粘贴到这里，或选择上面的 JSON 文件。"></textarea>
         </div>
         <div class="wizard-field">
           <label>可见范围 / 计划时间</label>
