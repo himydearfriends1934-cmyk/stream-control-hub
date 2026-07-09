@@ -137,6 +137,13 @@ def _response_error(response: requests.Response, fallback: str) -> YouTubeAPIErr
     elif isinstance(error, str):
         reason = error
         message = str(payload.get("error_description") or error)
+    detail = f"{reason} {message}".lower()
+    if "org_internal" in detail:
+        message = (
+            "Google OAuth app is limited to internal organization users. "
+            "In Google Cloud Console, change the OAuth consent screen user type to External "
+            "or add this Google account as a test user, then authorize YouTube again."
+        )
     return YouTubeAPIError(message, status_code=response.status_code or 502, reason=reason)
 
 
@@ -376,7 +383,7 @@ class YouTubeAPIClient:
             "GET",
             "liveBroadcasts",
             params={
-                "part": "id,snippet,status,contentDetails",
+                "part": "id,snippet,status,contentDetails,monetizationDetails",
                 "broadcastStatus": "all",
                 "maxResults": 50,
             },
@@ -386,15 +393,44 @@ class YouTubeAPIClient:
             snippet = item.get("snippet") or {}
             status = item.get("status") or {}
             details = item.get("contentDetails") or {}
+            monitor = details.get("monitorStream") or {}
+            availability = details.get("availabilityConfig") or {}
+            monetization = item.get("monetizationDetails") or {}
+            cuepoint = monetization.get("cuepointSchedule") or {}
             broadcast_id = str(item.get("id") or "")
             result.append({
                 "id": broadcast_id,
                 "title": str(snippet.get("title") or ""),
+                "description": str(snippet.get("description") or ""),
+                "published_at": str(snippet.get("publishedAt") or ""),
+                "channel_id": str(snippet.get("channelId") or ""),
                 "scheduled_start_time": str(snippet.get("scheduledStartTime") or ""),
+                "scheduled_end_time": str(snippet.get("scheduledEndTime") or ""),
                 "actual_start_time": str(snippet.get("actualStartTime") or ""),
+                "actual_end_time": str(snippet.get("actualEndTime") or ""),
+                "live_chat_id": str(snippet.get("liveChatId") or ""),
                 "life_cycle_status": str(status.get("lifeCycleStatus") or ""),
                 "privacy_status": str(status.get("privacyStatus") or ""),
+                "recording_status": str(status.get("recordingStatus") or ""),
+                "made_for_kids": status.get("madeForKids"),
+                "self_declared_made_for_kids": status.get("selfDeclaredMadeForKids"),
                 "bound_stream_id": str(details.get("boundStreamId") or ""),
+                "bound_stream_last_update_time": str(details.get("boundStreamLastUpdateTimeMs") or ""),
+                "enable_monitor_stream": monitor.get("enableMonitorStream"),
+                "broadcast_stream_delay_ms": monitor.get("broadcastStreamDelayMs"),
+                "enable_embed": details.get("enableEmbed"),
+                "enable_dvr": details.get("enableDvr"),
+                "record_from_start": details.get("recordFromStart"),
+                "enable_closed_captions": details.get("enableClosedCaptions"),
+                "closed_captions_type": str(details.get("closedCaptionsType") or ""),
+                "projection": str(details.get("projection") or ""),
+                "latency_preference": str(details.get("latencyPreference") or ""),
+                "enable_auto_start": details.get("enableAutoStart"),
+                "enable_auto_stop": details.get("enableAutoStop"),
+                "availability_config": availability,
+                "ads_monetization_status": str(monetization.get("adsMonetizationStatus") or ""),
+                "eligible_for_ads_monetization": monetization.get("eligibleForAdsMonetization"),
+                "cuepoint_schedule_enabled": cuepoint.get("enabled"),
                 "watch_url": f"https://www.youtube.com/watch?v={broadcast_id}" if broadcast_id else "",
             })
         return result

@@ -2337,6 +2337,56 @@ HTML = r"""
       syncStreamOutputMode();
     }
 
+    function compactValue(value) {
+      if (value === true) return "on";
+      if (value === false) return "off";
+      if (value === null || value === undefined || value === "") return "--";
+      return String(value);
+    }
+
+    function shortDateTime(value) {
+      if (!value) return "--";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString();
+    }
+
+    function renderYouTubeResourceSummary(data = {}) {
+      const streams = data.streams || [];
+      const broadcasts = data.broadcasts || [];
+      const streamById = new Map(streams.map((item) => [item.id, item]));
+      const lines = [
+        `Channel: ${data.channel?.title || "--"}`,
+        `Streams: ${streams.length}`,
+        `Broadcasts: ${broadcasts.length}`,
+      ];
+      if (streams.length) {
+        lines.push("");
+        lines.push("Streams");
+        streams.slice(0, 5).forEach((item) => {
+          lines.push(`- ${item.title || item.id}`);
+          lines.push(`  status=${item.stream_status || "--"} health=${item.health_status || "--"} ${item.resolution || "--"}/${item.frame_rate || "--"} reusable=${compactValue(item.is_reusable)}`);
+          const issues = item.configuration_issues || [];
+          if (issues.length) lines.push(`  issues=${issues.length}: ${issues.slice(0, 2).map((issue) => issue.reason || issue.type || issue.description || String(issue)).join("; ")}`);
+        });
+      }
+      if (broadcasts.length) {
+        lines.push("");
+        lines.push("Broadcasts");
+        broadcasts.slice(0, 5).forEach((item) => {
+          const stream = streamById.get(item.bound_stream_id) || {};
+          lines.push(`- ${item.title || item.id}`);
+          lines.push(`  status=${item.life_cycle_status || "--"} privacy=${item.privacy_status || "--"} recording=${item.recording_status || "--"}`);
+          lines.push(`  scheduled=${shortDateTime(item.scheduled_start_time)} actual=${shortDateTime(item.actual_start_time)} end=${shortDateTime(item.actual_end_time || item.scheduled_end_time)}`);
+          lines.push(`  dvr=${compactValue(item.enable_dvr)} record=${compactValue(item.record_from_start)} embed=${compactValue(item.enable_embed)} autoStart=${compactValue(item.enable_auto_start)} autoStop=${compactValue(item.enable_auto_stop)}`);
+          lines.push(`  captions=${compactValue(item.enable_closed_captions)} latency=${compactValue(item.latency_preference)} monitorDelayMs=${compactValue(item.broadcast_stream_delay_ms)} madeForKids=${compactValue(item.made_for_kids ?? item.self_declared_made_for_kids)}`);
+          lines.push(`  chat=${item.live_chat_id ? "available" : "--"} ads=${compactValue(item.ads_monetization_status || item.eligible_for_ads_monetization)} stream=${item.bound_stream_id || "--"} health=${stream.health_status || "--"}`);
+          if (item.watch_url) lines.push(`  ${item.watch_url}`);
+        });
+      }
+      return lines.join("\n");
+    }
+
     async function refreshYouTubeResources() {
       const node = selectedNode();
       if (!node) {
@@ -2345,7 +2395,7 @@ HTML = r"""
       }
       refs.youtubeRefreshBtn.disabled = true;
       refs.youtubeNodeInput.value = `${node.name || node.id} (${node.id})`;
-      refs.youtubeWizardLog.textContent = "正在从 Agent 读取 YouTube 授权和直播资源...";
+      refs.youtubeWizardLog.textContent = "正在由 Hub 读取 YouTube 授权和直播资源...";
       try {
         const data = await postNodeAction("/api/nodes/youtube/resources", { node_id: selectedNodeId });
         if (!data.ok && data.configured === undefined) {
@@ -2377,7 +2427,7 @@ HTML = r"""
         (data.broadcasts || []).slice(0, 5).forEach((item) => {
           lines.push(`${item.title || item.id} / ${item.life_cycle_status || "--"} / ${item.privacy_status || "--"}`);
         });
-        refs.youtubeWizardLog.textContent = lines.join("\n");
+        refs.youtubeWizardLog.textContent = renderYouTubeResourceSummary(data);
         return data;
       } catch (error) {
         refs.youtubeWizardLog.textContent = friendlyError(error, "YouTube API 读取失败");

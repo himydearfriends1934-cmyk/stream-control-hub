@@ -58,6 +58,24 @@ class YouTubeAPIClientTests(unittest.TestCase):
         if os.name != "nt":
             self.assertEqual(credential_mode, 0o600)
 
+    def test_device_authorization_explains_internal_oauth_app(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = YouTubeAPIClient(client_id="client-id", credential_path=Path(tmp) / "credentials.json")
+            response = FakeResponse(
+                {
+                    "error": "org_internal",
+                    "error_description": "This app is restricted to users within its organization.",
+                },
+                status_code=403,
+            )
+            with patch("stream_control_hub.youtube_api.requests.post", return_value=response):
+                with self.assertRaises(Exception) as raised:
+                    client.start_device_authorization()
+
+        message = str(raised.exception)
+        self.assertIn("limited to internal organization users", message)
+        self.assertIn("OAuth consent screen", message)
+
     def test_stream_list_redacts_ingestion_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = YouTubeAPIClient(client_id="client-id", credential_path=Path(tmp) / "credentials.json")
@@ -104,6 +122,59 @@ class YouTubeAPIClientTests(unittest.TestCase):
         ])
         self.assertEqual(request.call_args_list[2].kwargs["params"]["streamId"], "stream-1")
         self.assertNotIn("selfDeclaredMadeForKids", request.call_args_list[1].kwargs["body"]["status"])
+
+    def test_broadcast_list_returns_studio_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = YouTubeAPIClient(client_id="client-id", credential_path=Path(tmp) / "credentials.json")
+            with patch.object(
+                client,
+                "_request",
+                return_value={
+                    "items": [{
+                        "id": "broadcast-1",
+                        "snippet": {
+                            "title": "Live show",
+                            "description": "Full description",
+                            "publishedAt": "2026-07-09T10:00:00Z",
+                            "scheduledStartTime": "2026-07-09T11:00:00Z",
+                            "scheduledEndTime": "2026-07-09T12:00:00Z",
+                            "liveChatId": "chat-1",
+                        },
+                        "status": {
+                            "lifeCycleStatus": "ready",
+                            "privacyStatus": "private",
+                            "recordingStatus": "notRecording",
+                            "madeForKids": False,
+                        },
+                        "contentDetails": {
+                            "boundStreamId": "stream-1",
+                            "enableDvr": True,
+                            "recordFromStart": True,
+                            "enableAutoStart": True,
+                            "enableAutoStop": False,
+                            "latencyPreference": "low",
+                            "monitorStream": {"broadcastStreamDelayMs": 0},
+                        },
+                        "monetizationDetails": {
+                            "adsMonetizationStatus": "disabled",
+                            "eligibleForAdsMonetization": False,
+                        },
+                    }]
+                },
+            ) as request:
+                broadcasts = client.list_broadcasts()
+
+        self.assertEqual(
+            request.call_args.kwargs["params"]["part"],
+            "id,snippet,status,contentDetails,monetizationDetails",
+        )
+        self.assertEqual(broadcasts[0]["description"], "Full description")
+        self.assertEqual(broadcasts[0]["recording_status"], "notRecording")
+        self.assertTrue(broadcasts[0]["enable_dvr"])
+        self.assertTrue(broadcasts[0]["record_from_start"])
+        self.assertEqual(broadcasts[0]["latency_preference"], "low")
+        self.assertEqual(broadcasts[0]["broadcast_stream_delay_ms"], 0)
+        self.assertEqual(broadcasts[0]["ads_monetization_status"], "disabled")
 
     def test_agent_resolves_youtube_target_without_hub_stream_key(self):
         from stream_control_hub import headless_agent

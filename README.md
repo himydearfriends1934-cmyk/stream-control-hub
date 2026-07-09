@@ -158,8 +158,9 @@ Active streams are supervised by the Headless Agent. While a stream is desired, 
 The Headless Agent supports the official YouTube Live Streaming API through OAuth 2.0 device authorization. The Hub only coordinates with YouTube stream and broadcast IDs. The Google refresh token and the RTMP stream name stay on the Agent; neither is returned to the Hub. Automatic FFmpeg recovery resolves the ingestion target again from the saved YouTube stream ID, so no YouTube stream key is needed in the recovery payload.
 
 1. Enable YouTube Data API v3 in Google Cloud.
-2. Create an OAuth client with application type `TVs and Limited Input devices`.
-3. Install or update the Agent with its client ID. The client secret is optional for clients that do not issue one:
+2. Configure the OAuth consent screen for the Google Cloud project. Use `External` for normal Gmail accounts and add each operator account under `Test users` while the app is in testing. If the consent screen is left as `Internal`, Google will reject non-organization accounts with `403: org_internal`.
+3. Create an OAuth client with application type `TVs and Limited Input devices`.
+4. Install or update the Agent with its client ID. The client secret is optional for clients that do not issue one:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/himydearfriends1934-cmyk/stream-control-hub/main/scripts/install-agent.sh | sudo env STREAM_AGENT_CONTROL_HUB='http://100.64.0.1:8788' YOUTUBE_CLIENT_ID='your-client-id' YOUTUBE_CLIENT_SECRET='your-optional-client-secret' sh
