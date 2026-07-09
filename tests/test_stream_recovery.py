@@ -43,7 +43,11 @@ class StreamRecoveryTests(unittest.TestCase):
                 client = headless_agent.APP.test_client()
                 start = client.post(
                     "/api/start-stream",
-                    json={"video_path": str(video), "stream_key": "private-stream-key"},
+                    json={
+                        "video_path": str(video),
+                        "stream_key": "private-stream-key",
+                        "youtube_profile_id": "account-a",
+                    },
                 )
                 recovery_file = headless_agent.STREAM_RESTART_FILE
                 saved = json.loads(recovery_file.read_text(encoding="utf-8"))
@@ -54,6 +58,7 @@ class StreamRecoveryTests(unittest.TestCase):
 
         self.assertEqual(start.status_code, 200)
         self.assertEqual(saved["stream_key"], "private-stream-key")
+        self.assertEqual(saved["youtube_profile_id"], "account-a")
         if os.name != "nt":
             self.assertEqual(mode, 0o600)
         self.assertEqual(restart.status_code, 200)

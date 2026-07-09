@@ -618,6 +618,7 @@ def save_stream_restart_payload(payload: dict[str, Any], video_path: Path) -> No
     allowed = {
         "stream_url",
         "stream_key",
+        "youtube_profile_id",
         "youtube_stream_id",
         "youtube_ingestion_url",
         "copy_mode",
