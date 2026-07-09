@@ -619,6 +619,7 @@ def save_stream_restart_payload(payload: dict[str, Any], video_path: Path) -> No
         "stream_url",
         "stream_key",
         "youtube_stream_id",
+        "youtube_ingestion_url",
         "copy_mode",
         "adaptive_mode",
         "stream_output_mode",
@@ -1013,6 +1014,9 @@ def stream_output_url(payload: dict[str, Any]) -> str:
     if output_mode == "local_relay":
         return stream_url
     if output_mode == "youtube_api":
+        hub_ingestion_url = str(payload.get("youtube_ingestion_url") or "").strip()
+        if hub_ingestion_url.lower().startswith(("rtmp://", "rtmps://")):
+            return hub_ingestion_url
         return YOUTUBE_CLIENT.ingestion_target(str(payload.get("youtube_stream_id") or ""))
     if not stream_key:
         raise ValueError("missing stream key")
@@ -2003,6 +2007,19 @@ def api_youtube_streams():
     except Exception as exc:
         return youtube_error_response(exc)
     return jsonify({"ok": True, "streams": streams})
+
+
+@APP.post("/api/youtube/health")
+def api_youtube_health():
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = YOUTUBE_CLIENT.stream_health(
+            str(payload.get("youtube_stream_id") or payload.get("stream_id") or ""),
+            payload,
+        )
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify(result)
 
 
 @APP.get("/api/youtube/broadcasts")

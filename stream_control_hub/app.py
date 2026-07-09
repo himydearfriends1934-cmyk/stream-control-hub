@@ -20,6 +20,8 @@ import requests
 from flask import Flask, jsonify, make_response, request
 from werkzeug.utils import secure_filename
 
+from .youtube_api import YouTubeAPIClient, YouTubeAPIError
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -68,6 +70,15 @@ MEDIA_GROUPS_FILE = DATA_DIR / "media-groups.json"
 PUSH_AUDIT_LOG_MAX_BYTES = int(os.environ.get("STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYTES", str(5 * 1024 ** 2)))
 CONTROL_TOKEN = os.environ.get("STREAM_HUB_CONTROL_TOKEN", "").strip()
 TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_HUB_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
+HUB_ENV_FILE = ROOT / ".env"
+YOUTUBE_CREDENTIAL_FILE = Path(
+    os.environ.get("YOUTUBE_CREDENTIAL_FILE", str(DATA_DIR / "youtube_credentials.json"))
+)
+YOUTUBE_CLIENT = YouTubeAPIClient(
+    client_id=os.environ.get("YOUTUBE_CLIENT_ID", ""),
+    client_secret=os.environ.get("YOUTUBE_CLIENT_SECRET", ""),
+    credential_path=YOUTUBE_CREDENTIAL_FILE,
+)
 TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 TAILSCALE_HELPER = ROOT / "scripts" / "tailscale-install.sh"
 INSTALL_COMMANDS_FILE = CONFIG_DIR / "install-commands.json"
@@ -1217,10 +1228,11 @@ HTML = r"""
         <button id="youtubeSaveConfigBtn">保存 API 配置</button>
         <button class="primary" id="youtubeAuthorizeBtn">连接 YouTube</button>
         <button id="youtubePrepareBtn">创建并绑定直播</button>
+        <button id="youtubeHealthBtn">读取健康反馈</button>
         <button class="danger" id="youtubeRevokeBtn">断开授权</button>
       </div>
       <div class="wizard-status" id="youtubeWizardLog">
-        <div class="wizard-status-line">选择 Agent 后检查状态。首次使用需要在 Agent 的 .agent.env 配置 YOUTUBE_CLIENT_ID。</div>
+        <div class="wizard-status-line">选择要分配的 Agent 后检查状态。首次使用需要在 Hub 保存 YouTube OAuth Client ID。</div>
       </div>
     </div>
   </div>
@@ -1348,6 +1360,7 @@ HTML = r"""
       youtubeSaveConfigBtn: document.getElementById("youtubeSaveConfigBtn"),
       youtubeAuthorizeBtn: document.getElementById("youtubeAuthorizeBtn"),
       youtubePrepareBtn: document.getElementById("youtubePrepareBtn"),
+      youtubeHealthBtn: document.getElementById("youtubeHealthBtn"),
       youtubeRevokeBtn: document.getElementById("youtubeRevokeBtn"),
       updateBox: document.getElementById("updateBox"),
       uploadBox: document.getElementById("uploadBox"),
@@ -2222,7 +2235,7 @@ HTML = r"""
         }
         if (!data.configured) {
           renderYouTubeStreams([]);
-          refs.youtubeWizardLog.textContent = "当前 Agent 尚未配置 YOUTUBE_CLIENT_ID。请先在 Agent 的 .agent.env 配置 Google TV / Limited Input OAuth client ID，再更新或重启 Agent。";
+          refs.youtubeWizardLog.textContent = "当前 Hub 尚未配置 YOUTUBE_CLIENT_ID。请先在这里保存 Google TV / Limited Input OAuth Client ID，再连接 YouTube。";
           return data;
         }
         if (!data.authorized) {
@@ -2381,6 +2394,45 @@ HTML = r"""
         refs.youtubeWizardLog.textContent = friendlyError(error, "创建 YouTube 直播失败");
       } finally {
         refs.youtubePrepareBtn.disabled = false;
+      }
+    }
+
+    async function readYouTubeHealth() {
+      const streamId = refs.youtubeStreamSelect.value || refs.youtubePrepareStreamSelect.value;
+      if (!selectedNodeId || !streamId) {
+        refs.youtubeWizardLog.textContent = "请先选择 Agent 和 YouTube 直播流。";
+        return;
+      }
+      refs.youtubeHealthBtn.disabled = true;
+      refs.youtubeWizardLog.textContent = "正在由 Hub 读取 YouTube 直播健康反馈...";
+      try {
+        const data = await postNodeAction("/api/nodes/youtube/health", {
+          ...streamPayload({ includeKey: false }),
+          node_id: selectedNodeId,
+          youtube_stream_id: streamId,
+        });
+        if (!data.ok) {
+          refs.youtubeWizardLog.textContent = data.message || "YouTube 健康反馈读取失败";
+          return;
+        }
+        applyTuneRecommendation(data);
+        lastTuneRecommendation = data;
+        const health = data.health || {};
+        const analysis = data.analysis || {};
+        const reasons = [...(analysis.reasons || []), ...(analysis.warnings || [])];
+        refs.youtubeWizardLog.textContent = [
+          "YouTube 健康反馈已读取，推荐参数已应用到 Smart Start 面板。",
+          `健康状态：${health.health_status || "--"} / 推流状态：${health.stream_status || "--"}`,
+          `YouTube 流：${health.title || streamId}`,
+          "",
+          ...(reasons.length ? reasons : ["当前没有明显风险，维持现有参数。"]),
+        ].join("\n");
+        if (refs.commandAdvanced) refs.commandAdvanced.open = true;
+        renderTuneRecommendation(data);
+      } catch (error) {
+        refs.youtubeWizardLog.textContent = friendlyError(error, "YouTube 健康反馈读取失败");
+      } finally {
+        refs.youtubeHealthBtn.disabled = false;
       }
     }
 
@@ -4088,6 +4140,7 @@ HTML = r"""
     refs.youtubeSaveConfigBtn.addEventListener("click", saveYouTubeConfig);
     refs.youtubeAuthorizeBtn.addEventListener("click", startYouTubeAuthorization);
     refs.youtubePrepareBtn.addEventListener("click", prepareYouTubeBroadcast);
+    refs.youtubeHealthBtn.addEventListener("click", readYouTubeHealth);
     refs.youtubeRevokeBtn.addEventListener("click", revokeYouTubeAuthorization);
     refs.tailscaleUseExistingIpBtn.addEventListener("click", connectExistingTailscaleIp);
     refs.copyAgentInstallBtn.addEventListener("click", copyAgentInstallCommand);
@@ -4613,6 +4666,53 @@ def node_by_id(node_id: str) -> dict[str, Any] | None:
         if str(node.get("id")) == node_id:
             return node
     return None
+
+
+def update_env_file_values(path: Path, updates: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
+    if path.exists():
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in raw_line:
+                existing.append((raw_line, None))
+                continue
+            key, _ = raw_line.split("=", 1)
+            key = key.strip()
+            if key in updates:
+                existing.append((f"{key}={updates[key]}", key))
+                seen.add(key)
+            else:
+                existing.append((raw_line, key))
+    for key, value in updates.items():
+        if key not in seen:
+            existing.append((f"{key}={value}", key))
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text("\n".join(line for line, _ in existing) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def reload_hub_youtube_client(*, client_id: str, client_secret: str) -> None:
+    global YOUTUBE_CLIENT
+    os.environ["YOUTUBE_CLIENT_ID"] = client_id
+    os.environ["YOUTUBE_CLIENT_SECRET"] = client_secret
+    YOUTUBE_CLIENT = YouTubeAPIClient(
+        client_id=client_id,
+        client_secret=client_secret,
+        credential_path=YOUTUBE_CREDENTIAL_FILE,
+    )
+
+
+def youtube_error_response(exc: Exception):
+    if isinstance(exc, YouTubeAPIError):
+        return jsonify({"ok": False, "message": str(exc), "reason": exc.reason}), exc.status_code
+    return jsonify({"ok": False, "message": str(exc)}), 502
 
 
 def request_node_json(node: dict[str, Any], path: str, *, timeout: int = 6) -> dict[str, Any]:
@@ -6624,6 +6724,7 @@ def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
         "stream_url": stream_url,
         "stream_key": stream_key,
         "youtube_stream_id": str(payload.get("youtube_stream_id") or "").strip(),
+        "youtube_ingestion_url": str(payload.get("youtube_ingestion_url") or "").strip(),
         "video_path": str(payload.get("video_path") or "").strip(),
         "copy_mode": bool(payload.get("copy_mode")),
         "adaptive_mode": str(payload.get("adaptive_mode") or "auto").strip().lower() or "auto",
@@ -6640,9 +6741,11 @@ def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
 def redacted_stream_result(data: dict[str, Any]) -> dict[str, Any]:
     result = dict(data or {})
     result.pop("command", None)
+    result.pop("youtube_ingestion_url", None)
     if isinstance(result.get("result"), dict):
         nested = dict(result["result"])
         nested.pop("command", None)
+        nested.pop("youtube_ingestion_url", None)
         result["result"] = nested
     return result
 
@@ -6708,6 +6811,24 @@ def api_nodes_stream_recommend():
     node_payload = stream_payload_for_node(payload)
     node_payload["stream_key"] = ""
     result = post_node_json(node, "/api/stream/recommend", node_payload, timeout=45)
+    if (
+        result.get("ok")
+        and node_payload.get("stream_output_mode") == "youtube_api"
+        and node_payload.get("youtube_stream_id")
+        and YOUTUBE_CLIENT.local_status().get("authorized")
+    ):
+        with suppress(Exception):
+            health = YOUTUBE_CLIENT.stream_health(node_payload["youtube_stream_id"], result.get("recommendation") or node_payload)
+            if health.get("ok"):
+                result["youtube_health"] = health.get("health") or {}
+                result["youtube_feedback"] = health.get("analysis") or {}
+                result["recommendation"] = health.get("recommendation") or result.get("recommendation")
+                analysis = dict(result.get("analysis") or {})
+                analysis["youtube_health_status"] = (health.get("health") or {}).get("health_status", "")
+                analysis["youtube_stream_status"] = (health.get("health") or {}).get("stream_status", "")
+                analysis["youtube_reasons"] = (health.get("analysis") or {}).get("reasons") or []
+                analysis["youtube_warnings"] = (health.get("analysis") or {}).get("warnings") or []
+                result["analysis"] = analysis
     status_code = 200 if result.get("ok") else 502
     return jsonify({"node_id": node_id, **redacted_stream_result(result)}), status_code
 
@@ -6735,6 +6856,11 @@ def api_nodes_stream_start():
         return jsonify({"ok": False, "message": "missing stream key"}), 400
     if node_payload["stream_output_mode"] == "youtube_api" and not node_payload["youtube_stream_id"]:
         return jsonify({"ok": False, "message": "missing YouTube API stream ID"}), 400
+    if node_payload["stream_output_mode"] == "youtube_api" and not node_payload.get("youtube_ingestion_url"):
+        try:
+            node_payload["youtube_ingestion_url"] = YOUTUBE_CLIENT.ingestion_target(node_payload["youtube_stream_id"])
+        except Exception as exc:
+            return youtube_error_response(exc)
     result = post_node_json(node, "/api/start-stream", node_payload, timeout=60)
     status_code = 200 if result.get("ok") else 502
     return jsonify({
@@ -6820,24 +6946,28 @@ def api_nodes_youtube_resources():
     if error:
         return error
     assert node is not None
-    status = request_node_json(node, "/api/youtube/status?verify=1", timeout=30)
-    if not status.get("ok") or not status.get("authorized"):
-        return jsonify({"node_id": str(payload.get("node_id") or ""), **status}), int(status.get("status_code") or 200)
-    streams = request_node_json(node, "/api/youtube/streams", timeout=30)
-    broadcasts = request_node_json(node, "/api/youtube/broadcasts", timeout=30)
-    ok = bool(streams.get("ok") and broadcasts.get("ok"))
-    result = {
-        "ok": ok,
+    status = YOUTUBE_CLIENT.local_status()
+    if status["authorized"]:
+        try:
+            channel = YOUTUBE_CLIENT.channel()
+            streams = YOUTUBE_CLIENT.list_streams()
+            broadcasts = YOUTUBE_CLIENT.list_broadcasts()
+        except Exception as exc:
+            return youtube_error_response(exc)
+    else:
+        channel = {}
+        streams = []
+        broadcasts = []
+    return jsonify({
+        "ok": True,
         "node_id": str(payload.get("node_id") or ""),
+        "mode": "hub",
         "configured": bool(status.get("configured")),
         "authorized": bool(status.get("authorized")),
-        "channel": status.get("channel") or {},
-        "streams": streams.get("streams") or [],
-        "broadcasts": broadcasts.get("broadcasts") or [],
-    }
-    if not ok:
-        result["message"] = streams.get("message") or broadcasts.get("message") or "YouTube resources unavailable"
-    return jsonify(result), 200 if ok else 502
+        "channel": channel,
+        "streams": streams,
+        "broadcasts": broadcasts,
+    })
 
 
 @APP.post("/api/nodes/youtube/oauth/start")
@@ -6847,10 +6977,11 @@ def api_nodes_youtube_oauth_start():
     if error:
         return error
     assert node is not None
-    result = post_node_json(node, "/api/youtube/oauth/start", {}, timeout=30)
-    return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
-        result.get("status_code") or (200 if result.get("ok") else 502)
-    )
+    try:
+        result = YOUTUBE_CLIENT.start_device_authorization()
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({"ok": True, "node_id": str(payload.get("node_id") or ""), "mode": "hub", **result})
 
 
 @APP.post("/api/nodes/youtube/config")
@@ -6864,15 +6995,22 @@ def api_nodes_youtube_config():
     client_secret = str(payload.get("client_secret") or "").strip()
     if not client_id:
         return jsonify({"ok": False, "message": "YOUTUBE_CLIENT_ID is required"}), 400
-    result = post_node_json(
-        node,
-        "/api/youtube/config",
-        {"client_id": client_id, "client_secret": client_secret},
-        timeout=30,
+    update_env_file_values(
+        HUB_ENV_FILE,
+        {
+            "YOUTUBE_CLIENT_ID": client_id,
+            "YOUTUBE_CLIENT_SECRET": client_secret,
+            "YOUTUBE_CREDENTIAL_FILE": str(YOUTUBE_CREDENTIAL_FILE),
+        },
     )
-    return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
-        result.get("status_code") or (200 if result.get("ok") else 502)
-    )
+    reload_hub_youtube_client(client_id=client_id, client_secret=client_secret)
+    return jsonify({
+        "ok": True,
+        "node_id": str(payload.get("node_id") or ""),
+        "mode": "hub",
+        "message": "YouTube API configuration saved on this Hub",
+        **YOUTUBE_CLIENT.local_status(),
+    })
 
 
 @APP.post("/api/nodes/youtube/oauth/poll")
@@ -6882,15 +7020,30 @@ def api_nodes_youtube_oauth_poll():
     if error:
         return error
     assert node is not None
-    result = post_node_json(
-        node,
-        "/api/youtube/oauth/poll",
-        {"session_id": str(payload.get("session_id") or "")},
-        timeout=30,
-    )
-    return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
-        result.get("status_code") or (200 if result.get("ok") else 502)
-    )
+    try:
+        result = YOUTUBE_CLIENT.poll_device_authorization(str(payload.get("session_id") or ""))
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({"ok": True, "node_id": str(payload.get("node_id") or ""), "mode": "hub", **result})
+
+
+@APP.post("/api/nodes/youtube/health")
+def api_nodes_youtube_health():
+    payload = request.get_json(silent=True) or {}
+    node, error = youtube_node_from_payload(payload)
+    if error:
+        return error
+    assert node is not None
+    stream_id = str(payload.get("youtube_stream_id") or payload.get("stream_id") or "").strip()
+    try:
+        result = YOUTUBE_CLIENT.stream_health(stream_id, stream_payload_for_node(payload))
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({
+        "node_id": str(payload.get("node_id") or ""),
+        "mode": "hub",
+        **result,
+    })
 
 
 @APP.post("/api/nodes/youtube/prepare")
@@ -6915,10 +7068,17 @@ def api_nodes_youtube_prepare():
         "enable_dvr",
     }
     node_payload = {key: payload.get(key) for key in allowed if key in payload}
-    result = post_node_json(node, "/api/youtube/prepare", node_payload, timeout=60)
-    return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
-        result.get("status_code") or (200 if result.get("ok") else 502)
-    )
+    try:
+        result = YOUTUBE_CLIENT.prepare_broadcast(node_payload)
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({
+        "ok": True,
+        "node_id": str(payload.get("node_id") or ""),
+        "mode": "hub",
+        "message": "YouTube broadcast prepared and bound by Hub",
+        "result": result,
+    })
 
 
 @APP.post("/api/nodes/youtube/oauth/revoke")
@@ -6928,10 +7088,16 @@ def api_nodes_youtube_oauth_revoke():
     if error:
         return error
     assert node is not None
-    result = post_node_json(node, "/api/youtube/oauth/revoke", {}, timeout=30)
-    return jsonify({"node_id": str(payload.get("node_id") or ""), **result}), int(
-        result.get("status_code") or (200 if result.get("ok") else 502)
-    )
+    try:
+        YOUTUBE_CLIENT.revoke()
+    except Exception as exc:
+        return youtube_error_response(exc)
+    return jsonify({
+        "ok": True,
+        "node_id": str(payload.get("node_id") or ""),
+        "mode": "hub",
+        "message": "YouTube authorization revoked from Hub",
+    })
 
 
 @APP.post("/api/nodes/reboot")

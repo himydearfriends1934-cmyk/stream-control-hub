@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from stream_control_hub.youtube_api import YouTubeAPIClient
+from stream_control_hub.youtube_api import YouTubeAPIClient, youtube_health_recommendation
 
 
 class FakeResponse:
@@ -122,7 +122,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(output, "rtmp://example.test/live2/private-stream-name")
         target.assert_called_once_with("stream-1")
 
-    def test_hub_forwards_only_youtube_stream_id(self):
+    def test_hub_forwards_youtube_stream_id_without_credentials(self):
         from stream_control_hub import app
 
         payload = app.stream_payload_for_node({
@@ -133,6 +133,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
 
         self.assertEqual(payload["youtube_stream_id"], "stream-1")
         self.assertEqual(payload["stream_key"], "")
+        self.assertEqual(payload["youtube_ingestion_url"], "")
 
     def test_hub_splits_full_rtmp_url_pasted_as_stream_key(self):
         from stream_control_hub import app
@@ -153,6 +154,10 @@ class YouTubeAPIClientTests(unittest.TestCase):
             nodes_file = Path(tmp) / "nodes.json"
             nodes_file.write_text(json.dumps([node]), encoding="utf-8")
             with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app.YOUTUBE_CLIENT,
+                "ingestion_target",
+                return_value="rtmp://example.test/live2/private-stream-name",
+            ), patch.object(
                 app,
                 "post_node_json",
                 return_value={"ok": True, "result": {"started_pid": 4101}},
@@ -170,6 +175,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         forwarded = post.call_args.args[2]
         self.assertEqual(forwarded["youtube_stream_id"], "stream-1")
+        self.assertEqual(forwarded["youtube_ingestion_url"], "rtmp://example.test/live2/private-stream-name")
         self.assertEqual(forwarded["stream_key"], "")
 
     def test_agent_saves_youtube_config_and_reloads_client(self):
@@ -199,30 +205,43 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertIn("YOUTUBE_CLIENT_SECRET=client-secret", env_text)
         self.assertEqual(configured_client_id, "client-id")
 
-    def test_hub_forwards_youtube_config_to_agent(self):
+    def test_hub_saves_youtube_config_locally(self):
         from stream_control_hub import app
 
         node = {"id": "node-a", "base_url": "http://100.64.0.10:8787", "enabled": True}
         with tempfile.TemporaryDirectory() as tmp:
             nodes_file = Path(tmp) / "nodes.json"
+            env_file = Path(tmp) / ".env"
             nodes_file.write_text(json.dumps([node]), encoding="utf-8")
-            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
-                app,
-                "post_node_json",
-                return_value={"ok": True, "configured": True, "authorized": False},
-            ) as post:
-                response = app.APP.test_client().post(
-                    "/api/nodes/youtube/config",
-                    json={"node_id": "node-a", "client_id": "client-id", "client_secret": "client-secret"},
-                )
+            original_client = app.YOUTUBE_CLIENT
+            try:
+                with patch.object(app, "NODES_FILE", nodes_file), patch.object(app, "HUB_ENV_FILE", env_file):
+                    response = app.APP.test_client().post(
+                        "/api/nodes/youtube/config",
+                        json={"node_id": "node-a", "client_id": "client-id", "client_secret": "client-secret"},
+                    )
+                    configured_client_id = app.YOUTUBE_CLIENT.client_id
+                    env_text = env_file.read_text(encoding="utf-8")
+            finally:
+                app.YOUTUBE_CLIENT = original_client
 
         self.assertEqual(response.status_code, 200)
-        post.assert_called_once_with(
-            node,
-            "/api/youtube/config",
-            {"client_id": "client-id", "client_secret": "client-secret"},
-            timeout=30,
+        self.assertEqual(response.get_json()["mode"], "hub")
+        self.assertEqual(configured_client_id, "client-id")
+        self.assertIn("YOUTUBE_CLIENT_ID=client-id", env_text)
+
+    def test_youtube_health_recommendation_reduces_high_bitrate(self):
+        result = youtube_health_recommendation(
+            {
+                "stream_status": "active",
+                "health_status": "bad",
+                "configuration_issues": [{"type": "videoBitrateIsHigh", "description": "bitrate is high"}],
+            },
+            {"video_bitrate": 6000, "fps": 60, "resolution": "1920x1080"},
         )
+
+        self.assertEqual(result["severity"], "warning")
+        self.assertLess(result["recommendation"]["video_bitrate"], 6000)
 
 
 if __name__ == "__main__":

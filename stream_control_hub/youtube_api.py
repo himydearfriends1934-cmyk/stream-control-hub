@@ -19,6 +19,101 @@ GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube"
 
 
+def youtube_health_recommendation(
+    health: dict[str, Any],
+    current: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current = current or {}
+    status = str(health.get("health_status") or health.get("status") or "").strip().lower()
+    stream_status = str(health.get("stream_status") or "").strip().lower()
+    issues = health.get("configuration_issues") or []
+    issue_text = " ".join(
+        " ".join(str(issue.get(key) or "") for key in ("type", "severity", "reason", "description"))
+        if isinstance(issue, dict)
+        else str(issue)
+        for issue in issues
+    ).lower()
+    video_bitrate = max(800, min(20000, int(current.get("video_bitrate") or 4500)))
+    audio_bitrate = max(64, min(320, int(current.get("audio_bitrate") or 192)))
+    fps = max(15, min(60, int(current.get("fps") or 30)))
+    resolution = str(current.get("resolution") or "1280x720")
+    keyframe_seconds = max(1, min(4, int(current.get("keyframe_seconds") or 2)))
+    preset = str(current.get("preset") or "veryfast") or "veryfast"
+
+    actions: list[str] = []
+    warnings: list[str] = []
+    severity = "ok"
+
+    def reduce_bitrate(percent: float, reason: str) -> None:
+        nonlocal video_bitrate, severity
+        video_bitrate = max(800, int(video_bitrate * (1.0 - percent)))
+        severity = "warning"
+        actions.append(reason)
+
+    def increase_bitrate(percent: float, reason: str) -> None:
+        nonlocal video_bitrate
+        video_bitrate = min(20000, int(video_bitrate * (1.0 + percent)))
+        actions.append(reason)
+
+    if stream_status and stream_status not in {"active", "ready"}:
+        severity = "warning"
+        warnings.append(f"YouTube stream status is {stream_status}; YouTube may not be receiving the stream yet.")
+    if status in {"bad", "no_data"}:
+        severity = "critical" if status == "bad" else "warning"
+    elif status in {"ok", "good"}:
+        severity = "ok"
+    elif status:
+        severity = "warning"
+
+    high_tokens = ("bitrateishigh", "bitrate is high", "high bitrate", "too high")
+    low_tokens = ("bitrateislow", "bitrate is low", "low bitrate", "too low")
+    frame_tokens = ("framerate", "frame rate", "fps")
+    keyframe_tokens = ("keyframe", "key frame", "gop")
+    resolution_tokens = ("resolution",)
+
+    if any(token in issue_text for token in high_tokens):
+        reduce_bitrate(0.20, "YouTube reports bitrate is too high; reduce video bitrate by about 20%.")
+    if any(token in issue_text for token in low_tokens):
+        increase_bitrate(0.15, "YouTube reports bitrate is too low; increase video bitrate by about 15% if the Agent is stable.")
+    if any(token in issue_text for token in frame_tokens):
+        fps = 30 if fps > 30 else fps
+        actions.append("YouTube reports frame-rate mismatch; keep FPS at 30 unless the stream was created for 60fps.")
+    if any(token in issue_text for token in keyframe_tokens):
+        keyframe_seconds = 2
+        actions.append("YouTube reports keyframe/GOP issue; use 2 second keyframes.")
+    if any(token in issue_text for token in resolution_tokens):
+        if resolution in {"1920x1080", "2560x1440", "3840x2160"}:
+            resolution = "1280x720"
+            fps = min(fps, 30)
+            reduce_bitrate(0.10, "YouTube reports resolution mismatch; fall back to 720p/30fps.")
+        else:
+            actions.append("YouTube reports resolution mismatch; match the YouTube stream resolution and the encoder output.")
+    if not actions and not warnings:
+        actions.append("YouTube health is acceptable; keep the current encoder settings.")
+
+    return {
+        "ok": True,
+        "severity": severity,
+        "recommendation": {
+            "copy_mode": False,
+            "preset": preset,
+            "video_bitrate": video_bitrate,
+            "audio_bitrate": audio_bitrate,
+            "fps": fps,
+            "resolution": resolution,
+            "keyframe_seconds": keyframe_seconds,
+            "strategy": "youtube_health",
+        },
+        "analysis": {
+            "youtube_health_status": status,
+            "youtube_stream_status": stream_status,
+            "configuration_issues": issues,
+            "reasons": actions,
+            "warnings": warnings,
+        },
+    }
+
+
 class YouTubeAPIError(RuntimeError):
     def __init__(self, message: str, *, status_code: int = 502, reason: str = "") -> None:
         super().__init__(message)
@@ -391,6 +486,38 @@ class YouTubeAPIClient:
         if not address or not stream_name:
             raise YouTubeAPIError("YouTube stream has no RTMP ingestion target", status_code=409)
         return f"{address}/{stream_name}"
+
+    def stream_health(self, stream_id: str, current: dict[str, Any] | None = None) -> dict[str, Any]:
+        stream_id = stream_id.strip()
+        if not stream_id:
+            raise YouTubeAPIError("missing YouTube stream ID", status_code=400)
+        payload = self._request(
+            "GET",
+            "liveStreams",
+            params={"part": "id,snippet,cdn,contentDetails,status", "id": stream_id},
+        )
+        items = payload.get("items") or []
+        if not items:
+            raise YouTubeAPIError("YouTube stream was not found", status_code=404)
+        item = items[0]
+        snippet = item.get("snippet") or {}
+        cdn = item.get("cdn") or {}
+        status = item.get("status") or {}
+        health_status = status.get("healthStatus") or {}
+        health = {
+            "id": str(item.get("id") or ""),
+            "title": str(snippet.get("title") or ""),
+            "stream_status": str(status.get("streamStatus") or ""),
+            "health_status": str(health_status.get("status") or ""),
+            "configuration_issues": health_status.get("configurationIssues") or [],
+            "resolution": str(cdn.get("resolution") or ""),
+            "frame_rate": str(cdn.get("frameRate") or ""),
+        }
+        return {
+            "ok": True,
+            "health": health,
+            **youtube_health_recommendation(health, current),
+        }
 
     def revoke(self) -> None:
         credentials = self._load_credentials()
