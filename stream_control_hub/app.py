@@ -615,9 +615,9 @@ HTML = r"""
     }
     .monitor-panel h4 { margin: 0 0 5px; font-size: 13px; color: #d6fff0; }
     .node-table-card { min-height: 0; }
-    .node-role-split { display: grid; grid-template-rows: minmax(110px, 1fr) 12px var(--hub-panel-height, 150px); min-height: 330px; max-height: 650px; }
+    .node-role-split { display: grid; grid-template-rows: minmax(110px, 1fr) 12px var(--hub-panel-height, 150px); min-height: 330px; max-height: 650px; font-size: 14px; }
     .node-role-pane { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
-    .node-role-pane .node-table { max-height: none; min-height: 0; }
+    .node-role-pane .node-table { max-height: none; min-height: 0; overflow: auto; }
     .node-role-splitter { position: relative; cursor: ns-resize; touch-action: none; user-select: none; }
     .node-role-splitter::before { content: ""; position: absolute; left: 0; right: 0; top: 5px; height: 2px; border-radius: 2px; background: var(--line); }
     .node-role-splitter:hover::before, .node-role-splitter.dragging::before { height: 4px; top: 4px; background: var(--accent); box-shadow: 0 0 8px rgba(54,211,153,.45); }
@@ -635,13 +635,15 @@ HTML = r"""
       max-height: 320px;
       overflow: auto;
       padding-right: 3px;
+      align-content: start;
     }
     .node-table-head,
     .node-row {
       display: grid;
-      grid-template-columns: 22px minmax(130px, 1fr) 70px 76px minmax(250px, 1.15fr);
+      grid-template-columns: 22px minmax(150px, 1fr) 76px 82px minmax(260px, 1.05fr);
       gap: 6px;
       align-items: center;
+      min-width: 620px;
     }
     .node-table-head {
       position: sticky;
@@ -661,6 +663,7 @@ HTML = r"""
       background: rgba(25, 43, 37, 0.72);
       cursor: pointer;
       transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease;
+      font-size: 14px;
     }
     .node-row:hover {
       border-color: rgba(54, 211, 153, 0.85);
@@ -689,15 +692,15 @@ HTML = r"""
     .dot.off { background: #52615c; border-color: rgba(255,255,255,0.1); box-shadow: inset 0 0 3px rgba(0,0,0,0.55); }
     .dot.stream-live { background: #ff334f; box-shadow: inset 0 0 3px rgba(255,255,255,0.7), 0 0 13px rgba(255, 51, 79, 0.95); }
     .dot.stream-idle { background: #4a5551; border-color: rgba(255,255,255,0.08); box-shadow: inset 0 0 3px rgba(0,0,0,0.6); }
-    .row-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; align-items: center; }
-    .role-row .row-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .row-actions { display: grid; grid-template-columns: repeat(4, minmax(54px, 1fr)); gap: 4px; align-items: center; }
+    .role-row .row-actions { grid-template-columns: repeat(2, minmax(72px, 1fr)); }
     .role-group + .role-group { margin-top: 12px; }
     .role-group-title { display: flex; justify-content: space-between; align-items: center; margin: 0 0 6px; color: #d6fff0; }
     .role-group-title .role-count { margin-left: 5px; color: var(--accent); font-size: 13px; }
     .role-row.disabled-role { opacity: 0.58; border-style: dashed; }
     .role-row.disabled-role:hover { opacity: 0.82; }
-    .row-actions button.tiny { min-width: 0; padding: 6px 4px; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
-    .settings-button { min-width: 28px !important; font-size: 14px !important; line-height: 1; }
+    .row-actions button.tiny { min-width: 54px; padding: 6px 7px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+    .settings-button { min-width: 34px !important; font-size: 14px !important; line-height: 1; }
     .role-settings-modal { width: min(520px, 100%); }
     .role-settings-status { display: grid; gap: 8px; }
     .role-settings-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.58); }
