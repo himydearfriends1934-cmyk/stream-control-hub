@@ -197,7 +197,7 @@ class YouTubeAPIClient:
 
     def start_device_authorization(self) -> dict[str, Any]:
         if not self.configured:
-            raise YouTubeAPIError("YOUTUBE_CLIENT_ID is not configured on this Agent", status_code=409)
+            raise YouTubeAPIError("YOUTUBE_CLIENT_ID is not configured", status_code=409)
         response = requests.post(
             GOOGLE_DEVICE_CODE_URL,
             data={"client_id": self.client_id, "scope": YOUTUBE_SCOPE},

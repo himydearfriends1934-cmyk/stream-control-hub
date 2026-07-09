@@ -2425,6 +2425,10 @@ HTML = r"""
       }
       refs.youtubeAuthorizeBtn.disabled = true;
       try {
+        if (refs.youtubeClientIdInput.value.trim() || refs.youtubeJsonInput.value.trim()) {
+          const saved = await saveYouTubeConfig({ refreshAfter: false, keepSecret: true, quiet: true });
+          if (!saved?.ok) return;
+        }
         const data = await postNodeAction("/api/nodes/youtube/oauth/start", { node_id: selectedNodeId });
         if (!data.ok) {
           refs.youtubeWizardLog.textContent = data.message || "无法启动 YouTube 授权";
@@ -2499,10 +2503,10 @@ HTML = r"""
       }
     }
 
-    async function saveYouTubeConfig() {
+    async function saveYouTubeConfig(options = {}) {
       if (!selectedNodeId) {
         refs.youtubeWizardLog.textContent = "请先选择一个 Agent。";
-        return;
+        return { ok: false };
       }
       if (!refs.youtubeClientIdInput.value.trim() && refs.youtubeJsonInput.value.trim()) {
         applyYouTubeOAuthJsonText(refs.youtubeJsonInput.value, "粘贴的 JSON");
@@ -2511,10 +2515,10 @@ HTML = r"""
       const clientSecret = refs.youtubeClientSecretInput.value.trim();
       if (!clientId) {
         refs.youtubeWizardLog.textContent = "请先填写 Google OAuth Client ID。";
-        return;
+        return { ok: false };
       }
       refs.youtubeSaveConfigBtn.disabled = true;
-      refs.youtubeWizardLog.textContent = "正在把 YouTube API 配置保存到当前 Hub...";
+      if (!options.quiet) refs.youtubeWizardLog.textContent = "正在把 YouTube API 配置保存到当前 Hub...";
       try {
         const data = await postNodeAction("/api/nodes/youtube/config", {
           node_id: selectedNodeId,
@@ -2523,13 +2527,15 @@ HTML = r"""
         });
         if (!data.ok) {
           refs.youtubeWizardLog.textContent = data.message || "YouTube API 配置保存失败";
-          return;
+          return data;
         }
-        refs.youtubeClientSecretInput.value = "";
-        refs.youtubeWizardLog.textContent = "配置已保存。下一步点击“连接 YouTube”完成频道授权。";
-        await refreshYouTubeResources();
+        if (!options.keepSecret) refs.youtubeClientSecretInput.value = "";
+        if (!options.quiet) refs.youtubeWizardLog.textContent = "配置已保存。下一步点击“连接 YouTube”完成频道授权。";
+        if (options.refreshAfter !== false) await refreshYouTubeResources();
+        return data;
       } catch (error) {
         refs.youtubeWizardLog.textContent = friendlyError(error, "YouTube API 配置保存失败");
+        return { ok: false, message: String(error?.message || error || "") };
       } finally {
         refs.youtubeSaveConfigBtn.disabled = false;
       }
