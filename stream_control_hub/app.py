@@ -1246,6 +1246,7 @@ HTML = r"""
             <small>上传下载的 client_secret_*.json，或把 JSON 粘贴到下面；Hub 会自动填入 Client ID / Secret。</small>
           </div>
           <label class="youtube-json-upload-label" for="youtubeJsonFileInput">上传 JSON 文件</label>
+          <button id="youtubeJsonPickBtn" type="button">选择 JSON</button>
           <input class="youtube-json-file-hidden" id="youtubeJsonFileInput" type="file" accept=".json,application/json">
         </div>
         <textarea id="youtubeJsonInput" spellcheck="false" placeholder="也可以把 Google OAuth client JSON 直接粘贴到这里。"></textarea>
@@ -1420,6 +1421,7 @@ HTML = r"""
       youtubeTitleInput: document.getElementById("youtubeTitleInput"),
       youtubeClientIdInput: document.getElementById("youtubeClientIdInput"),
       youtubeClientSecretInput: document.getElementById("youtubeClientSecretInput"),
+      youtubeJsonPickBtn: document.getElementById("youtubeJsonPickBtn"),
       youtubeJsonFileInput: document.getElementById("youtubeJsonFileInput"),
       youtubeJsonInput: document.getElementById("youtubeJsonInput"),
       youtubePrivacyInput: document.getElementById("youtubePrivacyInput"),
@@ -2316,7 +2318,7 @@ HTML = r"""
     function openYouTubeJsonImport() {
       setYouTubeModalOpen(true);
       refs.youtubeWizardLog.textContent = "请选择 Google 下载的 client_secret_*.json，系统会自动读取 Client ID / Secret。";
-      window.setTimeout(() => refs.youtubeJsonFileInput.click(), 120);
+      refs.youtubeJsonFileInput.click();
     }
 
     function renderYouTubeStreams(streams = [], selectedStreamId = "") {
@@ -4405,6 +4407,7 @@ HTML = r"""
     refs.youtubeWizardModal.addEventListener("click", (event) => {
       if (event.target === refs.youtubeWizardModal) setYouTubeModalOpen(false);
     });
+    refs.youtubeJsonPickBtn.addEventListener("click", () => refs.youtubeJsonFileInput.click());
     refs.youtubeJsonFileInput.addEventListener("change", loadYouTubeOAuthJsonFile);
     refs.youtubeJsonInput.addEventListener("paste", () => {
       window.setTimeout(() => applyYouTubeOAuthJsonText(refs.youtubeJsonInput.value, "粘贴的 JSON"), 0);
