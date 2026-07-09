@@ -103,6 +103,22 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(streams[0]["id"], "stream-1")
         self.assertNotIn("private-stream-name", json.dumps(streams))
 
+    def test_client_records_youtube_api_quota_units(self):
+        recorded = []
+        with tempfile.TemporaryDirectory() as tmp:
+            client = YouTubeAPIClient(
+                client_id="client-id",
+                credential_path=Path(tmp) / "credentials.json",
+                quota_recorder=lambda method, resource, units: recorded.append((method, resource, units)),
+            )
+            response = FakeResponse({"items": []})
+            with patch.object(client, "_access_token_value", return_value="access-token"), patch(
+                "stream_control_hub.youtube_api.requests.request", return_value=response
+            ):
+                client.list_streams()
+
+        self.assertEqual(recorded, [("GET", "liveStreams", 1)])
+
     def test_prepare_creates_stream_broadcast_and_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = YouTubeAPIClient(client_id="client-id", credential_path=Path(tmp) / "credentials.json")
@@ -300,6 +316,40 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(response.get_json()["mode"], "hub")
         self.assertEqual(configured_client_id, "client-id")
         self.assertIn("YOUTUBE_CLIENT_ID=client-id", env_text)
+
+    def test_hub_manages_youtube_profiles(self):
+        from stream_control_hub import app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with patch.object(app, "YOUTUBE_PROFILES_FILE", tmp_path / "youtube_profiles.json"), patch.object(
+                app, "YOUTUBE_USAGE_FILE", tmp_path / "youtube_usage.json"
+            ), patch.object(app, "YOUTUBE_PROFILE_CREDENTIALS_DIR", tmp_path / "profile_credentials"):
+                client = app.APP.test_client()
+                created = client.post(
+                    "/api/youtube/profiles",
+                    json={
+                        "profile_id": "account-a",
+                        "name": "Account A",
+                        "client_id": "client-a.apps.googleusercontent.com",
+                        "auto_tune_enabled": True,
+                        "auto_tune_interval_seconds": 600,
+                        "auto_tune_cooldown_seconds": 1200,
+                        "auto_tune_max_bitrate": 5500,
+                    },
+                )
+                listed = client.get("/api/youtube/profiles")
+                deleted = client.post("/api/youtube/profiles/delete", json={"profile_id": "account-a"})
+
+        self.assertEqual(created.status_code, 200)
+        profile = created.get_json()["profile"]
+        self.assertEqual(profile["id"], "account-a")
+        self.assertTrue(profile["auto_tune_enabled"])
+        self.assertEqual(profile["auto_tune_interval_seconds"], 600)
+        self.assertEqual(profile["auto_tune_cooldown_seconds"], 1200)
+        self.assertEqual(profile["auto_tune_max_bitrate"], 5500)
+        self.assertIn("account-a", [item["id"] for item in listed.get_json()["profiles"]])
+        self.assertEqual(deleted.status_code, 200)
 
     def test_youtube_health_recommendation_reduces_high_bitrate(self):
         result = youtube_health_recommendation(

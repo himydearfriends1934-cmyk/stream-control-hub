@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -155,15 +155,34 @@ class YouTubeAPIClient:
         client_secret: str = "",
         credential_path: Path,
         timeout: int = 20,
+        quota_recorder: Callable[[str, str, int], None] | None = None,
     ) -> None:
         self.client_id = client_id.strip()
         self.client_secret = client_secret.strip()
         self.credential_path = credential_path
         self.timeout = timeout
+        self.quota_recorder = quota_recorder
         self._lock = threading.RLock()
         self._device_sessions: dict[str, dict[str, Any]] = {}
         self._access_token = ""
         self._access_token_expires_at = 0.0
+
+    def _quota_cost(self, method: str, resource: str) -> int:
+        method = method.upper()
+        resource = resource.lstrip("/")
+        if method == "GET":
+            return 1
+        if resource in {"liveStreams", "liveBroadcasts", "liveBroadcasts/bind"}:
+            return 50
+        return 1
+
+    def _record_quota(self, method: str, resource: str) -> None:
+        if not self.quota_recorder:
+            return
+        try:
+            self.quota_recorder(method.upper(), resource.lstrip("/"), self._quota_cost(method, resource))
+        except Exception:
+            pass
 
     @property
     def configured(self) -> bool:
@@ -331,6 +350,7 @@ class YouTubeAPIClient:
             headers={"Authorization": f"Bearer {token}"},
             timeout=self.timeout,
         )
+        self._record_quota(method, resource)
         if response.status_code == 401 and retry_auth:
             with self._lock:
                 self._access_token = ""

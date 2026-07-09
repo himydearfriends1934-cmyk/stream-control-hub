@@ -13,9 +13,15 @@ import ipaddress
 import threading
 import unicodedata
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - Python always has zoneinfo in supported runtimes.
+    ZoneInfo = None
 
 import requests
 from flask import Flask, jsonify, make_response, request
@@ -75,10 +81,325 @@ HUB_ENV_FILE = ROOT / ".env"
 YOUTUBE_CREDENTIAL_FILE = Path(
     os.environ.get("YOUTUBE_CREDENTIAL_FILE", str(DATA_DIR / "youtube_credentials.json"))
 )
+YOUTUBE_PROFILES_FILE = DATA_DIR / "youtube_profiles.json"
+YOUTUBE_USAGE_FILE = DATA_DIR / "youtube_api_usage.json"
+YOUTUBE_AUTOTUNE_STATE_FILE = DATA_DIR / "youtube_autotune_state.json"
+YOUTUBE_PROFILE_CREDENTIALS_DIR = DATA_DIR / "youtube_profile_credentials"
+YOUTUBE_DEFAULT_PROFILE_ID = "default"
+YOUTUBE_PROFILE_LOCK = threading.RLock()
+YOUTUBE_AUTOTUNE_STOP = threading.Event()
+YOUTUBE_AUTOTUNE_LOCK = threading.Lock()
+YOUTUBE_CLIENT_CACHE: dict[str, YouTubeAPIClient] = {}
+
+
+def youtube_quota_day() -> str:
+    if ZoneInfo is not None:
+        with suppress(Exception):
+            return datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def load_youtube_usage() -> dict[str, Any]:
+    try:
+        payload = json.loads(YOUTUBE_USAGE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_youtube_usage(payload: dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    YOUTUBE_USAGE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with suppress(OSError):
+        YOUTUBE_USAGE_FILE.chmod(0o600)
+
+
+def record_youtube_api_usage(profile_id: str, method: str, resource: str, units: int) -> None:
+    profile_id = safe_youtube_profile_id(profile_id or YOUTUBE_DEFAULT_PROFILE_ID)
+    day = youtube_quota_day()
+    with YOUTUBE_PROFILE_LOCK:
+        usage = load_youtube_usage()
+        profiles = usage.setdefault("profiles", {})
+        profile_usage = profiles.setdefault(profile_id, {})
+        day_usage = profile_usage.setdefault(day, {
+            "date": day,
+            "calls": 0,
+            "estimated_units": 0,
+            "by_resource": {},
+            "updated_at": "",
+        })
+        day_usage["calls"] = int(day_usage.get("calls") or 0) + 1
+        day_usage["estimated_units"] = int(day_usage.get("estimated_units") or 0) + max(1, int(units or 1))
+        key = f"{method.upper()} {resource.lstrip('/')}"
+        resource_usage = day_usage.setdefault("by_resource", {}).setdefault(key, {"calls": 0, "estimated_units": 0})
+        resource_usage["calls"] = int(resource_usage.get("calls") or 0) + 1
+        resource_usage["estimated_units"] = int(resource_usage.get("estimated_units") or 0) + max(1, int(units or 1))
+        day_usage["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        save_youtube_usage(usage)
+
+
+def youtube_usage_for_profile(profile_id: str) -> dict[str, Any]:
+    usage = load_youtube_usage()
+    day = youtube_quota_day()
+    day_usage = ((usage.get("profiles") or {}).get(profile_id) or {}).get(day) or {}
+    return {
+        "date": day,
+        "calls": int(day_usage.get("calls") or 0),
+        "estimated_units": int(day_usage.get("estimated_units") or 0),
+        "daily_limit_units": 10000,
+        "by_resource": day_usage.get("by_resource") or {},
+        "updated_at": str(day_usage.get("updated_at") or ""),
+    }
+
+
+def safe_youtube_profile_id(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(value or "").strip().lower())
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    return cleaned[:64] or YOUTUBE_DEFAULT_PROFILE_ID
+
+
+def default_youtube_profile() -> dict[str, Any]:
+    return {
+        "id": YOUTUBE_DEFAULT_PROFILE_ID,
+        "name": "Default YouTube Profile",
+        "client_id": os.environ.get("YOUTUBE_CLIENT_ID", ""),
+        "client_secret": os.environ.get("YOUTUBE_CLIENT_SECRET", ""),
+        "credential_file": str(YOUTUBE_CREDENTIAL_FILE),
+        "auto_tune_enabled": False,
+        "auto_tune_interval_seconds": 300,
+        "auto_tune_cooldown_seconds": 900,
+        "auto_tune_min_bitrate": 800,
+        "auto_tune_max_bitrate": 6000,
+        "created_at": "",
+        "updated_at": "",
+    }
+
+
+def load_youtube_profiles_config() -> dict[str, Any]:
+    with YOUTUBE_PROFILE_LOCK:
+        try:
+            payload = json.loads(YOUTUBE_PROFILES_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        profiles = payload.get("profiles")
+        if not isinstance(profiles, list) or not profiles:
+            profiles = [default_youtube_profile()]
+        normalized = []
+        seen: set[str] = set()
+        for raw in profiles:
+            if not isinstance(raw, dict):
+                continue
+            item = {**default_youtube_profile(), **raw}
+            item["id"] = safe_youtube_profile_id(str(item.get("id") or item.get("name") or YOUTUBE_DEFAULT_PROFILE_ID))
+            if item["id"] in seen:
+                continue
+            seen.add(item["id"])
+            if not item.get("credential_file"):
+                item["credential_file"] = str(YOUTUBE_PROFILE_CREDENTIALS_DIR / f"{item['id']}.json")
+            normalized.append(item)
+        if not normalized:
+            normalized = [default_youtube_profile()]
+        active_id = safe_youtube_profile_id(str(payload.get("active_profile_id") or normalized[0]["id"]))
+        if active_id not in {item["id"] for item in normalized}:
+            active_id = normalized[0]["id"]
+        return {"version": 1, "active_profile_id": active_id, "profiles": normalized}
+
+
+def save_youtube_profiles_config(payload: dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    YOUTUBE_PROFILE_CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
+    YOUTUBE_PROFILES_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with suppress(OSError):
+        YOUTUBE_PROFILES_FILE.chmod(0o600)
+
+
+def make_youtube_client(profile: dict[str, Any]) -> YouTubeAPIClient:
+    profile_id = safe_youtube_profile_id(str(profile.get("id") or YOUTUBE_DEFAULT_PROFILE_ID))
+    return YouTubeAPIClient(
+        client_id=str(profile.get("client_id") or ""),
+        client_secret=str(profile.get("client_secret") or ""),
+        credential_path=Path(str(profile.get("credential_file") or YOUTUBE_CREDENTIAL_FILE)),
+        quota_recorder=lambda method, resource, units, pid=profile_id: record_youtube_api_usage(pid, method, resource, units),
+    )
+
+
+def public_youtube_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    profile_id = safe_youtube_profile_id(str(profile.get("id") or YOUTUBE_DEFAULT_PROFILE_ID))
+    client = make_youtube_client(profile)
+    status = client.local_status()
+    return {
+        "id": profile_id,
+        "name": str(profile.get("name") or profile_id),
+        "client_id": str(profile.get("client_id") or ""),
+        "has_client_secret": bool(str(profile.get("client_secret") or "")),
+        "configured": bool(status.get("configured")),
+        "authorized": bool(status.get("authorized")),
+        "authorized_at": str(status.get("authorized_at") or ""),
+        "scope": str(status.get("scope") or ""),
+        "auto_tune_enabled": bool(profile.get("auto_tune_enabled")),
+        "auto_tune_interval_seconds": int(profile.get("auto_tune_interval_seconds") or 300),
+        "auto_tune_cooldown_seconds": int(profile.get("auto_tune_cooldown_seconds") or 900),
+        "auto_tune_min_bitrate": int(profile.get("auto_tune_min_bitrate") or 800),
+        "auto_tune_max_bitrate": int(profile.get("auto_tune_max_bitrate") or 6000),
+        "usage": youtube_usage_for_profile(profile_id),
+    }
+
+
+def youtube_profile_by_id(profile_id: str) -> dict[str, Any]:
+    config = load_youtube_profiles_config()
+    target = safe_youtube_profile_id(profile_id or str(config.get("active_profile_id") or YOUTUBE_DEFAULT_PROFILE_ID))
+    for profile in config["profiles"]:
+        if profile["id"] == target:
+            return profile
+    raise YouTubeAPIError("YouTube profile was not found", status_code=404, reason="profile_not_found")
+
+
+def active_youtube_profile_id() -> str:
+    return str(load_youtube_profiles_config().get("active_profile_id") or YOUTUBE_DEFAULT_PROFILE_ID)
+
+
+def youtube_client_for_id(profile_id: str) -> YouTubeAPIClient:
+    target = safe_youtube_profile_id(profile_id or active_youtube_profile_id())
+    if target == YOUTUBE_DEFAULT_PROFILE_ID:
+        return YOUTUBE_CLIENT
+    profile = youtube_profile_by_id(target)
+    signature = (
+        str(profile.get("client_id") or ""),
+        str(profile.get("client_secret") or ""),
+        str(profile.get("credential_file") or ""),
+    )
+    with YOUTUBE_PROFILE_LOCK:
+        cached = YOUTUBE_CLIENT_CACHE.get(target)
+        if cached is not None and getattr(cached, "_profile_signature", None) == signature:
+            return cached
+        client = make_youtube_client(profile)
+        setattr(client, "_profile_signature", signature)
+        YOUTUBE_CLIENT_CACHE[target] = client
+        return client
+
+
+def youtube_client_from_payload(payload: dict[str, Any]) -> tuple[str, YouTubeAPIClient]:
+    profile_id = safe_youtube_profile_id(str(payload.get("profile_id") or payload.get("youtube_profile_id") or active_youtube_profile_id()))
+    return profile_id, youtube_client_for_id(profile_id)
+
+
+def load_youtube_autotune_state() -> dict[str, Any]:
+    try:
+        payload = json.loads(YOUTUBE_AUTOTUNE_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_youtube_autotune_state(payload: dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    YOUTUBE_AUTOTUNE_STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with suppress(OSError):
+        YOUTUBE_AUTOTUNE_STATE_FILE.chmod(0o600)
+
+
+def youtube_autotune_payload_diff(current: dict[str, Any], recommendation: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key in ("copy_mode", "preset", "audio_bitrate", "fps", "resolution", "keyframe_seconds"):
+        if key in recommendation and recommendation.get(key) != current.get(key):
+            result[key] = recommendation.get(key)
+    if "video_bitrate" in recommendation:
+        minimum = max(300, int(profile.get("auto_tune_min_bitrate") or 800))
+        maximum = max(minimum, int(profile.get("auto_tune_max_bitrate") or 6000))
+        next_bitrate = max(minimum, min(maximum, int(recommendation.get("video_bitrate") or 0)))
+        if next_bitrate and next_bitrate != int(current.get("video_bitrate") or 0):
+            result["video_bitrate"] = next_bitrate
+    return result
+
+
+def youtube_autotune_tick() -> dict[str, Any]:
+    with YOUTUBE_AUTOTUNE_LOCK:
+        now = time.time()
+        config = load_youtube_profiles_config()
+        profiles = {profile["id"]: profile for profile in config["profiles"] if profile.get("auto_tune_enabled")}
+        if not profiles:
+            return {"ok": True, "skipped": True, "reason": "no enabled profiles"}
+        state = load_youtube_autotune_state()
+        entries = state.setdefault("entries", {})
+        checked = 0
+        adjusted = 0
+        for node in load_nodes():
+            if not node.get("enabled", True):
+                continue
+            status = request_node_json(node, "/api/status", timeout=8)
+            stream = status.get("stream") or {}
+            stream_config = status.get("stream_config") or {}
+            if not status.get("ok") or not stream.get("running"):
+                continue
+            if stream_config.get("stream_output_mode") != "youtube_api" or not stream_config.get("youtube_stream_id"):
+                continue
+            profile_id = safe_youtube_profile_id(str(stream_config.get("youtube_profile_id") or config.get("active_profile_id") or YOUTUBE_DEFAULT_PROFILE_ID))
+            profile = profiles.get(profile_id)
+            if not profile:
+                continue
+            interval = max(60, int(profile.get("auto_tune_interval_seconds") or 300))
+            cooldown = max(60, int(profile.get("auto_tune_cooldown_seconds") or 900))
+            key = f"{node.get('id')}:{profile_id}:{stream_config.get('youtube_stream_id')}"
+            entry = entries.setdefault(key, {"consecutive_issues": 0, "last_check": 0, "last_adjusted": 0})
+            if now - float(entry.get("last_check") or 0) < interval:
+                continue
+            entry["last_check"] = now
+            checked += 1
+            try:
+                client = youtube_client_for_id(profile_id)
+                if not client.local_status().get("authorized"):
+                    entry["last_error"] = "profile is not authorized"
+                    continue
+                health = client.stream_health(str(stream_config.get("youtube_stream_id") or ""), stream_config)
+                recommendation = health.get("recommendation") or {}
+                diff = youtube_autotune_payload_diff(stream_config, recommendation, profile)
+                severity = str(health.get("severity") or "").lower()
+                entry["last_health"] = health.get("health") or {}
+                entry["last_analysis"] = health.get("analysis") or {}
+                if not diff or severity not in {"warning", "critical"}:
+                    entry["consecutive_issues"] = 0
+                    entry["last_error"] = ""
+                    continue
+                entry["consecutive_issues"] = int(entry.get("consecutive_issues") or 0) + 1
+                entry["pending_diff"] = diff
+                if entry["consecutive_issues"] < 2:
+                    continue
+                if now - float(entry.get("last_adjusted") or 0) < cooldown:
+                    continue
+                payload = dict(stream_config)
+                payload.update(diff)
+                payload["stream_key"] = ""
+                payload["youtube_profile_id"] = profile_id
+                if not payload.get("youtube_ingestion_url"):
+                    payload["youtube_ingestion_url"] = client.ingestion_target(str(payload.get("youtube_stream_id") or ""))
+                result = post_node_json(node, "/api/start-stream", payload, timeout=60)
+                entry["last_adjusted"] = now
+                entry["last_result"] = redacted_stream_result(result)
+                if result.get("ok"):
+                    adjusted += 1
+                    entry["consecutive_issues"] = 0
+                    entry["last_error"] = ""
+                else:
+                    entry["last_error"] = result.get("message") or "auto tune restart failed"
+            except Exception as exc:
+                entry["last_error"] = str(exc)
+        save_youtube_autotune_state(state)
+        return {"ok": True, "checked": checked, "adjusted": adjusted}
+
+
+def youtube_autotune_loop() -> None:
+    while not YOUTUBE_AUTOTUNE_STOP.wait(30):
+        with suppress(Exception):
+            youtube_autotune_tick()
+
+
 YOUTUBE_CLIENT = YouTubeAPIClient(
     client_id=os.environ.get("YOUTUBE_CLIENT_ID", ""),
     client_secret=os.environ.get("YOUTUBE_CLIENT_SECRET", ""),
     credential_path=YOUTUBE_CREDENTIAL_FILE,
+    quota_recorder=lambda method, resource, units: record_youtube_api_usage(YOUTUBE_DEFAULT_PROFILE_ID, method, resource, units),
 )
 TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 TAILSCALE_HELPER = ROOT / "scripts" / "tailscale-install.sh"
@@ -1296,6 +1617,42 @@ HTML = r"""
       </div>
       <div class="wizard-grid">
         <div class="wizard-field">
+          <label>YouTube Profile</label>
+          <select id="youtubeProfileSelect"></select>
+        </div>
+        <div class="wizard-field">
+          <label>Profile Name</label>
+          <input id="youtubeProfileNameInput" type="text" maxlength="80" placeholder="Account A / Channel group">
+        </div>
+        <div class="wizard-field">
+          <label>API Usage Today</label>
+          <input id="youtubeUsageInput" type="text" readonly value="0 calls / 0 units">
+        </div>
+        <div class="wizard-field">
+          <label>Profile Actions</label>
+          <div class="command-pair">
+            <button id="youtubeProfileAddBtn" type="button">Add</button>
+            <button id="youtubeProfileDeleteBtn" type="button">Delete</button>
+          </div>
+        </div>
+        <div class="wizard-field">
+          <label>Auto Tune</label>
+          <div class="command-pair">
+            <select id="youtubeAutoTuneEnabledInput">
+              <option value="0">Off</option>
+              <option value="1">On</option>
+            </select>
+            <input id="youtubeAutoTuneIntervalInput" type="number" min="60" max="3600" step="60" value="300" title="Check interval seconds">
+          </div>
+        </div>
+        <div class="wizard-field">
+          <label>Cooldown / Max Kbps</label>
+          <div class="command-pair">
+            <input id="youtubeAutoTuneCooldownInput" type="number" min="60" max="7200" step="60" value="900" title="Cooldown seconds">
+            <input id="youtubeAutoTuneMaxBitrateInput" type="number" min="800" max="30000" step="100" value="6000" title="Max video bitrate Kbps">
+          </div>
+        </div>
+        <div class="wizard-field">
           <label>当前 Agent</label>
           <input id="youtubeNodeInput" type="text" readonly value="先选择 Agent">
         </div>
@@ -1467,6 +1824,15 @@ HTML = r"""
       youtubeWizardClose: document.getElementById("youtubeWizardClose"),
       youtubeWizardLog: document.getElementById("youtubeWizardLog"),
       youtubeResourceDetails: document.getElementById("youtubeResourceDetails"),
+      youtubeProfileSelect: document.getElementById("youtubeProfileSelect"),
+      youtubeProfileNameInput: document.getElementById("youtubeProfileNameInput"),
+      youtubeUsageInput: document.getElementById("youtubeUsageInput"),
+      youtubeProfileAddBtn: document.getElementById("youtubeProfileAddBtn"),
+      youtubeProfileDeleteBtn: document.getElementById("youtubeProfileDeleteBtn"),
+      youtubeAutoTuneEnabledInput: document.getElementById("youtubeAutoTuneEnabledInput"),
+      youtubeAutoTuneIntervalInput: document.getElementById("youtubeAutoTuneIntervalInput"),
+      youtubeAutoTuneCooldownInput: document.getElementById("youtubeAutoTuneCooldownInput"),
+      youtubeAutoTuneMaxBitrateInput: document.getElementById("youtubeAutoTuneMaxBitrateInput"),
       youtubeNodeInput: document.getElementById("youtubeNodeInput"),
       youtubePrepareStreamSelect: document.getElementById("youtubePrepareStreamSelect"),
       youtubeTitleInput: document.getElementById("youtubeTitleInput"),
@@ -1506,6 +1872,8 @@ HTML = r"""
     let contextMediaRow = null;
     let youtubeOauthSession = "";
     let youtubeOauthPollTimer = null;
+    let youtubeProfiles = [];
+    let activeYouTubeProfileId = "default";
 
     const HUB_HEIGHT_STORAGE_KEY = "streamHubHubPanelHeight";
     function setHubPanelHeight(height) {
@@ -2362,7 +2730,7 @@ HTML = r"""
           const local = new Date(planned.getTime() - planned.getTimezoneOffset() * 60 * 1000);
           refs.youtubeScheduleInput.value = local.toISOString().slice(0, 16);
         }
-        refreshYouTubeResources();
+        loadYouTubeProfiles().then(() => refreshYouTubeResources()).catch(() => refreshYouTubeResources());
       }
     }
 
@@ -2386,6 +2754,108 @@ HTML = r"""
       if (streams.some((item) => item.id === previousMain)) refs.youtubeStreamSelect.value = previousMain;
       if (streams.some((item) => item.id === previousPrepare)) refs.youtubePrepareStreamSelect.value = previousPrepare;
       syncStreamOutputMode();
+    }
+
+    function selectedYouTubeProfileId() {
+      return refs.youtubeProfileSelect?.value || activeYouTubeProfileId || "default";
+    }
+
+    async function youtubeProfileApi(path, payload = null) {
+      const options = payload
+        ? { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(payload) }
+        : { headers: authHeaders() };
+      const response = await fetch(path, options);
+      try {
+        return await response.json();
+      } catch (_) {
+        return { ok: false, message: response.statusText || "YouTube Profile request failed" };
+      }
+    }
+
+    function youtubeProfilePayload() {
+      return {
+        profile_id: selectedYouTubeProfileId(),
+        profile_name: refs.youtubeProfileNameInput?.value?.trim() || selectedYouTubeProfileId(),
+        auto_tune_enabled: refs.youtubeAutoTuneEnabledInput?.value === "1",
+        auto_tune_interval_seconds: Number(refs.youtubeAutoTuneIntervalInput?.value || 300),
+        auto_tune_cooldown_seconds: Number(refs.youtubeAutoTuneCooldownInput?.value || 900),
+        auto_tune_max_bitrate: Number(refs.youtubeAutoTuneMaxBitrateInput?.value || 6000),
+      };
+    }
+
+    function applyYouTubeProfileToForm(profile = {}) {
+      activeYouTubeProfileId = profile.id || activeYouTubeProfileId || "default";
+      if (refs.youtubeProfileNameInput) refs.youtubeProfileNameInput.value = profile.name || activeYouTubeProfileId;
+      if (refs.youtubeClientIdInput) refs.youtubeClientIdInput.value = profile.client_id || "";
+      if (refs.youtubeClientSecretInput) refs.youtubeClientSecretInput.value = "";
+      if (refs.youtubeAutoTuneEnabledInput) refs.youtubeAutoTuneEnabledInput.value = profile.auto_tune_enabled ? "1" : "0";
+      if (refs.youtubeAutoTuneIntervalInput) refs.youtubeAutoTuneIntervalInput.value = profile.auto_tune_interval_seconds || 300;
+      if (refs.youtubeAutoTuneCooldownInput) refs.youtubeAutoTuneCooldownInput.value = profile.auto_tune_cooldown_seconds || 900;
+      if (refs.youtubeAutoTuneMaxBitrateInput) refs.youtubeAutoTuneMaxBitrateInput.value = profile.auto_tune_max_bitrate || 6000;
+      const usage = profile.usage || {};
+      if (refs.youtubeUsageInput) {
+        refs.youtubeUsageInput.value = `${usage.calls || 0} calls / ${usage.estimated_units || 0} units / ${usage.daily_limit_units || 10000}`;
+      }
+    }
+
+    function renderYouTubeProfiles(profiles = [], activeId = "") {
+      youtubeProfiles = profiles;
+      activeYouTubeProfileId = activeId || profiles[0]?.id || "default";
+      if (!refs.youtubeProfileSelect) return;
+      refs.youtubeProfileSelect.innerHTML = profiles.map((profile) => {
+        const label = `${profile.name || profile.id} (${profile.usage?.estimated_units || 0}u)`;
+        return `<option value="${escapeHtml(profile.id)}">${escapeHtml(label)}</option>`;
+      }).join("");
+      if (profiles.some((profile) => profile.id === activeYouTubeProfileId)) {
+        refs.youtubeProfileSelect.value = activeYouTubeProfileId;
+      }
+      applyYouTubeProfileToForm(profiles.find((profile) => profile.id === refs.youtubeProfileSelect.value) || profiles[0] || {});
+    }
+
+    async function loadYouTubeProfiles() {
+      const data = await youtubeProfileApi("/api/youtube/profiles");
+      if (data.ok) renderYouTubeProfiles(data.profiles || [], data.active_profile_id || "");
+      return data;
+    }
+
+    async function createYouTubeProfile() {
+      const base = `youtube-${youtubeProfiles.length + 1}`;
+      const data = await youtubeProfileApi("/api/youtube/profiles", {
+          profile_id: base,
+          name: `YouTube Profile ${youtubeProfiles.length + 1}`,
+          auto_tune_enabled: false,
+          auto_tune_interval_seconds: 300,
+          auto_tune_cooldown_seconds: 900,
+          auto_tune_max_bitrate: 6000,
+      });
+      if (data.ok) {
+        renderYouTubeProfiles(data.profiles || [], data.active_profile_id || data.profile?.id || "");
+        refs.youtubeWizardLog.textContent = "YouTube Profile created. Paste its OAuth JSON or Client ID, then save.";
+      }
+    }
+
+    async function deleteYouTubeProfile() {
+      const profileId = selectedYouTubeProfileId();
+      if (!profileId || youtubeProfiles.length <= 1) {
+        refs.youtubeWizardLog.textContent = "At least one YouTube Profile is required.";
+        return;
+      }
+      const data = await youtubeProfileApi("/api/youtube/profiles/delete", { profile_id: profileId });
+      if (data.ok) {
+        renderYouTubeProfiles(data.profiles || [], data.active_profile_id || "");
+        refs.youtubeWizardLog.textContent = "YouTube Profile deleted.";
+        await refreshYouTubeResources();
+      } else {
+        refs.youtubeWizardLog.textContent = data.message || "Profile delete failed";
+      }
+    }
+
+    async function selectYouTubeProfile() {
+      const profileId = selectedYouTubeProfileId();
+      const profile = youtubeProfiles.find((item) => item.id === profileId) || {};
+      applyYouTubeProfileToForm(profile);
+      await youtubeProfileApi("/api/youtube/profiles/select", { profile_id: profileId });
+      await refreshYouTubeResources();
     }
 
     function compactValue(value) {
@@ -2524,7 +2994,7 @@ HTML = r"""
       refs.youtubeNodeInput.value = `${node.name || node.id} (${node.id})`;
       refs.youtubeWizardLog.textContent = "正在由 Hub 读取 YouTube 授权和直播资源...";
       try {
-        const data = await postNodeAction("/api/nodes/youtube/resources", { node_id: selectedNodeId });
+        const data = await postNodeAction("/api/nodes/youtube/resources", { node_id: selectedNodeId, profile_id: selectedYouTubeProfileId() });
         if (!data.ok && data.configured === undefined) {
           renderYouTubeStreams([]);
           refs.youtubeWizardLog.textContent = data.message || "YouTube API 读取失败";
@@ -2547,6 +3017,10 @@ HTML = r"""
         const selectedId = selectedNode()?.health?.stream_config?.youtube_stream_id || "";
         renderYouTubeStreams(data.streams || [], selectedId);
         renderYouTubeResourceDetails(data);
+        if (data.profile) {
+          youtubeProfiles = youtubeProfiles.map((profile) => profile.id === data.profile.id ? data.profile : profile);
+          applyYouTubeProfileToForm(data.profile);
+        }
         const lines = [
           `频道：${data.channel?.title || "--"}`,
           `直播流：${(data.streams || []).length} 个`,
@@ -2572,6 +3046,7 @@ HTML = r"""
         try {
           const data = await postNodeAction("/api/nodes/youtube/oauth/poll", {
             node_id: selectedNodeId,
+            profile_id: selectedYouTubeProfileId(),
             session_id: youtubeOauthSession,
           });
           if (data.ok && data.authorized) {
@@ -2607,7 +3082,7 @@ HTML = r"""
           const saved = await saveYouTubeConfig({ refreshAfter: false, keepSecret: true, quiet: true });
           if (!saved?.ok) return;
         }
-        const data = await postNodeAction("/api/nodes/youtube/oauth/start", { node_id: selectedNodeId });
+        const data = await postNodeAction("/api/nodes/youtube/oauth/start", { node_id: selectedNodeId, profile_id: selectedYouTubeProfileId() });
         if (!data.ok) {
           refs.youtubeWizardLog.textContent = data.message || "无法启动 YouTube 授权";
           return;
@@ -2700,6 +3175,7 @@ HTML = r"""
       try {
         const data = await postNodeAction("/api/nodes/youtube/config", {
           node_id: selectedNodeId,
+          ...youtubeProfilePayload(),
           client_id: clientId,
           client_secret: clientSecret,
         });
@@ -2708,6 +3184,11 @@ HTML = r"""
           return data;
         }
         if (!options.keepSecret) refs.youtubeClientSecretInput.value = "";
+        if (data.profile) {
+          youtubeProfiles = youtubeProfiles.map((profile) => profile.id === data.profile.id ? data.profile : profile);
+          if (!youtubeProfiles.some((profile) => profile.id === data.profile.id)) youtubeProfiles.push(data.profile);
+          renderYouTubeProfiles(youtubeProfiles, data.profile.id);
+        }
         if (!options.quiet) refs.youtubeWizardLog.textContent = "配置已保存。下一步点击“连接 YouTube”完成频道授权。";
         if (options.refreshAfter !== false) await refreshYouTubeResources();
         return data;
@@ -2733,6 +3214,7 @@ HTML = r"""
           : "";
         const data = await postNodeAction("/api/nodes/youtube/prepare", {
           node_id: selectedNodeId,
+          profile_id: selectedYouTubeProfileId(),
           title,
           privacy_status: refs.youtubePrivacyInput.value,
           scheduled_start_time: scheduled,
@@ -2770,12 +3252,14 @@ HTML = r"""
         const data = await postNodeAction("/api/nodes/youtube/health", {
           ...streamPayload({ includeKey: false }),
           node_id: selectedNodeId,
+          profile_id: selectedYouTubeProfileId(),
           youtube_stream_id: streamId,
         });
         if (!data.ok) {
           refs.youtubeWizardLog.textContent = data.message || "YouTube 健康反馈读取失败";
           return;
         }
+        if (data.profile) applyYouTubeProfileToForm(data.profile);
         applyTuneRecommendation(data);
         lastTuneRecommendation = data;
         const health = data.health || {};
@@ -2800,7 +3284,7 @@ HTML = r"""
     async function revokeYouTubeAuthorization() {
       if (!selectedNodeId || !window.confirm("确认断开当前 Agent 的 YouTube 授权？")) return;
       try {
-        const data = await postNodeAction("/api/nodes/youtube/oauth/revoke", { node_id: selectedNodeId });
+        const data = await postNodeAction("/api/nodes/youtube/oauth/revoke", { node_id: selectedNodeId, profile_id: selectedYouTubeProfileId() });
         refs.youtubeWizardLog.textContent = data.ok ? "YouTube 授权已断开。" : (data.message || "断开授权失败");
         if (data.ok) renderYouTubeStreams([]);
       } catch (error) {
@@ -2848,6 +3332,7 @@ HTML = r"""
       const selectedMediaOption = refs.streamVideoSelect.selectedOptions[0];
       const payload = {
         node_id: selectedNodeId,
+        youtube_profile_id: selectedYouTubeProfileId(),
         stream_url: refs.streamUrlInput.value.trim(),
         stream_key: includeKey ? refs.streamKeyInput.value.trim() : "",
         youtube_stream_id: refs.youtubeStreamSelect.value,
@@ -4597,6 +5082,9 @@ HTML = r"""
       window.setTimeout(() => applyYouTubeOAuthJsonText(refs.youtubeJsonInput.value, "粘贴的 JSON"), 0);
     });
     refs.youtubeJsonInput.addEventListener("blur", () => applyYouTubeOAuthJsonText(refs.youtubeJsonInput.value, "粘贴的 JSON"));
+    refs.youtubeProfileSelect.addEventListener("change", selectYouTubeProfile);
+    refs.youtubeProfileAddBtn.addEventListener("click", createYouTubeProfile);
+    refs.youtubeProfileDeleteBtn.addEventListener("click", deleteYouTubeProfile);
     refs.youtubeRefreshBtn.addEventListener("click", refreshYouTubeResources);
     refs.youtubeSaveConfigBtn.addEventListener("click", saveYouTubeConfig);
     refs.youtubeAuthorizeBtn.addEventListener("click", startYouTubeAuthorization);
@@ -5181,7 +5669,54 @@ def reload_hub_youtube_client(*, client_id: str, client_secret: str) -> None:
         client_id=client_id,
         client_secret=client_secret,
         credential_path=YOUTUBE_CREDENTIAL_FILE,
+        quota_recorder=lambda method, resource, units: record_youtube_api_usage(YOUTUBE_DEFAULT_PROFILE_ID, method, resource, units),
     )
+
+
+def save_youtube_profile_config(profile_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    profile_id = safe_youtube_profile_id(profile_id or active_youtube_profile_id())
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with YOUTUBE_PROFILE_LOCK:
+        config = load_youtube_profiles_config()
+        profiles = list(config["profiles"])
+        found = False
+        for profile in profiles:
+            if profile["id"] == profile_id:
+                found = True
+                profile.update(updates)
+                profile["id"] = profile_id
+                profile["updated_at"] = now
+                if not profile.get("credential_file"):
+                    profile["credential_file"] = str(YOUTUBE_PROFILE_CREDENTIALS_DIR / f"{profile_id}.json")
+                break
+        if not found:
+            profile = {
+                **default_youtube_profile(),
+                **updates,
+                "id": profile_id,
+                "created_at": now,
+                "updated_at": now,
+                "credential_file": str(YOUTUBE_PROFILE_CREDENTIALS_DIR / f"{profile_id}.json"),
+            }
+            profiles.append(profile)
+        config["profiles"] = profiles
+        config["active_profile_id"] = profile_id
+        save_youtube_profiles_config(config)
+        YOUTUBE_CLIENT_CACHE.pop(profile_id, None)
+    if profile_id == YOUTUBE_DEFAULT_PROFILE_ID:
+        update_env_file_values(
+            HUB_ENV_FILE,
+            {
+                "YOUTUBE_CLIENT_ID": str(updates.get("client_id") or ""),
+                "YOUTUBE_CLIENT_SECRET": str(updates.get("client_secret") or ""),
+                "YOUTUBE_CREDENTIAL_FILE": str(YOUTUBE_CREDENTIAL_FILE),
+            },
+        )
+        reload_hub_youtube_client(
+            client_id=str(updates.get("client_id") or ""),
+            client_secret=str(updates.get("client_secret") or ""),
+        )
+    return youtube_profile_by_id(profile_id)
 
 
 def youtube_error_response(exc: Exception):
@@ -7198,6 +7733,7 @@ def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "stream_url": stream_url,
         "stream_key": stream_key,
+        "youtube_profile_id": safe_youtube_profile_id(str(payload.get("youtube_profile_id") or payload.get("profile_id") or active_youtube_profile_id())),
         "youtube_stream_id": str(payload.get("youtube_stream_id") or "").strip(),
         "youtube_ingestion_url": str(payload.get("youtube_ingestion_url") or "").strip(),
         "video_path": str(payload.get("video_path") or "").strip(),
@@ -7285,15 +7821,16 @@ def api_nodes_stream_recommend():
         return jsonify({"ok": False, "message": "node disabled"}), 409
     node_payload = stream_payload_for_node(payload)
     node_payload["stream_key"] = ""
+    youtube_client = youtube_client_for_id(str(node_payload.get("youtube_profile_id") or ""))
     result = post_node_json(node, "/api/stream/recommend", node_payload, timeout=45)
     if (
         result.get("ok")
         and node_payload.get("stream_output_mode") == "youtube_api"
         and node_payload.get("youtube_stream_id")
-        and YOUTUBE_CLIENT.local_status().get("authorized")
+        and youtube_client.local_status().get("authorized")
     ):
         with suppress(Exception):
-            health = YOUTUBE_CLIENT.stream_health(node_payload["youtube_stream_id"], result.get("recommendation") or node_payload)
+            health = youtube_client.stream_health(node_payload["youtube_stream_id"], result.get("recommendation") or node_payload)
             if health.get("ok"):
                 result["youtube_health"] = health.get("health") or {}
                 result["youtube_feedback"] = health.get("analysis") or {}
@@ -7333,7 +7870,7 @@ def api_nodes_stream_start():
         return jsonify({"ok": False, "message": "missing YouTube API stream ID"}), 400
     if node_payload["stream_output_mode"] == "youtube_api" and not node_payload.get("youtube_ingestion_url"):
         try:
-            node_payload["youtube_ingestion_url"] = YOUTUBE_CLIENT.ingestion_target(node_payload["youtube_stream_id"])
+            node_payload["youtube_ingestion_url"] = youtube_client_for_id(str(node_payload.get("youtube_profile_id") or "")).ingestion_target(node_payload["youtube_stream_id"])
         except Exception as exc:
             return youtube_error_response(exc)
     result = post_node_json(node, "/api/start-stream", node_payload, timeout=60)
@@ -7414,6 +7951,87 @@ def youtube_node_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] |
     return node, None
 
 
+@APP.get("/api/youtube/profiles")
+def api_youtube_profiles():
+    config = load_youtube_profiles_config()
+    return jsonify({
+        "ok": True,
+        "active_profile_id": config["active_profile_id"],
+        "profiles": [public_youtube_profile(profile) for profile in config["profiles"]],
+    })
+
+
+@APP.post("/api/youtube/profiles")
+def api_youtube_profile_save():
+    payload = request.get_json(silent=True) or {}
+    profile_id = safe_youtube_profile_id(str(payload.get("profile_id") or payload.get("id") or payload.get("name") or ""))
+    name = str(payload.get("name") or profile_id or "YouTube Profile").strip()[:80]
+    client_id = str(payload.get("client_id") or "").strip()
+    client_secret = str(payload.get("client_secret") or "").strip()
+    existing = None
+    with suppress(Exception):
+        existing = youtube_profile_by_id(profile_id)
+    if not client_id and existing:
+        client_id = str(existing.get("client_id") or "")
+    if not client_secret and existing:
+        client_secret = str(existing.get("client_secret") or "")
+    updates = {
+        "name": name or profile_id,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "auto_tune_enabled": bool(payload.get("auto_tune_enabled")),
+        "auto_tune_interval_seconds": max(60, min(3600, int(payload.get("auto_tune_interval_seconds") or 300))),
+        "auto_tune_cooldown_seconds": max(60, min(7200, int(payload.get("auto_tune_cooldown_seconds") or 900))),
+        "auto_tune_min_bitrate": max(300, min(20000, int(payload.get("auto_tune_min_bitrate") or 800))),
+        "auto_tune_max_bitrate": max(800, min(30000, int(payload.get("auto_tune_max_bitrate") or 6000))),
+    }
+    profile = save_youtube_profile_config(profile_id, updates)
+    return jsonify({
+        "ok": True,
+        "active_profile_id": profile["id"],
+        "profile": public_youtube_profile(profile),
+        "profiles": [public_youtube_profile(item) for item in load_youtube_profiles_config()["profiles"]],
+    })
+
+
+@APP.post("/api/youtube/profiles/select")
+def api_youtube_profile_select():
+    payload = request.get_json(silent=True) or {}
+    profile_id = safe_youtube_profile_id(str(payload.get("profile_id") or payload.get("id") or ""))
+    config = load_youtube_profiles_config()
+    if profile_id not in {profile["id"] for profile in config["profiles"]}:
+        return jsonify({"ok": False, "message": "YouTube profile not found"}), 404
+    config["active_profile_id"] = profile_id
+    save_youtube_profiles_config(config)
+    return jsonify({"ok": True, "active_profile_id": profile_id})
+
+
+@APP.post("/api/youtube/profiles/delete")
+def api_youtube_profile_delete():
+    payload = request.get_json(silent=True) or {}
+    profile_id = safe_youtube_profile_id(str(payload.get("profile_id") or payload.get("id") or ""))
+    config = load_youtube_profiles_config()
+    profiles = [profile for profile in config["profiles"] if profile["id"] != profile_id]
+    if len(profiles) == len(config["profiles"]):
+        return jsonify({"ok": False, "message": "YouTube profile not found"}), 404
+    if not profiles:
+        return jsonify({"ok": False, "message": "At least one YouTube profile is required"}), 409
+    removed = next((profile for profile in config["profiles"] if profile["id"] == profile_id), {})
+    config["profiles"] = profiles
+    if config.get("active_profile_id") == profile_id:
+        config["active_profile_id"] = profiles[0]["id"]
+    save_youtube_profiles_config(config)
+    credential_file = Path(str(removed.get("credential_file") or ""))
+    if credential_file.parent == YOUTUBE_PROFILE_CREDENTIALS_DIR:
+        credential_file.unlink(missing_ok=True)
+    YOUTUBE_CLIENT_CACHE.pop(profile_id, None)
+    return jsonify({
+        "ok": True,
+        "active_profile_id": config["active_profile_id"],
+        "profiles": [public_youtube_profile(profile) for profile in profiles],
+    })
+
+
 @APP.post("/api/nodes/youtube/resources")
 def api_nodes_youtube_resources():
     payload = request.get_json(silent=True) or {}
@@ -7421,12 +8039,14 @@ def api_nodes_youtube_resources():
     if error:
         return error
     assert node is not None
-    status = YOUTUBE_CLIENT.local_status()
+    profile_id, client = youtube_client_from_payload(payload)
+    profile = youtube_profile_by_id(profile_id)
+    status = client.local_status()
     if status["authorized"]:
         try:
-            channel = YOUTUBE_CLIENT.channel()
-            streams = YOUTUBE_CLIENT.list_streams()
-            broadcasts = YOUTUBE_CLIENT.list_broadcasts()
+            channel = client.channel()
+            streams = client.list_streams()
+            broadcasts = client.list_broadcasts()
         except Exception as exc:
             return youtube_error_response(exc)
     else:
@@ -7437,6 +8057,8 @@ def api_nodes_youtube_resources():
         "ok": True,
         "node_id": str(payload.get("node_id") or ""),
         "mode": "hub",
+        "profile_id": profile_id,
+        "profile": public_youtube_profile(profile),
         "configured": bool(status.get("configured")),
         "authorized": bool(status.get("authorized")),
         "channel": channel,
@@ -7452,11 +8074,12 @@ def api_nodes_youtube_oauth_start():
     if error:
         return error
     assert node is not None
+    profile_id, client = youtube_client_from_payload(payload)
     try:
-        result = YOUTUBE_CLIENT.start_device_authorization()
+        result = client.start_device_authorization()
     except Exception as exc:
         return youtube_error_response(exc)
-    return jsonify({"ok": True, "node_id": str(payload.get("node_id") or ""), "mode": "hub", **result})
+    return jsonify({"ok": True, "node_id": str(payload.get("node_id") or ""), "mode": "hub", "profile_id": profile_id, **result})
 
 
 @APP.post("/api/nodes/youtube/config")
@@ -7466,25 +8089,36 @@ def api_nodes_youtube_config():
     if error:
         return error
     assert node is not None
+    profile_id = safe_youtube_profile_id(str(payload.get("profile_id") or payload.get("youtube_profile_id") or active_youtube_profile_id()))
     client_id = str(payload.get("client_id") or "").strip()
     client_secret = str(payload.get("client_secret") or "").strip()
     if not client_id:
         return jsonify({"ok": False, "message": "YOUTUBE_CLIENT_ID is required"}), 400
-    update_env_file_values(
-        HUB_ENV_FILE,
+    existing = None
+    with suppress(Exception):
+        existing = youtube_profile_by_id(profile_id)
+    profile = save_youtube_profile_config(
+        profile_id,
         {
-            "YOUTUBE_CLIENT_ID": client_id,
-            "YOUTUBE_CLIENT_SECRET": client_secret,
-            "YOUTUBE_CREDENTIAL_FILE": str(YOUTUBE_CREDENTIAL_FILE),
+            "name": str(payload.get("profile_name") or payload.get("name") or (existing or {}).get("name") or profile_id),
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auto_tune_enabled": bool(payload.get("auto_tune_enabled", (existing or {}).get("auto_tune_enabled", False))),
+            "auto_tune_interval_seconds": max(60, min(3600, int(payload.get("auto_tune_interval_seconds") or (existing or {}).get("auto_tune_interval_seconds") or 300))),
+            "auto_tune_cooldown_seconds": max(60, min(7200, int(payload.get("auto_tune_cooldown_seconds") or (existing or {}).get("auto_tune_cooldown_seconds") or 900))),
+            "auto_tune_min_bitrate": max(300, min(20000, int(payload.get("auto_tune_min_bitrate") or (existing or {}).get("auto_tune_min_bitrate") or 800))),
+            "auto_tune_max_bitrate": max(800, min(30000, int(payload.get("auto_tune_max_bitrate") or (existing or {}).get("auto_tune_max_bitrate") or 6000))),
         },
     )
-    reload_hub_youtube_client(client_id=client_id, client_secret=client_secret)
+    client = youtube_client_for_id(profile_id)
     return jsonify({
         "ok": True,
         "node_id": str(payload.get("node_id") or ""),
         "mode": "hub",
-        "message": "YouTube API configuration saved on this Hub",
-        **YOUTUBE_CLIENT.local_status(),
+        "profile_id": profile_id,
+        "profile": public_youtube_profile(profile),
+        "message": "YouTube API configuration saved on this Hub profile",
+        **client.local_status(),
     })
 
 
@@ -7495,11 +8129,12 @@ def api_nodes_youtube_oauth_poll():
     if error:
         return error
     assert node is not None
+    profile_id, client = youtube_client_from_payload(payload)
     try:
-        result = YOUTUBE_CLIENT.poll_device_authorization(str(payload.get("session_id") or ""))
+        result = client.poll_device_authorization(str(payload.get("session_id") or ""))
     except Exception as exc:
         return youtube_error_response(exc)
-    return jsonify({"ok": True, "node_id": str(payload.get("node_id") or ""), "mode": "hub", **result})
+    return jsonify({"ok": True, "node_id": str(payload.get("node_id") or ""), "mode": "hub", "profile_id": profile_id, **result})
 
 
 @APP.post("/api/nodes/youtube/health")
@@ -7510,13 +8145,16 @@ def api_nodes_youtube_health():
         return error
     assert node is not None
     stream_id = str(payload.get("youtube_stream_id") or payload.get("stream_id") or "").strip()
+    profile_id, client = youtube_client_from_payload(payload)
     try:
-        result = YOUTUBE_CLIENT.stream_health(stream_id, stream_payload_for_node(payload))
+        result = client.stream_health(stream_id, stream_payload_for_node(payload))
     except Exception as exc:
         return youtube_error_response(exc)
     return jsonify({
         "node_id": str(payload.get("node_id") or ""),
         "mode": "hub",
+        "profile_id": profile_id,
+        "profile": public_youtube_profile(youtube_profile_by_id(profile_id)),
         **result,
     })
 
@@ -7543,14 +8181,17 @@ def api_nodes_youtube_prepare():
         "enable_dvr",
     }
     node_payload = {key: payload.get(key) for key in allowed if key in payload}
+    profile_id, client = youtube_client_from_payload(payload)
     try:
-        result = YOUTUBE_CLIENT.prepare_broadcast(node_payload)
+        result = client.prepare_broadcast(node_payload)
     except Exception as exc:
         return youtube_error_response(exc)
     return jsonify({
         "ok": True,
         "node_id": str(payload.get("node_id") or ""),
         "mode": "hub",
+        "profile_id": profile_id,
+        "profile": public_youtube_profile(youtube_profile_by_id(profile_id)),
         "message": "YouTube broadcast prepared and bound by Hub",
         "result": result,
     })
@@ -7563,14 +8204,16 @@ def api_nodes_youtube_oauth_revoke():
     if error:
         return error
     assert node is not None
+    profile_id, client = youtube_client_from_payload(payload)
     try:
-        YOUTUBE_CLIENT.revoke()
+        client.revoke()
     except Exception as exc:
         return youtube_error_response(exc)
     return jsonify({
         "ok": True,
         "node_id": str(payload.get("node_id") or ""),
         "mode": "hub",
+        "profile_id": profile_id,
         "message": "YouTube authorization revoked from Hub",
     })
 
@@ -7757,6 +8400,7 @@ def api_deactivate_node_role(role: str):
 
 def main() -> None:
     ensure_dirs()
+    threading.Thread(target=youtube_autotune_loop, name="youtube-autotune", daemon=True).start()
     host = os.environ.get("STREAM_HUB_HOST", "127.0.0.1")
     try:
         from waitress import serve
