@@ -168,7 +168,7 @@ HTML = r"""
     .editable-title { display: inline-block; min-width: 220px; padding: 2px 5px; border: 1px dashed transparent; border-radius: 7px; outline: none; }
     .editable-title:hover { border-color: var(--line); }
     .editable-title:focus { border-color: var(--accent); background: rgba(54,211,153,.08); }
-    button, input, select {
+    button, input, select, textarea {
       border: 1px solid var(--line);
       border-radius: 10px;
       padding: 10px 12px;
@@ -176,6 +176,7 @@ HTML = r"""
       color: var(--text);
       font: inherit;
     }
+    textarea { resize: vertical; min-height: 88px; }
     button { cursor: pointer; font-weight: 800; }
     button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #04100c; border: none; }
     button.danger { background: #6f1d2d; color: #ffe4ea; }
@@ -1212,6 +1213,14 @@ HTML = r"""
           <input id="youtubeClientSecretInput" type="password" autocomplete="off" placeholder="部分 OAuth 客户端没有 secret">
         </div>
         <div class="wizard-field">
+          <label>OAuth JSON 自动读取</label>
+          <input id="youtubeJsonFileInput" type="file" accept=".json,application/json">
+        </div>
+        <div class="wizard-field">
+          <label>粘贴 JSON</label>
+          <textarea id="youtubeJsonInput" spellcheck="false" placeholder="把 Google OAuth client JSON 粘贴到这里，或选择上面的 JSON 文件。"></textarea>
+        </div>
+        <div class="wizard-field">
           <label>可见范围 / 计划时间</label>
           <div class="command-pair">
             <select id="youtubePrivacyInput">
@@ -1354,6 +1363,8 @@ HTML = r"""
       youtubeTitleInput: document.getElementById("youtubeTitleInput"),
       youtubeClientIdInput: document.getElementById("youtubeClientIdInput"),
       youtubeClientSecretInput: document.getElementById("youtubeClientSecretInput"),
+      youtubeJsonFileInput: document.getElementById("youtubeJsonFileInput"),
+      youtubeJsonInput: document.getElementById("youtubeJsonInput"),
       youtubePrivacyInput: document.getElementById("youtubePrivacyInput"),
       youtubeScheduleInput: document.getElementById("youtubeScheduleInput"),
       youtubeRefreshBtn: document.getElementById("youtubeRefreshBtn"),
@@ -2325,10 +2336,67 @@ HTML = r"""
       }
     }
 
+    function extractYouTubeOAuthClient(payload) {
+      const source = payload?.installed || payload?.web || payload || {};
+      const clientId = String(source.client_id || "").trim();
+      const clientSecret = String(source.client_secret || "").trim();
+      const looksValid = clientId.endsWith(".apps.googleusercontent.com");
+      if (!clientId || !looksValid) {
+        throw new Error("没有在 JSON 里找到有效的 client_id。请确认下载的是 OAuth Client JSON，不是 API key 或 service account JSON。");
+      }
+      if (String(payload?.type || "").toLowerCase() === "service_account" || source.private_key) {
+        throw new Error("这是 Service Account JSON，不能用于 YouTube 频道授权。请创建 OAuth Client：TVs and Limited Input devices。");
+      }
+      return { clientId, clientSecret };
+    }
+
+    function applyYouTubeOAuthJsonText(text, sourceLabel = "JSON") {
+      const raw = String(text || "").trim();
+      if (!raw) return false;
+      let payload;
+      try {
+        payload = JSON.parse(raw);
+      } catch (_) {
+        refs.youtubeWizardLog.textContent = `${sourceLabel} 不是有效 JSON，请检查是否完整复制。`;
+        return false;
+      }
+      try {
+        const parsed = extractYouTubeOAuthClient(payload);
+        refs.youtubeClientIdInput.value = parsed.clientId;
+        refs.youtubeClientSecretInput.value = parsed.clientSecret;
+        refs.youtubeWizardLog.textContent = parsed.clientSecret
+          ? `${sourceLabel} 已读取：Client ID 和 Client Secret 已自动填入。下一步点“保存 API 配置”。`
+          : `${sourceLabel} 已读取：Client ID 已自动填入；这个 OAuth 客户端没有 Client Secret，可以直接保存。`;
+        return true;
+      } catch (error) {
+        refs.youtubeWizardLog.textContent = friendlyError(error, `${sourceLabel} 读取失败`);
+        return false;
+      }
+    }
+
+    async function loadYouTubeOAuthJsonFile() {
+      const file = refs.youtubeJsonFileInput.files?.[0];
+      if (!file) return;
+      if (!file.name.toLowerCase().endsWith(".json")) {
+        refs.youtubeWizardLog.textContent = "请选择 Google 下载的 .json 文件。";
+        return;
+      }
+      try {
+        const text = await file.text();
+        refs.youtubeJsonInput.value = text;
+        applyYouTubeOAuthJsonText(text, file.name);
+      } catch (error) {
+        refs.youtubeWizardLog.textContent = friendlyError(error, "OAuth JSON 文件读取失败");
+      }
+    }
+
     async function saveYouTubeConfig() {
       if (!selectedNodeId) {
         refs.youtubeWizardLog.textContent = "请先选择一个 Agent。";
         return;
+      }
+      if (!refs.youtubeClientIdInput.value.trim() && refs.youtubeJsonInput.value.trim()) {
+        applyYouTubeOAuthJsonText(refs.youtubeJsonInput.value, "粘贴的 JSON");
       }
       const clientId = refs.youtubeClientIdInput.value.trim();
       const clientSecret = refs.youtubeClientSecretInput.value.trim();
@@ -4136,6 +4204,11 @@ HTML = r"""
     refs.youtubeWizardModal.addEventListener("click", (event) => {
       if (event.target === refs.youtubeWizardModal) setYouTubeModalOpen(false);
     });
+    refs.youtubeJsonFileInput.addEventListener("change", loadYouTubeOAuthJsonFile);
+    refs.youtubeJsonInput.addEventListener("paste", () => {
+      window.setTimeout(() => applyYouTubeOAuthJsonText(refs.youtubeJsonInput.value, "粘贴的 JSON"), 0);
+    });
+    refs.youtubeJsonInput.addEventListener("blur", () => applyYouTubeOAuthJsonText(refs.youtubeJsonInput.value, "粘贴的 JSON"));
     refs.youtubeRefreshBtn.addEventListener("click", refreshYouTubeResources);
     refs.youtubeSaveConfigBtn.addEventListener("click", saveYouTubeConfig);
     refs.youtubeAuthorizeBtn.addEventListener("click", startYouTubeAuthorization);
