@@ -14,6 +14,20 @@ def git_result(stdout="", *, ok=True, stderr=""):
 
 
 class GitHubUpdateCheckTests(unittest.TestCase):
+    def test_index_uses_etag_cache_for_fast_reopen(self):
+        from stream_control_hub import app
+
+        with patch.object(app, "local_git_version", return_value="abc1234"):
+            client = app.APP.test_client()
+            first = client.get("/")
+            etag = first.headers.get("ETag")
+            second = client.get("/", headers={"If-None-Match": etag})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertIn("private", first.headers.get("Cache-Control", ""))
+        self.assertTrue(etag)
+        self.assertEqual(second.status_code, 304)
+
     def test_check_compares_deployed_head_with_fetched_main(self):
         from stream_control_hub import app
 

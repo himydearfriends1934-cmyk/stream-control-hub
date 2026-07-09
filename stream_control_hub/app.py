@@ -8,6 +8,7 @@ import subprocess
 import time
 import uuid
 import hmac
+import hashlib
 import ipaddress
 import threading
 import unicodedata
@@ -1096,9 +1097,12 @@ HTML = r"""
       <div class="bottom-section">
         <div class="card compact-card">
           <h2>GitHub 更新</h2>
-          <p>低频维护功能放在底部，不占用节点监控主视野。</p>
+          <p>每天首次打开自动检查；有新版本会弹窗确认。也可复制 GitHub 一键安装/升级命令。</p>
           <div class="actions">
             <button id="checkUpdatesBtn">检查 GitHub 更新</button>
+            <button id="showInstallCommandsBtn">显示安装命令</button>
+            <button id="copyHubInstallBtn">复制 Hub 命令</button>
+            <button id="copyAgentInstallQuickBtn">复制 Agent 命令</button>
           </div>
         </div>
         <div class="card compact-card">
@@ -1370,6 +1374,9 @@ HTML = r"""
       resourceFilterChip: document.getElementById("resourceFilterChip"),
       refreshBtn: document.getElementById("refreshBtn"),
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
+      showInstallCommandsBtn: document.getElementById("showInstallCommandsBtn"),
+      copyHubInstallBtn: document.getElementById("copyHubInstallBtn"),
+      copyAgentInstallQuickBtn: document.getElementById("copyAgentInstallQuickBtn"),
       policyBtn: document.getElementById("policyBtn"),
       auditBtn: document.getElementById("auditBtn"),
       tailscaleWizardBtn: document.getElementById("tailscaleWizardBtn"),
@@ -2919,11 +2926,101 @@ HTML = r"""
       }
     }
 
-    async function checkUpdates() {
-      refs.updateBox.textContent = "正在检查 GitHub...";
+    async function checkUpdates({ silent = false } = {}) {
+      if (!silent) refs.updateBox.textContent = "正在检查 GitHub...";
       const resp = await fetch("/api/github/check", { method: "POST", headers: authHeaders() });
       const data = await resp.json();
+      if (!silent) refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      return data;
+    }
+
+    async function latestInstallCommands() {
+      const resp = await fetch(`/api/install-commands?_=${Date.now()}`, { cache: "no-store" });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) throw new Error(data.message || "无法读取安装命令");
+      return data;
+    }
+
+    function renderInstallCommands(data) {
+      refs.updateBox.textContent = [
+        `来源：${data.source || "--"}`,
+        data.source_url ? `清单：${data.source_url}` : "",
+        "",
+        "Hub 一键安装/升级：",
+        data.hub || "--",
+        "",
+        "Agent 一键安装/升级：",
+        data.agent || "--",
+        "",
+        data.unified ? `统一安装入口：\n${data.unified}` : "",
+      ].filter(Boolean).join("\n");
+    }
+
+    async function showInstallCommands() {
+      refs.updateBox.textContent = "正在从 GitHub 读取一键安装/升级命令...";
+      try {
+        const data = await latestInstallCommands();
+        renderInstallCommands(data);
+        return data;
+      } catch (error) {
+        refs.updateBox.textContent = friendlyError(error, "安装命令读取失败");
+        return null;
+      }
+    }
+
+    async function copyInstallCommand(kind) {
+      const data = await showInstallCommands();
+      const command = data?.[kind] || "";
+      if (!command) return;
+      const label = kind === "hub" ? "Hub" : "Agent";
+      try {
+        await navigator.clipboard.writeText(command);
+        log(`${label} GitHub 一键安装/升级命令已复制`);
+      } catch (_) {
+        refs.updateBox.textContent = `${label} 命令如下，请手动复制：\n\n${command}`;
+      }
+    }
+
+    async function upgradeCurrentHubFromPrompt(checkData) {
+      refs.updateBox.textContent = JSON.stringify(checkData, null, 2);
+      const resp = await fetch("/api/upgrade", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({}) });
+      const data = await resp.json();
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      log(data.ok ? "当前 Hub GitHub 升级任务已提交" : `当前 Hub 升级失败：${data.message || resp.statusText}`);
+    }
+
+    async function checkDailyGithubUpdates() {
+      const key = "streamHubLastGithubAutoCheckAt";
+      const now = Date.now();
+      const last = Number(localStorage.getItem(key) || 0);
+      if (last && now - last < 24 * 60 * 60 * 1000) return;
+      let data = null;
+      try {
+        data = await checkUpdates({ silent: true });
+        localStorage.setItem(key, String(now));
+      } catch (error) {
+        log(friendlyError(error, "每日 GitHub 更新检查失败"));
+        return;
+      }
+      if (!data?.ok || !data.has_updates) return;
+      const choice = await showChoiceDialog({
+        title: "发现 GitHub 新版本",
+        subtitle: data.remote_label || "main 有更新",
+        icon: "↻",
+        message: [
+          `当前版本：${data.local_label || data.local || "--"}`,
+          `最新版本：${data.remote_label || data.remote || "--"}`,
+          "",
+          "是否现在升级当前 Hub？升级会从 GitHub main 拉取最新代码并重启 Hub 服务；Agent 不会被静默更新。",
+        ].join("\n"),
+        choices: [
+          { label: "现在升级当前 Hub", value: "upgrade", className: "primary" },
+          { label: "显示安装命令", value: "commands" },
+          { label: "今天先不更新", value: "skip" },
+        ],
+      });
+      if (choice === "upgrade") await upgradeCurrentHubFromPrompt(data);
+      if (choice === "commands") await showInstallCommands();
     }
 
     async function showPolicy() {
@@ -3604,7 +3701,7 @@ HTML = r"""
         return `<div class="role-settings-item">
           <span><strong>${label}</strong><small>当前状态：${enabled ? `已激活 · 版本 ${escapeHtml(info.version || "未识别")}` : "未激活"}</small></span>
           <span class="actions">
-            <button class="${enabled ? "" : "primary"}" data-settings-role="${role}" data-role-action="${enabled ? "upgrade-role" : "activate-role"}">${enabled ? `升级 ${label}` : `激活 ${label}`}</button>
+            <button class="${enabled ? "" : "primary"}" data-settings-role="${role}" data-role-action="${enabled ? "upgrade-role" : "activate-role"}">${enabled ? `GitHub 升级 ${label}` : `激活 ${label}`}</button>
             ${enabled ? `<button class="danger" data-settings-role="${role}" data-role-action="deactivate-role">取消 ${label}</button>` : ""}
           </span>
         </div>`;
@@ -4284,6 +4381,9 @@ HTML = r"""
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.cancelUploadBtn.addEventListener("click", cancelActiveUpload);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
+    refs.showInstallCommandsBtn.addEventListener("click", showInstallCommands);
+    refs.copyHubInstallBtn.addEventListener("click", () => copyInstallCommand("hub"));
+    refs.copyAgentInstallQuickBtn.addEventListener("click", () => copyInstallCommand("agent"));
     refs.policyBtn.addEventListener("click", showPolicy);
     refs.auditBtn.addEventListener("click", showAudit);
     refs.tailscaleWizardBtn.addEventListener("click", () => setTailscaleWizardOpen(true));
@@ -4320,6 +4420,8 @@ HTML = r"""
     });
     initNodeRoleSplitter();
     refreshAll();
+    checkDailyGithubUpdates();
+    window.setInterval(checkDailyGithubUpdates, 60 * 60 * 1000);
   </script>
 </body>
 </html>
@@ -4328,10 +4430,22 @@ HTML = r"""
 
 @APP.get("/")
 def index():
-    response = make_response(HTML)
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
+    version = local_git_version()
+    etag = hashlib.sha256(f"{version}:{len(HTML)}".encode("utf-8")).hexdigest()[:24]
+    if request.headers.get("If-None-Match", "").strip('"') == etag:
+        response = make_response("", 304)
+    else:
+        response = make_response(HTML)
+    response.headers["ETag"] = f'"{etag}"'
+    response.headers["X-Stream-Hub-Version"] = version
+    response.headers["Cache-Control"] = "private, max-age=3600, stale-while-revalidate=86400"
+    return response
+
+
+@APP.get("/api/app-version")
+def api_app_version():
+    response = jsonify({"ok": True, "version": local_git_version()})
+    response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
 
 
