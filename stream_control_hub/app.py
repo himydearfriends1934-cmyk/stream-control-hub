@@ -1879,7 +1879,13 @@ HTML = r"""
 
     function renderNodes() {
       const checkedIds = new Set(selectedNodeIds().map(String));
-      const agentRows = nodes.filter((node) => node.enabled !== false);
+      const nodeHasResources = (nodeId) => (mediaLibrary.resources || []).some((resource) => resourceHasNode(resource, nodeId));
+      const shouldShowAgentRow = (node) => {
+        const nodeId = String(node.id || "");
+        const agentEnabled = Boolean(node.roles?.agent?.enabled);
+        return node.enabled !== false && (agentEnabled || nodeHasResources(nodeId));
+      };
+      const agentRows = nodes.filter(shouldShowAgentRow);
       const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
       const onlineAgentCount = agentRows.filter((node) => Boolean(node.roles?.agent?.enabled)).length;
       refs.agentNodeCount.textContent = `${onlineAgentCount}/${agentRows.length}`;
@@ -1925,7 +1931,11 @@ HTML = r"""
 
     function renderNodeSpaceRings(nodeDisks) {
       const diskByNodeId = new Map((nodeDisks || []).map((item) => [String(item.node_id || ""), item]));
-      const merged = nodes.map((node) => {
+      const nodeHasResources = (nodeId) => (mediaLibrary.resources || []).some((resource) => resourceHasNode(resource, nodeId));
+      const merged = nodes.filter((node) => {
+        const nodeId = String(node.id || "");
+        return Boolean(node.roles?.agent?.enabled) || nodeHasResources(nodeId);
+      }).map((node) => {
         const nodeId = String(node.id || "");
         return diskByNodeId.get(nodeId) || {
           node_id: nodeId,

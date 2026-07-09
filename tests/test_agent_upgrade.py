@@ -115,6 +115,8 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("data-role-settings", app.HTML)
         self.assertIn('data-settings-role="${role}"', app.HTML)
         self.assertIn("const agentRows = nodes.filter", app.HTML)
+        self.assertIn("const shouldShowAgentRow", app.HTML)
+        self.assertIn("agentEnabled || nodeHasResources(nodeId)", app.HTML)
         self.assertIn("/api/nodes/delete", app.HTML)
         self.assertIn('id="roleSettingsDeleteNodeBtn"', app.HTML)
         self.assertIn("deleteNodeRecord(roleSettingsNodeId)", app.HTML)
