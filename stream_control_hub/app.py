@@ -1311,7 +1311,7 @@ HTML = r"""
     }
     .monitor-panel h4 { margin: 0 0 5px; font-size: 13px; color: #d6fff0; }
     .node-table-card { min-height: 0; overflow: hidden; }
-    .node-role-split { display: block; height: var(--node-role-split-height, auto); min-height: 330px; font-size: 14px; overflow-y: auto; overflow-x: hidden; padding-right: 3px; }
+    .node-role-split { display: block; height: var(--node-role-split-height, auto); min-height: 330px; font-size: 14px; overflow-y: auto; overflow-x: auto; padding-right: 3px; }
     .node-role-pane { min-height: 0; display: block; }
     .node-role-pane .node-table { max-height: none; min-height: 0; overflow: visible; padding-right: 0; }
     .node-role-splitter { position: relative; height: 12px; cursor: default; touch-action: none; user-select: none; pointer-events: none; }
@@ -1336,10 +1336,10 @@ HTML = r"""
     .node-table-head,
     .node-row {
       display: grid;
-      grid-template-columns: 22px minmax(150px, 1fr) 76px 82px minmax(260px, 1.05fr);
+      grid-template-columns: 22px minmax(760px, 2.25fr) 64px 72px minmax(220px, .7fr);
       gap: 6px;
       align-items: center;
-      min-width: 620px;
+      min-width: 1110px;
     }
     .node-table-head {
       position: sticky;
@@ -1379,33 +1379,53 @@ HTML = r"""
     .node-row.control-hub .node-state { color: var(--text); }
     .node-row.offline-node, .node-space-ring-item.offline-node { opacity: .68; }
     .node-row.offline-node:hover, .node-space-ring-item.offline-node:hover { opacity: .9; }
-    .node-name { min-width: 0; display: grid; gap: 2px; align-content: center; }
+    .node-name { min-width: 0; display: grid; gap: 3px; align-content: center; }
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-agent-line { display: flex; gap: 7px; align-items: center; min-width: 0; }
+    .node-name-edit { flex: 0 0 140px; min-width: 100px; cursor: text; }
+    .node-name-edit:hover { color: #fff; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    .node-name-input { flex: 0 0 140px; min-width: 100px; height: 30px; padding: 4px 7px; border-radius: 7px; border: 1px solid #ff3b4f; background: rgba(7,18,14,.78); color: #fff; font-weight: 900; outline: none; }
     .node-name small { color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-live-locks {
       display: grid;
-      grid-template-columns: 44px minmax(0, 1fr);
-      gap: 3px 5px;
+      grid-template-columns: minmax(145px, .9fr) minmax(190px, 1.1fr) minmax(260px, 1.45fr);
+      gap: 6px;
       align-items: center;
-      margin-top: 4px;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .node-live-field {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 5px;
+      align-items: center;
+      min-width: 0;
+      padding: 3px 5px;
+      border: 1px solid rgba(54, 211, 153, .22);
+      border-radius: 8px;
+      background: rgba(7,18,14,.42);
     }
     .node-live-label {
       color: var(--muted);
       font-size: 11px;
       font-weight: 900;
       line-height: 1;
+      white-space: nowrap;
+      color: #9fffe0;
     }
     .node-live-select,
     .node-profile-select {
+      width: 100%;
       min-width: 0;
       min-height: 28px;
       padding: 4px 7px;
       border-radius: 7px;
       font-size: 12px;
       line-height: 1.2;
+      font-weight: 850;
+      color: #f3fff9;
+      background-color: rgba(11, 31, 25, .94);
     }
-    .node-note { display: block; justify-self: start; max-width: 9em; padding: 2px 6px; border: 1px dashed var(--line); border-radius: 999px; color: var(--muted); background: transparent; font-size: 11px; line-height: 1.15; font-weight: 700; cursor: pointer; }
-    .node-note:hover { color: var(--text); border-color: var(--accent); }
     .node-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 800; }
     .dot { width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid rgba(255,255,255,0.2); border-radius: 999px; background: #fbbf24; box-shadow: inset 0 0 3px rgba(255,255,255,0.5), 0 0 10px rgba(251, 191, 36, 0.65); }
     .dot.ok { background: #28e39f; box-shadow: inset 0 0 3px rgba(255,255,255,0.65), 0 0 12px rgba(40, 227, 159, 0.85); }
@@ -1572,6 +1592,8 @@ HTML = r"""
       .node-table { max-height: none; }
       .node-table-head { display: none; }
       .node-row { grid-template-columns: 24px minmax(0, 1fr); }
+      .node-agent-line { flex-wrap: wrap; }
+      .node-live-locks { grid-template-columns: 1fr; flex-basis: 100%; }
       .node-state, .row-actions { grid-column: 2; }
       .wizard-grid, .wizard-role-grid, .wizard-existing-grid, .wizard-step-grid, .wizard-actions { grid-template-columns: 1fr; }
       .youtube-control-strip { grid-template-columns: 1fr; }
@@ -2763,6 +2785,23 @@ HTML = r"""
       return String(nodeStreamLock(node).youtube_stream_id || node?.health?.stream_config?.youtube_stream_id || "");
     }
 
+    function pathFileName(value) {
+      return String(value || "").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "";
+    }
+
+    function lockedYoutubeStreamLabel(node) {
+      const streamId = lockedYoutubeStreamId(node);
+      if (!streamId) return "未选择直播流";
+      const stream = (youtubeStreamsByProfile[nodeProfileId(node)] || []).find((item) => String(item.id) === String(streamId));
+      return stream?.title || streamId;
+    }
+
+    function lockedVideoLabel(node) {
+      const lock = nodeStreamLock(node);
+      const video = String(lock.library_media_name || pathFileName(lock.video_path) || pathFileName(node?.health?.stream_config?.video_path) || "");
+      return video || "未选择视频";
+    }
+
     function cacheYouTubeStreams(profileId, streams = []) {
       const key = String(profileId || activeYouTubeProfileId || "default");
       youtubeStreamsByProfile[key] = Array.isArray(streams) ? streams : [];
@@ -2794,15 +2833,20 @@ HTML = r"""
       const selectedVideo = String(lock.video_path || node?.health?.stream_config?.video_path || "");
       const resources = mediaLibrary.resources || [];
       const options = [`<option value="">选择直播视频</option>`];
+      let hasSelected = false;
       resources.forEach((item) => {
         const localCopy = (item.copies || []).find((copy) => String(copy.node_id) === String(node?.id || ""));
         const sourceCopy = localCopy || (item.copies || [])[0] || {};
         const value = localCopy?.video_path || item.name;
         const selected = (selectedLibrary && item.name === selectedLibrary) || (!selectedLibrary && value === selectedVideo);
+        if (selected) hasSelected = true;
         const copyHint = localCopy ? "本机" : "自动复制";
         options.push(`<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}" data-media-local="${localCopy ? "1" : "0"}" data-source-node-id="${escapeHtml(sourceCopy.node_id || "")}" ${selected ? "selected" : ""}>[${escapeHtml(resourceProfileLabel(item))}] ${escapeHtml(item.name)} · ${copyHint}</option>`);
       });
-      if (!resources.length) options.push(`<option value="" disabled>媒体库暂无视频</option>`);
+      if ((selectedLibrary || selectedVideo) && !hasSelected) {
+        options.push(`<option value="${escapeHtml(selectedVideo || selectedLibrary)}" selected>已锁定：${escapeHtml(lockedVideoLabel(node))}</option>`);
+      }
+      if (!resources.length && !hasSelected && !(selectedLibrary || selectedVideo)) options.push(`<option value="" disabled>媒体库暂无视频</option>`);
       return options.join("");
     }
 
@@ -2942,23 +2986,28 @@ HTML = r"""
       const streaming = nodeStreaming(node);
       const selected = String(node.id) === String(selectedNodeId);
       const checked = checkedIds.has(String(node.id));
-      const note = String(node.note || "").trim();
-      const notePreview = note ? `${[...note].slice(0, 6).join("")}${[...note].length > 6 ? "…" : ""}` : "添加备注";
+      const currentProfileName = profileName(nodeProfileId(node));
+      const currentStreamName = lockedYoutubeStreamLabel(node);
+      const currentVideoName = lockedVideoLabel(node);
       return `
         <div class="node-row ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="点击选中；删除/取消角色请打开后面的设置">
           <input data-node-check type="checkbox" value="${escapeHtml(node.id)}" ${checked ? "checked" : ""} ${node.enabled === false ? "disabled" : ""} title="选中后可推送资源或升级">
           <span class="node-name">
-            <strong>${escapeHtml(node.name || node.id)}</strong>
+            <span class="node-agent-line">
+              <strong class="node-name-edit" data-node-name-edit data-node-id="${escapeHtml(node.id)}" title="双击修改 Agent 名称">${escapeHtml(node.name || node.id)}</strong>
+              <div class="node-live-locks">
+                <label class="node-live-field" title="当前 Profile：${escapeHtml(currentProfileName)}"><span class="node-live-label">Profile</span>
+                  <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="当前 Profile：${escapeHtml(currentProfileName)}">${profileOptions(nodeProfileId(node))}</select>
+                </label>
+                <label class="node-live-field" title="当前直播流：${escapeHtml(currentStreamName)}"><span class="node-live-label">直播流</span>
+                  <select class="node-live-select" data-node-stream-select data-node-id="${escapeHtml(node.id)}" title="当前直播流：${escapeHtml(currentStreamName)}">${nodeYoutubeStreamOptions(node)}</select>
+                </label>
+                <label class="node-live-field" title="当前视频：${escapeHtml(currentVideoName)}"><span class="node-live-label">视频</span>
+                  <select class="node-live-select" data-node-video-select data-node-id="${escapeHtml(node.id)}" title="当前视频：${escapeHtml(currentVideoName)}">${nodeVideoOptions(node)}</select>
+                </label>
+              </div>
+            </span>
             <small>${escapeHtml(h.hostname || node.id)} · 版本 ${escapeHtml(h.agent?.version || "未识别")}</small>
-            <div class="node-live-locks">
-              <span class="node-live-label">Profile</span>
-              <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="选择这个 Agent 隶属的 YouTube Profile">${profileOptions(nodeProfileId(node))}</select>
-              <span class="node-live-label">直播流</span>
-              <select class="node-live-select" data-node-stream-select data-node-id="${escapeHtml(node.id)}" title="锁定这个 Agent 使用的 YouTube 直播流">${nodeYoutubeStreamOptions(node)}</select>
-              <span class="node-live-label">视频</span>
-              <select class="node-live-select" data-node-video-select data-node-id="${escapeHtml(node.id)}" title="锁定这个 Agent 的开播视频">${nodeVideoOptions(node)}</select>
-            </div>
-            <button class="node-note" data-node-note data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(note || "点击添加备注")}">${escapeHtml(notePreview)}</button>
           </span>
           <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
           <span class="node-state">${streamDot(streaming)}${streaming ? "推流中" : "未推流"}</span>
@@ -5294,16 +5343,30 @@ HTML = r"""
       if (!roleSettingsNodeId || !name) return;
       refs.roleSettingsSaveNameBtn.disabled = true;
       try {
-        const data = await postJson("/api/nodes/name", { node_id: roleSettingsNodeId, name });
-        if (!data.ok) throw new Error(data.message || "名称保存失败");
-        await refreshAll();
+        await saveNodeName(roleSettingsNodeId, name, { refresh: true });
         setRoleSettingsOpen(true, roleSettingsNodeId);
-        log(`节点名称已更新：${name}`);
       } catch (error) {
         log(friendlyError(error, "节点名称保存失败"));
       } finally {
         refs.roleSettingsSaveNameBtn.disabled = false;
       }
+    }
+
+    async function saveNodeName(nodeId, name, options = {}) {
+      const cleanName = String(name || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      if (!nodeId || !cleanName) return null;
+      const data = await postJson("/api/nodes/name", { node_id: nodeId, name: cleanName });
+      if (!data.ok) throw new Error(data.message || "名称保存失败");
+      nodes = nodes.map((item) => String(item.id) === String(nodeId) ? { ...item, name: cleanName } : item);
+      if (options.refresh) {
+        await refreshAll();
+      } else {
+        renderNodes();
+        renderMedia();
+        renderYouTubeAgentList();
+      }
+      log(`节点名称已更新：${cleanName}`);
+      return data;
     }
 
     async function switchHubWithFallback(nodeId) {
@@ -5557,27 +5620,60 @@ HTML = r"""
       };
     }
 
+    function beginNodeNameEdit(labelEl) {
+      const nodeId = labelEl?.dataset?.nodeId || "";
+      const node = nodes.find((item) => String(item.id) === String(nodeId));
+      if (!node) return;
+      const currentName = String(node.name || node.id || "").trim();
+      const input = document.createElement("input");
+      input.className = "node-name-input";
+      input.dataset.nodeNameInput = "1";
+      input.dataset.nodeId = nodeId;
+      input.maxLength = 80;
+      input.value = currentName;
+      input.title = "回车或点旁边保存，Esc 取消";
+      labelEl.replaceWith(input);
+      input.focus();
+      input.select();
+      let finished = false;
+      const finish = async (shouldSave) => {
+        if (finished) return;
+        finished = true;
+        const nextName = input.value.replace(/\s+/g, " ").trim().slice(0, 80);
+        if (!shouldSave || !nextName || nextName === currentName) {
+          renderNodes();
+          return;
+        }
+        try {
+          await saveNodeName(nodeId, nextName);
+        } catch (error) {
+          alert(friendlyError(error, "节点名称保存失败"));
+          renderNodes();
+        }
+      };
+      input.addEventListener("blur", () => finish(true));
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          input.blur();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          finish(false);
+        }
+      });
+    }
+
+    refs.nodeList.addEventListener("dblclick", (event) => {
+      const nameEl = event.target.closest("[data-node-name-edit]");
+      if (!nameEl) return;
+      event.preventDefault();
+      event.stopPropagation();
+      beginNodeNameEdit(nameEl);
+    });
+
     refs.nodeList.addEventListener("click", (event) => {
-      if (event.target.closest("[data-node-profile-select], [data-node-stream-select], [data-node-video-select]")) {
+      if (event.target.closest("[data-node-profile-select], [data-node-stream-select], [data-node-video-select], [data-node-name-input]")) {
         event.stopPropagation();
-        return;
-      }
-      const noteButton = event.target.closest("[data-node-note]");
-      if (noteButton) {
-        event.preventDefault();
-        event.stopPropagation();
-        const node = nodes.find((item) => String(item.id) === String(noteButton.dataset.nodeId));
-        if (!node) return;
-        const current = String(node.note || "");
-        const next = prompt(`节点：${node.name || node.id}\n\n完整备注：${current || "（暂无）"}\n\n可在下方编辑备注：`, current);
-        if (next === null || next === current) return;
-        postJson("/api/nodes/note", { node_id: node.id, note: next }).then(async (data) => {
-          if (!data.ok) {
-            log(`备注保存失败：${data.message || node.id}`);
-            return;
-          }
-          await refreshAll();
-        });
         return;
       }
       const settingsButton = event.target.closest("[data-role-settings]");
@@ -7867,25 +7963,6 @@ def api_node_stream_lock():
         "node_id": node_id,
         "stream_lock": lock,
     })
-
-
-@APP.post("/api/nodes/note")
-def api_node_note():
-    payload = request.get_json(silent=True) or {}
-    node_id = str(payload.get("node_id") or "").strip()
-    note = str(payload.get("note") or "").replace("\r", " ").replace("\n", " ").strip()
-    if len(note) > 500:
-        return jsonify({"ok": False, "message": "note is limited to 500 characters"}), 400
-    nodes = load_nodes()
-    for node in nodes:
-        if str(node.get("id") or "") == node_id:
-            if note:
-                node["note"] = note
-            else:
-                node.pop("note", None)
-            save_nodes(nodes)
-            return jsonify({"ok": True, "node_id": node_id, "note": note})
-    return jsonify({"ok": False, "message": "node not found"}), 404
 
 
 @APP.post("/api/nodes/name")
