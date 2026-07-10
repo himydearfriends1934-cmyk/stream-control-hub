@@ -363,6 +363,24 @@ class YouTubeAPIClient:
         payload = response.json()
         return payload if isinstance(payload, dict) else {}
 
+    def _paged_items(
+        self,
+        resource: str,
+        *,
+        params: dict[str, Any],
+        max_pages: int = 10,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        page_params = dict(params)
+        for _ in range(max(1, max_pages)):
+            payload = self._request("GET", resource, params=page_params)
+            items.extend(item for item in payload.get("items") or [] if isinstance(item, dict))
+            token = str(payload.get("nextPageToken") or "").strip()
+            if not token:
+                break
+            page_params["pageToken"] = token
+        return items
+
     def channel(self) -> dict[str, Any]:
         payload = self._request("GET", "channels", params={"part": "id,snippet", "mine": "true"})
         items = payload.get("items") or []
@@ -373,13 +391,12 @@ class YouTubeAPIClient:
         return {"id": str(item.get("id") or ""), "title": str(snippet.get("title") or "")}
 
     def list_streams(self) -> list[dict[str, Any]]:
-        payload = self._request(
-            "GET",
+        items = self._paged_items(
             "liveStreams",
             params={"part": "id,snippet,cdn,contentDetails,status", "mine": "true", "maxResults": 50},
         )
         result = []
-        for item in payload.get("items") or []:
+        for item in items:
             snippet = item.get("snippet") or {}
             cdn = item.get("cdn") or {}
             status = item.get("status") or {}
@@ -399,8 +416,7 @@ class YouTubeAPIClient:
         return result
 
     def list_broadcasts(self) -> list[dict[str, Any]]:
-        payload = self._request(
-            "GET",
+        items = self._paged_items(
             "liveBroadcasts",
             params={
                 "part": "id,snippet,status,contentDetails,monetizationDetails",
@@ -409,7 +425,7 @@ class YouTubeAPIClient:
             },
         )
         result = []
-        for item in payload.get("items") or []:
+        for item in items:
             snippet = item.get("snippet") or {}
             status = item.get("status") or {}
             details = item.get("contentDetails") or {}

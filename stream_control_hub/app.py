@@ -8001,6 +8001,32 @@ def youtube_node_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] |
     return node, None
 
 
+def youtube_profile_active_streams(profile_id: str) -> list[dict[str, str]]:
+    target = safe_youtube_profile_id(profile_id or YOUTUBE_DEFAULT_PROFILE_ID)
+    active = []
+    for node in load_nodes():
+        if not node.get("enabled", True):
+            continue
+        status = request_node_json(node, "/api/status", timeout=4)
+        if not status.get("ok"):
+            continue
+        stream = status.get("stream") or {}
+        stream_config = status.get("stream_config") or {}
+        if not (stream.get("running") or status.get("stream_desired")):
+            continue
+        if stream_config.get("stream_output_mode") != "youtube_api":
+            continue
+        running_profile = safe_youtube_profile_id(str(stream_config.get("youtube_profile_id") or YOUTUBE_DEFAULT_PROFILE_ID))
+        if running_profile != target:
+            continue
+        active.append({
+            "node_id": str(node.get("id") or ""),
+            "node_name": str(node.get("name") or node.get("id") or ""),
+            "youtube_stream_id": str(stream_config.get("youtube_stream_id") or ""),
+        })
+    return active
+
+
 @APP.get("/api/youtube/profiles")
 def api_youtube_profiles():
     config = load_youtube_profiles_config()
@@ -8147,6 +8173,8 @@ def api_nodes_youtube_config():
     existing = None
     with suppress(Exception):
         existing = youtube_profile_by_id(profile_id)
+    if not client_secret and existing:
+        client_secret = str(existing.get("client_secret") or "")
     profile = save_youtube_profile_config(
         profile_id,
         {
@@ -8255,6 +8283,15 @@ def api_nodes_youtube_oauth_revoke():
         return error
     assert node is not None
     profile_id, client = youtube_client_from_payload(payload)
+    active_streams = youtube_profile_active_streams(profile_id)
+    if active_streams:
+        labels = ", ".join(item["node_name"] or item["node_id"] for item in active_streams[:5])
+        return jsonify({
+            "ok": False,
+            "profile_id": profile_id,
+            "active_streams": active_streams,
+            "message": f"Stop active YouTube API streams before revoking this profile: {labels}",
+        }), 409
     try:
         client.revoke()
     except Exception as exc:

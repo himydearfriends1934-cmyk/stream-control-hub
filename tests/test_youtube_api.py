@@ -119,6 +119,26 @@ class YouTubeAPIClientTests(unittest.TestCase):
 
         self.assertEqual(recorded, [("GET", "liveStreams", 1)])
 
+    def test_stream_list_reads_paginated_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = YouTubeAPIClient(client_id="client-id", credential_path=Path(tmp) / "credentials.json")
+            responses = [
+                FakeResponse({
+                    "nextPageToken": "page-2",
+                    "items": [{"id": "stream-1", "snippet": {"title": "First"}}],
+                }),
+                FakeResponse({
+                    "items": [{"id": "stream-2", "snippet": {"title": "Second"}}],
+                }),
+            ]
+            with patch.object(client, "_access_token_value", return_value="access-token"), patch(
+                "stream_control_hub.youtube_api.requests.request", side_effect=responses
+            ) as request:
+                streams = client.list_streams()
+
+        self.assertEqual([item["id"] for item in streams], ["stream-1", "stream-2"])
+        self.assertEqual(request.call_args_list[1].kwargs["params"]["pageToken"], "page-2")
+
     def test_prepare_creates_stream_broadcast_and_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = YouTubeAPIClient(client_id="client-id", credential_path=Path(tmp) / "credentials.json")
@@ -316,6 +336,86 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(response.get_json()["mode"], "hub")
         self.assertEqual(configured_client_id, "client-id")
         self.assertIn("YOUTUBE_CLIENT_ID=client-id", env_text)
+
+    def test_hub_youtube_config_preserves_existing_secret_when_blank(self):
+        from stream_control_hub import app
+
+        node = {"id": "node-a", "base_url": "http://100.64.0.10:8787", "enabled": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            nodes_file = tmp_path / "nodes.json"
+            nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "YOUTUBE_PROFILES_FILE", tmp_path / "youtube_profiles.json"
+            ), patch.object(app, "YOUTUBE_USAGE_FILE", tmp_path / "youtube_usage.json"), patch.object(
+                app, "YOUTUBE_PROFILE_CREDENTIALS_DIR", tmp_path / "profile_credentials"
+            ):
+                client = app.APP.test_client()
+                first = client.post(
+                    "/api/nodes/youtube/config",
+                    json={
+                        "node_id": "node-a",
+                        "profile_id": "account-a",
+                        "client_id": "client-a.apps.googleusercontent.com",
+                        "client_secret": "keep-secret",
+                    },
+                )
+                second = client.post(
+                    "/api/nodes/youtube/config",
+                    json={
+                        "node_id": "node-a",
+                        "profile_id": "account-a",
+                        "client_id": "client-a.apps.googleusercontent.com",
+                        "client_secret": "",
+                    },
+                )
+                profile = app.youtube_profile_by_id("account-a")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(profile["client_secret"], "keep-secret")
+
+    def test_hub_refuses_to_revoke_profile_used_by_active_stream(self):
+        from stream_control_hub import app
+
+        node = {"id": "node-a", "name": "Node A", "base_url": "http://100.64.0.10:8787", "enabled": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            nodes_file = tmp_path / "nodes.json"
+            nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "YOUTUBE_PROFILES_FILE", tmp_path / "youtube_profiles.json"
+            ), patch.object(app, "YOUTUBE_USAGE_FILE", tmp_path / "youtube_usage.json"), patch.object(
+                app, "YOUTUBE_PROFILE_CREDENTIALS_DIR", tmp_path / "profile_credentials"
+            ), patch.object(
+                app,
+                "request_node_json",
+                return_value={
+                    "ok": True,
+                    "stream": {"running": True},
+                    "stream_config": {
+                        "stream_output_mode": "youtube_api",
+                        "youtube_profile_id": "account-a",
+                        "youtube_stream_id": "stream-1",
+                    },
+                },
+            ), patch.object(app.YouTubeAPIClient, "revoke") as revoke:
+                app.save_youtube_profile_config(
+                    "account-a",
+                    {
+                        "name": "Account A",
+                        "client_id": "client-a.apps.googleusercontent.com",
+                        "client_secret": "secret",
+                    },
+                )
+                response = app.APP.test_client().post(
+                    "/api/nodes/youtube/oauth/revoke",
+                    json={"node_id": "node-a", "profile_id": "account-a"},
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("active YouTube API streams", response.get_json()["message"])
+        revoke.assert_not_called()
 
     def test_hub_manages_youtube_profiles(self):
         from stream_control_hub import app
