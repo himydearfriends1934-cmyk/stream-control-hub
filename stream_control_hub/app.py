@@ -2222,6 +2222,7 @@ HTML = r"""
     let activeYouTubeProfileId = "default";
     const YOUTUBE_PROFILE_VISIBLE_SLOTS = 6;
     let editingYouTubeProfileId = "";
+    let youtubeProfileClickTimer = null;
 
     const HUB_HEIGHT_STORAGE_KEY = "streamHubHubPanelHeight";
     const HUB_PANEL_MIN_HEIGHT = 96;
@@ -3312,6 +3313,21 @@ HTML = r"""
           input.select();
         }
       }, 0);
+    }
+
+    function clearYouTubeProfileClickTimer() {
+      if (!youtubeProfileClickTimer) return;
+      window.clearTimeout(youtubeProfileClickTimer);
+      youtubeProfileClickTimer = null;
+    }
+
+    function scheduleYouTubeProfileSelect(profileId = "default") {
+      clearYouTubeProfileClickTimer();
+      youtubeProfileClickTimer = window.setTimeout(() => {
+        youtubeProfileClickTimer = null;
+        refs.youtubeProfileSelect.value = profileId || "default";
+        selectYouTubeProfile();
+      }, 180);
     }
 
     async function saveYouTubeProfileName(nextName, profileId = editingYouTubeProfileId || selectedYouTubeProfileId()) {
@@ -5905,12 +5921,14 @@ HTML = r"""
       if (event.target.closest("[data-youtube-profile-edit]")) return;
       const chip = event.target.closest("[data-youtube-profile-chip]");
       if (!chip) return;
-      refs.youtubeProfileSelect.value = chip.dataset.youtubeProfileChip || "default";
-      selectYouTubeProfile();
+      if (event.detail > 1) return;
+      scheduleYouTubeProfileSelect(chip.dataset.youtubeProfileChip || "default");
     });
     refs.youtubeProfileQuickBar.addEventListener("dblclick", (event) => {
+      clearYouTubeProfileClickTimer();
       const chip = event.target.closest("[data-youtube-profile-chip]");
       if (!chip) return;
+      event.preventDefault();
       refs.youtubeProfileSelect.value = chip.dataset.youtubeProfileChip || "default";
       applyYouTubeProfileToForm(currentYouTubeProfile() || {});
       setYouTubeProfileNameEditing(chip.dataset.youtubeProfileChip || "default");
