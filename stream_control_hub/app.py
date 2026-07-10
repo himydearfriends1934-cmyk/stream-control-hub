@@ -1007,10 +1007,10 @@ HTML = r"""
     }
     .monitor-panel h4 { margin: 0 0 5px; font-size: 13px; color: #d6fff0; }
     .node-table-card { min-height: 0; overflow: hidden; }
-    .node-role-split { display: grid; grid-template-rows: minmax(120px, 1fr) 12px minmax(96px, var(--hub-panel-height, 150px)); height: var(--node-role-split-height, auto); min-height: 330px; font-size: 14px; overflow: hidden; }
-    .node-role-pane { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
-    .node-role-pane .node-table { max-height: none; min-height: 0; overflow: auto; }
-    .node-role-splitter { position: relative; cursor: ns-resize; touch-action: none; user-select: none; }
+    .node-role-split { display: block; height: var(--node-role-split-height, auto); min-height: 330px; font-size: 14px; overflow-y: auto; overflow-x: hidden; padding-right: 3px; }
+    .node-role-pane { min-height: 0; display: block; }
+    .node-role-pane .node-table { max-height: none; min-height: 0; overflow: visible; padding-right: 0; }
+    .node-role-splitter { position: relative; height: 12px; cursor: default; touch-action: none; user-select: none; pointer-events: none; }
     .node-role-splitter::before { content: ""; position: absolute; left: 0; right: 0; top: 5px; height: 2px; border-radius: 2px; background: var(--line); }
     .node-role-splitter:hover::before, .node-role-splitter.dragging::before { height: 4px; top: 4px; background: var(--accent); box-shadow: 0 0 8px rgba(54,211,153,.45); }
     .node-table-toolbar {
@@ -1047,6 +1047,7 @@ HTML = r"""
       background: rgba(19, 32, 28, 0.96);
       border-bottom: 1px solid rgba(49, 89, 76, 0.55);
     }
+    .node-role-split .node-table-head { position: static; }
     .node-row {
       min-height: 68px;
       padding: 6px 8px;
@@ -1387,7 +1388,7 @@ HTML = r"""
             <h3 class="role-group-title"><span>Agent 组 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>推流 / 媒体 / Agent 更新</small></h3>
             <div class="node-table" id="nodeList">加载中...</div>
           </div>
-          <div class="node-role-splitter" id="nodeRoleSplitter" role="separator" aria-orientation="horizontal" aria-label="拖动调节 Agent 与 Hub 组高度" tabindex="0"></div>
+          <div class="node-role-splitter" id="nodeRoleSplitter" aria-hidden="true"></div>
           <div class="role-group node-role-pane">
             <h3 class="role-group-title"><span>Hub 组 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></h3>
             <div class="node-table" id="hubNodeList">加载中...</div>
