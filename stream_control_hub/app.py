@@ -1053,7 +1053,63 @@ HTML = r"""
     .wizard-step small { color: var(--muted); line-height: 1.35; }
     .wizard-step.done { border-color: rgba(54, 211, 153, 0.9); }
     .wizard-step.fail { border-color: rgba(251, 113, 133, 0.85); }
-    .wizard-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+    .wizard-actions {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(140px, 1fr)) minmax(96px, .7fr);
+      gap: 8px;
+      align-items: start;
+    }
+    .youtube-more-actions {
+      position: relative;
+      min-width: 0;
+    }
+    .youtube-more-actions summary {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-2);
+      color: var(--text);
+      font-weight: 900;
+      cursor: pointer;
+      user-select: none;
+    }
+    .youtube-more-actions summary::-webkit-details-marker { display: none; }
+    .youtube-more-actions summary::after {
+      content: "v";
+      font-size: 11px;
+      line-height: 1;
+      color: var(--muted);
+    }
+    .youtube-more-actions[open] summary {
+      border-color: var(--accent);
+      filter: brightness(1.08);
+    }
+    .youtube-more-menu {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 6px);
+      z-index: 35;
+      display: grid;
+      gap: 5px;
+      width: min(220px, 70vw);
+      padding: 7px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel);
+      box-shadow: 0 12px 28px rgba(0,0,0,.35);
+    }
+    .youtube-more-menu button {
+      width: 100%;
+      min-height: 36px;
+      padding: 8px 10px;
+      text-align: left;
+      border-radius: 8px;
+    }
     .wizard-status {
       min-height: 128px;
       max-height: 240px;
@@ -1501,6 +1557,7 @@ HTML = r"""
       .youtube-control-strip { grid-template-columns: 1fr; }
       .youtube-agent-card { flex-basis: min(220px, 70vw); }
       .profile-chip { flex-basis: min(190px, 70vw); }
+      .youtube-more-menu { position: static; width: 100%; margin-top: 6px; }
     }
   </style>
 </head>
@@ -1966,12 +2023,17 @@ HTML = r"""
         </div>
       </div>
       <div class="wizard-actions">
-        <button id="youtubeRefreshBtn">检查 / 刷新</button>
         <button id="youtubeSaveConfigBtn">保存 API 配置</button>
         <button class="primary" id="youtubeAuthorizeBtn">连接 YouTube</button>
         <button id="youtubePrepareBtn">创建并绑定直播</button>
-        <button id="youtubeHealthBtn">读取健康反馈</button>
-        <button class="danger" id="youtubeRevokeBtn">断开授权</button>
+        <details class="youtube-more-actions" id="youtubeMoreActions">
+          <summary>更多</summary>
+          <div class="youtube-more-menu">
+            <button id="youtubeRefreshBtn">检查 / 刷新</button>
+            <button id="youtubeHealthBtn">读取健康反馈</button>
+            <button class="danger" id="youtubeRevokeBtn">断开授权</button>
+          </div>
+        </details>
       </div>
       <div class="wizard-status" id="youtubeWizardLog">
         <div class="wizard-status-line">选择 Profile 和 Agent 后检查状态。首次使用只需上传 client_secret_*.json。</div>
@@ -2132,6 +2194,7 @@ HTML = r"""
       youtubePrepareBtn: document.getElementById("youtubePrepareBtn"),
       youtubeHealthBtn: document.getElementById("youtubeHealthBtn"),
       youtubeRevokeBtn: document.getElementById("youtubeRevokeBtn"),
+      youtubeMoreActions: document.getElementById("youtubeMoreActions"),
       updateBox: document.getElementById("updateBox"),
       uploadBox: document.getElementById("uploadBox"),
       logBox: document.getElementById("logBox"),
@@ -5707,9 +5770,13 @@ HTML = r"""
     document.addEventListener("click", (event) => {
       if (!event.target.closest("#mediaContextMenu")) hideMediaMenu();
       if (!event.target.closest(".quick-group-manage")) setQuickGroupManageOpen(false);
+      if (refs.youtubeMoreActions?.open && !event.target.closest("#youtubeMoreActions")) refs.youtubeMoreActions.open = false;
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") hideMediaMenu();
+      if (event.key === "Escape") {
+        hideMediaMenu();
+        if (refs.youtubeMoreActions) refs.youtubeMoreActions.open = false;
+      }
     });
     const THEME_STORAGE_KEY = "streamHubTheme";
     const TITLE_STORAGE_KEY = "streamHubCustomTitle";
@@ -5882,6 +5949,10 @@ HTML = r"""
     refs.youtubePrepareBtn.addEventListener("click", prepareYouTubeBroadcast);
     refs.youtubeHealthBtn.addEventListener("click", readYouTubeHealth);
     refs.youtubeRevokeBtn.addEventListener("click", revokeYouTubeAuthorization);
+    refs.youtubeMoreActions.addEventListener("click", (event) => {
+      const button = event.target.closest(".youtube-more-menu button");
+      if (button) window.setTimeout(() => { refs.youtubeMoreActions.open = false; }, 0);
+    });
     refs.tailscaleUseExistingIpBtn.addEventListener("click", connectExistingTailscaleIp);
     refs.copyAgentInstallBtn.addEventListener("click", copyAgentInstallCommand);
     if (refs.pushSelectedBtn) refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
