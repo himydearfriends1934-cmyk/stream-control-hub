@@ -1311,7 +1311,7 @@ HTML = r"""
     }
     .monitor-panel h4 { margin: 0 0 5px; font-size: 13px; color: #d6fff0; }
     .node-table-card { min-height: 0; overflow: hidden; }
-    .node-role-split { display: block; height: var(--node-role-split-height, auto); min-height: 330px; font-size: 14px; overflow-y: auto; overflow-x: auto; padding-right: 3px; }
+    .node-role-split { display: block; height: var(--node-role-split-height, auto); min-height: 330px; font-size: 14px; overflow-y: auto; overflow-x: hidden; padding-right: 3px; }
     .node-role-pane { min-height: 0; display: block; }
     .node-role-pane .node-table { max-height: none; min-height: 0; overflow: visible; padding-right: 0; }
     .node-role-splitter { position: relative; height: 12px; cursor: default; touch-action: none; user-select: none; pointer-events: none; }
@@ -1336,10 +1336,10 @@ HTML = r"""
     .node-table-head,
     .node-row {
       display: grid;
-      grid-template-columns: 22px minmax(760px, 2.25fr) 64px 72px minmax(220px, .7fr);
+      grid-template-columns: 22px minmax(0, 1fr) 64px 72px minmax(220px, .72fr);
       gap: 6px;
       align-items: center;
-      min-width: 1110px;
+      min-width: 0;
     }
     .node-table-head {
       position: sticky;
@@ -1381,26 +1381,25 @@ HTML = r"""
     .node-row.offline-node:hover, .node-space-ring-item.offline-node:hover { opacity: .9; }
     .node-name { min-width: 0; display: grid; gap: 3px; align-content: center; }
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .node-agent-line { display: flex; gap: 7px; align-items: center; min-width: 0; }
-    .node-name-edit { flex: 0 0 140px; min-width: 100px; cursor: text; }
+    .node-agent-line { display: grid; grid-template-columns: minmax(105px, .72fr) minmax(0, 2.25fr); gap: 7px; align-items: center; min-width: 0; }
+    .node-name-edit { min-width: 0; cursor: text; }
     .node-name-edit:hover { color: #fff; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-    .node-name-input { flex: 0 0 140px; min-width: 100px; height: 30px; padding: 4px 7px; border-radius: 7px; border: 1px solid #ff3b4f; background: rgba(7,18,14,.78); color: #fff; font-weight: 900; outline: none; }
+    .node-name-input { width: 100%; min-width: 100px; height: 30px; padding: 4px 7px; border-radius: 7px; border: 1px solid #ff3b4f; background: rgba(7,18,14,.78); color: #fff; font-weight: 900; outline: none; }
     .node-name small { color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-live-locks {
       display: grid;
-      grid-template-columns: minmax(145px, .9fr) minmax(190px, 1.1fr) minmax(260px, 1.45fr);
-      gap: 6px;
+      grid-template-columns: minmax(0, .9fr) minmax(0, 1fr) minmax(0, 1.2fr);
+      gap: 5px;
       align-items: center;
       flex: 1 1 auto;
       min-width: 0;
     }
     .node-live-field {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      gap: 5px;
-      align-items: center;
+      gap: 2px;
+      align-items: stretch;
       min-width: 0;
-      padding: 3px 5px;
+      padding: 3px 4px;
       border: 1px solid rgba(54, 211, 153, .22);
       border-radius: 8px;
       background: rgba(7,18,14,.42);
@@ -1409,7 +1408,7 @@ HTML = r"""
       color: var(--muted);
       font-size: 11px;
       font-weight: 900;
-      line-height: 1;
+      line-height: 1.05;
       white-space: nowrap;
       color: #9fffe0;
     }
@@ -1418,9 +1417,9 @@ HTML = r"""
       width: 100%;
       min-width: 0;
       min-height: 28px;
-      padding: 4px 7px;
+      padding: 4px 6px;
       border-radius: 7px;
-      font-size: 12px;
+      font-size: 11px;
       line-height: 1.2;
       font-weight: 850;
       color: #f3fff9;
@@ -1592,7 +1591,7 @@ HTML = r"""
       .node-table { max-height: none; }
       .node-table-head { display: none; }
       .node-row { grid-template-columns: 24px minmax(0, 1fr); }
-      .node-agent-line { flex-wrap: wrap; }
+      .node-agent-line { grid-template-columns: 1fr; }
       .node-live-locks { grid-template-columns: 1fr; flex-basis: 100%; }
       .node-state, .row-actions { grid-column: 2; }
       .wizard-grid, .wizard-role-grid, .wizard-existing-grid, .wizard-step-grid, .wizard-actions { grid-template-columns: 1fr; }
