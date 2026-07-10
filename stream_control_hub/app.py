@@ -1586,7 +1586,7 @@ HTML = r"""
           <h2>GitHub 更新</h2>
           <p>每天首次打开自动检查；有新版本会弹窗确认。也可复制 GitHub 一键安装/升级命令。</p>
           <div class="actions">
-            <button id="checkUpdatesBtn">检查 GitHub 更新</button>
+            <button id="checkUpdatesBtn">检查并更新</button>
             <button id="showInstallCommandsBtn">显示安装命令</button>
             <button id="copyHubInstallBtn">复制 Hub 命令</button>
             <button id="copyAgentInstallQuickBtn">复制 Agent 命令</button>
@@ -3879,8 +3879,91 @@ HTML = r"""
       if (!silent) refs.updateBox.textContent = "正在检查 GitHub...";
       const resp = await fetch("/api/github/check", { method: "POST", headers: authHeaders() });
       const data = await resp.json();
-      if (!silent) refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      if (!silent) refs.updateBox.textContent = renderGithubUpdateSummary(data);
       return data;
+    }
+
+    function renderGithubUpdateSummary(data) {
+      if (!data?.ok) {
+        return [
+          "GitHub 更新检查失败",
+          data?.message || data?.fetch?.stderr || data?.fetch?.stdout || "请检查 VPS 到 GitHub 的网络连接。",
+        ].join("\n\n");
+      }
+      return [
+        data.has_updates ? "发现 GitHub 新版本" : "当前已经是最新版本",
+        "",
+        `当前版本：${data.local_label || data.local || "--"}`,
+        `最新版本：${data.remote_label || data.remote || "--"}`,
+        `落后提交：${data.behind_count ?? "--"}`,
+        `本地超前：${data.ahead_count ?? "--"}`,
+        data.diff_stat ? `\n更新内容：\n${data.diff_stat}` : "",
+      ].filter(Boolean).join("\n");
+    }
+
+    async function promptHubUpgrade(data, { manual = false } = {}) {
+      refs.updateBox.textContent = renderGithubUpdateSummary(data);
+      if (!data?.ok) {
+        if (manual) {
+          await showChoiceDialog({
+            title: "GitHub 更新检查失败",
+            subtitle: "VPS 无法完成版本检查",
+            icon: "!",
+            message: data?.message || data?.fetch?.stderr || "请检查 VPS 到 GitHub 的网络连接。",
+            choices: [{ label: "显示安装命令", value: "commands" }],
+          }).then((choice) => {
+            if (choice === "commands") return showInstallCommands();
+          });
+        }
+        return;
+      }
+      if (!data.has_updates) {
+        uiMessage("当前 Hub 已经是 GitHub 最新版本。");
+        if (manual) {
+          await showChoiceDialog({
+            title: "已经是最新版本",
+            subtitle: data.local_label || "main 已同步",
+            icon: "✓",
+            message: "当前 Hub 与 GitHub main 一致，不需要升级。",
+            choices: [{ label: "知道了", value: "ok", className: "primary" }],
+          });
+        }
+        return;
+      }
+      const choice = await showChoiceDialog({
+        title: "发现 GitHub 新版本",
+        subtitle: data.remote_label || "main 有更新",
+        icon: "↻",
+        message: [
+          `当前版本：${data.local_label || data.local || "--"}`,
+          `最新版本：${data.remote_label || data.remote || "--"}`,
+          data.behind_count ? `落后提交：${data.behind_count}` : "",
+          "",
+          "是否现在升级当前 Hub？VPS 会在后台从 GitHub main 拉取最新代码并重启 Hub 服务；不需要你登录 VPS。",
+        ].filter(Boolean).join("\n"),
+        choices: [
+          { label: "确认升级到最新版", value: "upgrade", className: "primary" },
+          { label: "显示安装命令", value: "commands" },
+          { label: "稍后再说", value: "skip" },
+        ],
+      });
+      if (choice === "upgrade") await upgradeCurrentHubFromPrompt(data);
+      if (choice === "commands") await showInstallCommands();
+    }
+
+    async function checkUpdatesAndPrompt() {
+      refs.checkUpdatesBtn.dataset.busy = "1";
+      refs.checkUpdatesBtn.disabled = true;
+      uiMessage("VPS 正在向 GitHub 检查最新版本。");
+      try {
+        const data = await checkUpdates({ silent: false });
+        await promptHubUpgrade(data, { manual: true });
+      } catch (error) {
+        refs.updateBox.textContent = friendlyError(error, "GitHub 更新检查失败");
+      } finally {
+        delete refs.checkUpdatesBtn.dataset.busy;
+        refs.checkUpdatesBtn.disabled = false;
+      }
     }
 
     async function latestInstallCommands() {
@@ -3931,10 +4014,26 @@ HTML = r"""
     }
 
     async function upgradeCurrentHubFromPrompt(checkData) {
-      refs.updateBox.textContent = JSON.stringify(checkData, null, 2);
+      refs.updateBox.textContent = "正在提交后台升级任务...";
+      uiMessage("正在让 VPS 后台升级 Hub，请不要重复点击。");
       const resp = await fetch("/api/upgrade", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({}) });
       const data = await resp.json();
-      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      refs.updateBox.textContent = data.ok
+        ? [
+            "升级任务已提交",
+            "",
+            `当前版本：${checkData?.local_label || checkData?.local || "--"}`,
+            `目标版本：${checkData?.remote_label || checkData?.remote || "--"}`,
+            `后台任务：${data.result?.unit || "--"}`,
+            "",
+            "VPS 会自动从 GitHub main 拉取最新代码并重启 Hub。页面可能会短暂断开，稍后刷新即可。",
+          ].join("\n")
+        : [
+            "升级任务提交失败",
+            "",
+            data.message || resp.statusText || "请检查当前 Hub 是否为 systemd + Git 安装。",
+          ].join("\n");
+      uiMessage(data.ok ? "升级任务已提交，Hub 重启后刷新页面即可。" : "升级任务提交失败，请查看更新模块详情。");
       log(data.ok ? "当前 Hub GitHub 升级任务已提交" : `当前 Hub 升级失败：${data.message || resp.statusText}`);
     }
 
@@ -3952,24 +4051,7 @@ HTML = r"""
         return;
       }
       if (!data?.ok || !data.has_updates) return;
-      const choice = await showChoiceDialog({
-        title: "发现 GitHub 新版本",
-        subtitle: data.remote_label || "main 有更新",
-        icon: "↻",
-        message: [
-          `当前版本：${data.local_label || data.local || "--"}`,
-          `最新版本：${data.remote_label || data.remote || "--"}`,
-          "",
-          "是否现在升级当前 Hub？升级会从 GitHub main 拉取最新代码并重启 Hub 服务；Agent 不会被静默更新。",
-        ].join("\n"),
-        choices: [
-          { label: "现在升级当前 Hub", value: "upgrade", className: "primary" },
-          { label: "显示安装命令", value: "commands" },
-          { label: "今天先不更新", value: "skip" },
-        ],
-      });
-      if (choice === "upgrade") await upgradeCurrentHubFromPrompt(data);
-      if (choice === "commands") await showInstallCommands();
+      await promptHubUpgrade(data);
     }
 
     async function showPolicy() {
@@ -5357,7 +5439,7 @@ HTML = r"""
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.mediaInput.addEventListener("change", updatePrimaryActionStates);
     refs.cancelUploadBtn.addEventListener("click", cancelActiveUpload);
-    refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
+    refs.checkUpdatesBtn.addEventListener("click", checkUpdatesAndPrompt);
     refs.showInstallCommandsBtn.addEventListener("click", showInstallCommands);
     refs.copyHubInstallBtn.addEventListener("click", () => copyInstallCommand("hub"));
     refs.copyAgentInstallQuickBtn.addEventListener("click", () => copyInstallCommand("agent"));
