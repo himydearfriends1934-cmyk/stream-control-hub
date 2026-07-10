@@ -73,7 +73,7 @@ Agent updates preserve the existing bind host, port, Agent name, Hub pairing URL
 
 Each Agent row in the Hub shows its current Git revision and has its own `升级 / 安装` action. The action schedules an independent systemd upgrade job on that Agent, pulls GitHub `main`, runs the standard installer, and restarts only that Agent. Older copied deployments without Git metadata are bootstrapped in place while preserving `.agent.env` and `agent_data`. The Hub also remembers the last viewed Agent in browser-local storage and restores it on the next visit.
 
-The enlarged node-management area separates `Agent 组` and `Hub 组`. Each VPS can run both roles independently: Agent uses port `8787`, Hub uses `8788`. Enabled roles show their Git version and can be upgraded individually; disabled roles are shown in gray and require an explicit security confirmation before activation. Clicking an enabled Hub switches the browser to that Hub. Background Hub installation suppresses control-token output from systemd logs.
+The enlarged node-management area separates `Agent 节点` and `Hub 节点`. Each Agent row can lock a YouTube Profile, reusable live stream, and video independently; each VPS can still run both roles independently: Agent uses port `8787`, Hub uses `8788`. Enabled roles show their Git version and can be upgraded individually; disabled roles are shown in gray and require an explicit security confirmation before activation. Clicking an enabled Hub switches the browser to that Hub. Background Hub installation suppresses control-token output from systemd logs.
 
 When `STREAM_AGENT_CONTROL_HUB` points to the Hub's Tailscale URL, the Agent trusts API traffic only from that exact Tailscale source IP. In the Hub Tailscale wizard, choose `新增 Agent（仅输入 IP）`, enter the Agent's `100.x` address, and connect. Other tailnet peers still need the per-Agent control token.
 
@@ -201,8 +201,8 @@ The Hub is a coordinator, not the media warehouse. Browser uploads go straight t
 - Public routes must pass `/api/upload-probe` and the minimum speed threshold before large chunks are sent.
 - Uploads and Agent-to-Agent sharing are public-only. If no public address is configured, the public probe fails, or a public transfer is interrupted, the operation stops with an explicit error and never falls back to the Tailscale/internal `base_url`.
 - Each push writes a token-free audit event with policy, route, probe, speed, fallback, and cleanup details.
-- The global media library aggregates every online Agent, sorts videos by upload time, supports persistent groups, and shows per-node disk usage.
-- Uploads are assigned to the selected group and still go directly to the currently selected Agent.
+- The global media library aggregates every online Agent, sorts videos by upload time, filters by YouTube Profile, and shows per-node disk usage.
+- Uploads inherit the selected Agent's YouTube Profile and still go directly to the currently selected Agent.
 - Smart Start can select any grouped library item. If the target Agent has no local copy, the Hub copies one from an online source Agent over the public-only transfer route before streaming.
 - Media filenames preserve Unicode, including Chinese, Japanese, spaces, and full-width punctuation; only path/control characters and unsafe ASCII filename characters are removed.
 - Every Agent-to-Agent copy is verified by SHA-256 and size. Verified source/new-copy pairs coexist for 72 hours; after that, automatic cleanup rechecks that both complete copies still exist before deleting the older source copy.
@@ -357,7 +357,7 @@ Linux Hub 和 Headless Agent 一键安装脚本在传入 `TAILSCALE_AUTH_KEY=...
 
 ### 推流说明
 
-资源管理器会汇总所有在线 Agent 的视频并按上传时间倒序显示，支持分组新增、改名、删除和视频归组，同时用条形图显示每个节点的磁盘已用与剩余空间。上传仍以当前选中的 Agent 为目标，并可在上传前选择分组。Smart Start 可以从任意分组选择视频；若当前开播节点没有该视频，Hub 会先从拥有副本的在线节点通过公网复制一份，再启动推流。中文、日文、空格和全角标点文件名会原样保留。
+资源管理器会汇总所有在线 Agent 的视频并按上传时间倒序显示，直接按 YouTube Profile 过滤和归类；Profile 名称与 YouTube API 模块共享，双击即可改名，以最后一次保存为准。上传仍以当前选中的 Agent 为目标，并自动归到该 Agent 绑定的 Profile。Smart Start 可以从任意 Profile 选择视频；若当前开播节点没有该视频，Hub 会先从拥有副本的在线节点通过公网复制一份，再启动推流。中文、日文、空格和全角标点文件名会原样保留。
 
 Agent 间复制完成后会比较源文件和新副本的 SHA-256 与大小；只有完全一致才进入重复副本保留规则。两份副本共存 72 小时，到期后系统再次确认两份完整且哈希一致，才删除旧副本。自动清理和批量“清理视频”只能删除这种已验证重复副本，绝不会删除唯一文件；唯一文件只能人工逐个删除。Agent 还会记录最后开播使用时间，资源管理器按每 3 天一档降低长期未使用文件名亮度，最长档用虚线标记为人工评估候选。
 

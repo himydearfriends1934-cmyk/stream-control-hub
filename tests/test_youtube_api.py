@@ -375,6 +375,37 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(profile["client_secret"], "keep-secret")
 
+    def test_hub_saves_agent_stream_lock(self):
+        from stream_control_hub import app
+
+        node = {"id": "node-a", "base_url": "http://100.64.0.10:8787", "enabled": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            nodes_file = tmp_path / "nodes.json"
+            settings_file = tmp_path / "hub-settings.json"
+            nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "HUB_SETTINGS_FILE", settings_file
+            ), patch.object(app, "request_node_json", return_value={"ok": True, "agent": {"version": "1.0"}}):
+                client = app.APP.test_client()
+                saved = client.post(
+                    "/api/nodes/stream-lock",
+                    json={
+                        "node_id": "node-a",
+                        "youtube_stream_id": "stream-1",
+                        "video_path": "/srv/videos/show.mp4",
+                        "library_media_name": "show.mp4",
+                        "media_local": True,
+                    },
+                )
+                listed = client.get("/api/nodes")
+
+        self.assertEqual(saved.status_code, 200)
+        lock = saved.get_json()["stream_lock"]
+        self.assertEqual(lock["youtube_stream_id"], "stream-1")
+        self.assertEqual(lock["library_media_name"], "show.mp4")
+        self.assertEqual(listed.get_json()[0]["stream_lock"]["video_path"], "/srv/videos/show.mp4")
+
     def test_hub_refuses_to_revoke_profile_used_by_active_stream(self):
         from stream_control_hub import app
 
@@ -466,8 +497,14 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertIn('class="youtube-more-actions"', app.HTML)
         self.assertIn('<summary>更多</summary>', app.HTML)
         self.assertIn('class="youtube-more-menu"', app.HTML)
-        self.assertIn('<button id="youtubePrepareBtn">准备直播目标</button>', app.HTML)
+        self.assertIn('<button id="youtubePrepareBtn">创建/锁定直播目标</button>', app.HTML)
+        self.assertIn('<button class="primary" id="youtubeSmartStartBtn">Smart Start</button>', app.HTML)
         self.assertNotIn('<button id="youtubePrepareBtn">创建并绑定直播</button>', app.HTML)
+        self.assertNotIn('<button id="youtubePrepareBtn">准备直播目标</button>', app.HTML)
+        self.assertIn('class="node-live-locks"', app.HTML)
+        self.assertIn("data-node-stream-select", app.HTML)
+        self.assertIn("data-node-video-select", app.HTML)
+        self.assertIn('refs.youtubeSmartStartBtn.addEventListener("click", smartStartFromYouTubeWizard)', app.HTML)
         self.assertIn('class="wizard-field youtube-profile-row"', app.HTML)
         self.assertIn('class="youtube-profile-actions"', app.HTML)
         self.assertIn('class="wizard-field youtube-agent-row"', app.HTML)

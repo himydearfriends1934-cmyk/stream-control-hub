@@ -73,7 +73,7 @@ MIN_FREE_AFTER_UPLOAD_BYTES = int(os.environ.get("STREAM_HUB_MIN_FREE_AFTER_UPLO
 UPLOAD_POLICY_NAME = os.environ.get("STREAM_HUB_UPLOAD_POLICY_NAME", "safe-stable-fast-v1")
 PUSH_AUDIT_LOG = DATA_DIR / "push_audit.jsonl"
 HUB_SETTINGS_FILE = DATA_DIR / "hub-settings.json"
-MEDIA_GROUPS_FILE = DATA_DIR / "media-groups.json"
+MEDIA_METADATA_FILE = DATA_DIR / "media-library-meta.json"
 PUSH_AUDIT_LOG_MAX_BYTES = int(os.environ.get("STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYTES", str(5 * 1024 ** 2)))
 CONTROL_TOKEN = os.environ.get("STREAM_HUB_CONTROL_TOKEN", "").strip()
 TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_HUB_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
@@ -686,17 +686,19 @@ HTML = r"""
     .media-file-row .muted { color: var(--muted); font-size: 12px; }
     .media-library-tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .media-library-tools select { min-width: 130px; flex: 1; }
-    .quick-group-bar {
-      display: grid;
-      grid-template-columns: repeat(var(--quick-group-count, 1), minmax(0, 1fr));
+    .profile-filter-bar {
+      display: flex;
+      flex-wrap: nowrap;
       gap: 7px;
       align-items: center;
       min-width: 0;
+      overflow-x: auto;
+      scrollbar-gutter: stable;
     }
-    .quick-group-bar:empty { display: none; }
-    .quick-group-bar button {
-      width: 100%;
-      min-width: 0;
+    .profile-filter-bar:empty { display: none; }
+    .profile-filter-bar button {
+      flex: 0 0 calc((100% - 35px) / 6);
+      min-width: 130px;
       padding: 7px 9px;
       border-radius: 999px;
       font-size: 11px;
@@ -704,12 +706,8 @@ HTML = r"""
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .quick-group-bar button.active { border-color: rgba(54, 211, 153, 0.95); background: rgba(54, 211, 153, 0.14); }
-    .resource-tool-row { display: grid; grid-template-columns: 112px minmax(0, 1fr) auto auto; gap: 7px; align-items: center; }
-    .quick-group-manage { position: relative; }
-    .quick-group-manage-menu { position: absolute; right: 0; top: calc(100% + 5px); z-index: 20; display: flex; gap: 5px; min-width: 142px; padding: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); box-shadow: 0 12px 28px rgba(0,0,0,.35); }
-    .quick-group-manage-menu[hidden] { display: none; }
-    .quick-group-manage-menu button { flex: 1; padding: 7px 8px; font-size: 12px; }
+    .profile-filter-bar button.active { border-color: rgba(54, 211, 153, 0.95); background: rgba(54, 211, 153, 0.14); }
+    .resource-tool-row { display: grid; grid-template-columns: 132px minmax(0, 1fr) auto; gap: 7px; align-items: center; }
     .resource-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
     .resource-header p { margin: 0; font-size: 12px; }
     .upload-stack { display: grid; gap: 12px; align-content: start; min-width: 0; }
@@ -1055,7 +1053,7 @@ HTML = r"""
     .wizard-step.fail { border-color: rgba(251, 113, 133, 0.85); }
     .wizard-actions {
       display: grid;
-      grid-template-columns: repeat(3, minmax(140px, 1fr)) minmax(96px, .7fr);
+      grid-template-columns: repeat(4, minmax(130px, 1fr)) minmax(96px, .7fr);
       gap: 8px;
       align-items: start;
     }
@@ -1384,6 +1382,28 @@ HTML = r"""
     .node-name { min-width: 0; display: grid; gap: 2px; align-content: center; }
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-name small { color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-live-locks {
+      display: grid;
+      grid-template-columns: 44px minmax(0, 1fr);
+      gap: 3px 5px;
+      align-items: center;
+      margin-top: 4px;
+    }
+    .node-live-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      line-height: 1;
+    }
+    .node-live-select,
+    .node-profile-select {
+      min-width: 0;
+      min-height: 28px;
+      padding: 4px 7px;
+      border-radius: 7px;
+      font-size: 12px;
+      line-height: 1.2;
+    }
     .node-note { display: block; justify-self: start; max-width: 9em; padding: 2px 6px; border: 1px dashed var(--line); border-radius: 999px; color: var(--muted); background: transparent; font-size: 11px; line-height: 1.15; font-weight: 700; cursor: pointer; }
     .node-note:hover { color: var(--text); border-color: var(--accent); }
     .node-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 800; }
@@ -1716,12 +1736,12 @@ HTML = r"""
           </div>
           <div class="node-role-split" id="nodeRoleSplit">
           <div class="role-group node-role-pane">
-            <h3 class="role-group-title"><span>Agent 组 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>推流 / 媒体 / Agent 更新</small></h3>
+            <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
             <div class="node-table" id="nodeList">加载中...</div>
           </div>
           <div class="node-role-splitter" id="nodeRoleSplitter" aria-hidden="true"></div>
           <div class="role-group node-role-pane">
-            <h3 class="role-group-title"><span>Hub 组 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></h3>
+            <h3 class="role-group-title"><span>Hub 节点 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></h3>
             <div class="node-table" id="hubNodeList">加载中...</div>
           </div>
           </div>
@@ -1734,20 +1754,13 @@ HTML = r"""
           <div class="resource-header">
             <div>
               <h2>资源管理模块</h2>
-              <p>左侧管理全部节点视频：快捷分组、表格筛选、右键属性/移动分组；节点资源条形柜已取消。</p>
+              <p>按 YouTube Profile 管理全部节点视频；Profile 名称与 API 模块保持一致，双击即可改名。</p>
             </div>
             <span class="pill">resource table</span>
           </div>
           <div class="resource-tool-row">
-            <select id="mediaGroupFilter"><option value="">全部分组</option></select>
-            <div class="quick-group-bar" id="quickGroupBar"></div>
-            <div class="quick-group-manage">
-              <button id="quickGroupManageBtn">分组增减</button>
-              <div class="quick-group-manage-menu" id="quickGroupManageMenu" hidden>
-                <button id="quickGroupCreateBtn">＋增加</button>
-                <button id="quickGroupDeleteBtn">－减少</button>
-              </div>
-            </div>
+            <select id="mediaProfileFilter"><option value="">全部 Profile</option></select>
+            <div class="profile-filter-bar" id="profileQuickBar"></div>
             <button id="resourceMoreBtn">其他功能</button>
           </div>
           <div class="disk-grid" id="mediaDiskList" hidden></div>
@@ -1759,8 +1772,6 @@ HTML = r"""
             <button data-media-menu-action="use">选用开播</button>
             <button data-media-menu-action="rename">重命名 / 移动</button>
             <button class="danger" data-media-menu-action="delete">删除文件</button>
-            <div class="media-context-label">移动到分组</div>
-            <div class="media-context-targets" id="mediaGroupTargets"></div>
             <div class="media-context-label">发送到节点</div>
             <div class="media-context-targets" id="mediaSendTargets"></div>
             <div class="media-context-label">移动到节点（成功后删除源文件）</div>
@@ -1776,11 +1787,10 @@ HTML = r"""
           </div>
           <div class="card upload-card">
             <h2>上传模块</h2>
-            <p>上传保持在右侧：先选择目标 Agent，再把视频直传到该节点，可指定初始分组。</p>
+            <p>上传保持在右侧：先选择目标 Agent，再把视频直传到该节点；资源归属由目标 Agent 的 Profile 决定。</p>
             <div class="split">
               <div>
                 <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
-                <select id="uploadGroupInput"><option value="">上传到未分组</option></select>
                 <div class="actions" style="margin-top: 8px;">
                   <button class="primary" id="uploadBtn">上传到当前 Agent</button>
                   <button class="danger" id="cancelUploadBtn" disabled>取消上传</button>
@@ -2025,7 +2035,8 @@ HTML = r"""
       <div class="wizard-actions">
         <button id="youtubeSaveConfigBtn">保存 API 配置</button>
         <button class="primary" id="youtubeAuthorizeBtn">连接 YouTube</button>
-        <button id="youtubePrepareBtn">准备直播目标</button>
+        <button id="youtubePrepareBtn">创建/锁定直播目标</button>
+        <button class="primary" id="youtubeSmartStartBtn">Smart Start</button>
         <details class="youtube-more-actions" id="youtubeMoreActions">
           <summary>更多</summary>
           <div class="youtube-more-menu">
@@ -2104,24 +2115,14 @@ HTML = r"""
       mediaContextMenu: document.getElementById("mediaContextMenu"),
       mediaSendTargets: document.getElementById("mediaSendTargets"),
       mediaMoveTargets: document.getElementById("mediaMoveTargets"),
-      mediaGroupTargets: document.getElementById("mediaGroupTargets"),
-      mediaGroupFilter: document.getElementById("mediaGroupFilter"),
-      quickGroupBar: document.getElementById("quickGroupBar"),
-      quickGroupManageBtn: document.getElementById("quickGroupManageBtn"),
-      quickGroupManageMenu: document.getElementById("quickGroupManageMenu"),
-      quickGroupCreateBtn: document.getElementById("quickGroupCreateBtn"),
-      quickGroupDeleteBtn: document.getElementById("quickGroupDeleteBtn"),
+      mediaProfileFilter: document.getElementById("mediaProfileFilter"),
+      profileQuickBar: document.getElementById("profileQuickBar"),
       resourceMoreBtn: document.getElementById("resourceMoreBtn"),
       resourceToolsModal: document.getElementById("resourceToolsModal"),
       resourceToolsClose: document.getElementById("resourceToolsClose"),
-      mediaGroupAddBtn: document.getElementById("mediaGroupAddBtn"),
-      mediaGroupRenameBtn: document.getElementById("mediaGroupRenameBtn"),
-      mediaGroupDeleteBtn: document.getElementById("mediaGroupDeleteBtn"),
-      mediaAssignGroupBtn: document.getElementById("mediaAssignGroupBtn"),
       mediaCleanupAge: document.getElementById("mediaCleanupAge"),
       mediaCleanupUsage: document.getElementById("mediaCleanupUsage"),
       mediaCleanupBtn: document.getElementById("mediaCleanupBtn"),
-      uploadGroupInput: document.getElementById("uploadGroupInput"),
       mediaDiskList: document.getElementById("mediaDiskList"),
       resourceFilterChip: document.getElementById("resourceFilterChip"),
       refreshBtn: document.getElementById("refreshBtn"),
@@ -2192,6 +2193,7 @@ HTML = r"""
       youtubeSaveConfigBtn: document.getElementById("youtubeSaveConfigBtn"),
       youtubeAuthorizeBtn: document.getElementById("youtubeAuthorizeBtn"),
       youtubePrepareBtn: document.getElementById("youtubePrepareBtn"),
+      youtubeSmartStartBtn: document.getElementById("youtubeSmartStartBtn"),
       youtubeHealthBtn: document.getElementById("youtubeHealthBtn"),
       youtubeRevokeBtn: document.getElementById("youtubeRevokeBtn"),
       youtubeMoreActions: document.getElementById("youtubeMoreActions"),
@@ -2201,11 +2203,11 @@ HTML = r"""
     };
     refs.cancelUploadBtn = document.getElementById("cancelUploadBtn");
     let nodes = [];
-    let mediaLibrary = { groups: [], resources: [], nodes: [] };
+    let mediaLibrary = { resources: [], nodes: [], duplicate_retention: [] };
     let openResourceNodeId = "";
-    let resourceTableFilters = { name: "", size: "", age: "", group: "", copyNode: "", ownerNode: "" };
+    let resourceTableFilters = { name: "", size: "", age: "", profile: "", copyNode: "", ownerNode: "" };
     let resourceNameFilterTimer = null;
-    const QUICK_GROUP_LIMIT = 6;
+    const PROFILE_FILTER_VISIBLE_SLOTS = 6;
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
     function rememberSelectedNode(nodeId) {
@@ -2220,6 +2222,8 @@ HTML = r"""
     let youtubeOauthPollTimer = null;
     let youtubeProfiles = [];
     let activeYouTubeProfileId = "default";
+    let youtubeStreamsByProfile = {};
+    let youtubeStreamLoadState = {};
     const YOUTUBE_PROFILE_VISIBLE_SLOTS = 6;
     let editingYouTubeProfileId = "";
     let youtubeProfileClickTimer = null;
@@ -2751,6 +2755,57 @@ HTML = r"""
       return String(node?.youtube_profile_id || activeYouTubeProfileId || "default");
     }
 
+    function nodeStreamLock(node) {
+      return node?.stream_lock || {};
+    }
+
+    function lockedYoutubeStreamId(node) {
+      return String(nodeStreamLock(node).youtube_stream_id || node?.health?.stream_config?.youtube_stream_id || "");
+    }
+
+    function cacheYouTubeStreams(profileId, streams = []) {
+      const key = String(profileId || activeYouTubeProfileId || "default");
+      youtubeStreamsByProfile[key] = Array.isArray(streams) ? streams : [];
+      youtubeStreamLoadState[key] = "done";
+    }
+
+    function nodeYoutubeStreamOptions(node) {
+      const profileId = nodeProfileId(node);
+      const selected = lockedYoutubeStreamId(node);
+      const streams = youtubeStreamsByProfile[profileId] || [];
+      const hasSelected = selected && streams.some((item) => String(item.id) === selected);
+      const options = [`<option value="">选择直播流</option>`];
+      if (selected && !hasSelected) {
+        options.push(`<option value="${escapeHtml(selected)}" selected>已锁定：${escapeHtml(selected)}</option>`);
+      }
+      streams.forEach((item) => {
+        const status = item.stream_status || item.life_cycle_status || "ready";
+        options.push(`<option value="${escapeHtml(item.id)}" ${String(item.id) === selected ? "selected" : ""}>${escapeHtml(item.title || item.id)} (${escapeHtml(status)})</option>`);
+      });
+      if (!streams.length && !selected) {
+        options.push(`<option value="" disabled>${youtubeStreamLoadState[profileId] === "loading" ? "正在读取直播流..." : "先在 API 模块检查/刷新"}</option>`);
+      }
+      return options.join("");
+    }
+
+    function nodeVideoOptions(node) {
+      const lock = nodeStreamLock(node);
+      const selectedLibrary = String(lock.library_media_name || "");
+      const selectedVideo = String(lock.video_path || node?.health?.stream_config?.video_path || "");
+      const resources = mediaLibrary.resources || [];
+      const options = [`<option value="">选择直播视频</option>`];
+      resources.forEach((item) => {
+        const localCopy = (item.copies || []).find((copy) => String(copy.node_id) === String(node?.id || ""));
+        const sourceCopy = localCopy || (item.copies || [])[0] || {};
+        const value = localCopy?.video_path || item.name;
+        const selected = (selectedLibrary && item.name === selectedLibrary) || (!selectedLibrary && value === selectedVideo);
+        const copyHint = localCopy ? "本机" : "自动复制";
+        options.push(`<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}" data-media-local="${localCopy ? "1" : "0"}" data-source-node-id="${escapeHtml(sourceCopy.node_id || "")}" ${selected ? "selected" : ""}>[${escapeHtml(resourceProfileLabel(item))}] ${escapeHtml(item.name)} · ${copyHint}</option>`);
+      });
+      if (!resources.length) options.push(`<option value="" disabled>媒体库暂无视频</option>`);
+      return options.join("");
+    }
+
     function nodesForActiveProfile() {
       const profileId = selectedYouTubeProfileId();
       return nodes.filter((node) => node.enabled !== false && Boolean(node.roles?.agent?.enabled) && nodeProfileId(node) === profileId);
@@ -2895,8 +2950,14 @@ HTML = r"""
           <span class="node-name">
             <strong>${escapeHtml(node.name || node.id)}</strong>
             <small>${escapeHtml(h.hostname || node.id)} · 版本 ${escapeHtml(h.agent?.version || "未识别")}</small>
-            <span class="node-profile-label">Profile</span>
-            <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="选择这个 Agent 隶属的 YouTube Profile">${profileOptions(nodeProfileId(node))}</select>
+            <div class="node-live-locks">
+              <span class="node-live-label">Profile</span>
+              <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="选择这个 Agent 隶属的 YouTube Profile">${profileOptions(nodeProfileId(node))}</select>
+              <span class="node-live-label">直播流</span>
+              <select class="node-live-select" data-node-stream-select data-node-id="${escapeHtml(node.id)}" title="锁定这个 Agent 使用的 YouTube 直播流">${nodeYoutubeStreamOptions(node)}</select>
+              <span class="node-live-label">视频</span>
+              <select class="node-live-select" data-node-video-select data-node-id="${escapeHtml(node.id)}" title="锁定这个 Agent 的开播视频">${nodeVideoOptions(node)}</select>
+            </div>
             <button class="node-note" data-node-note data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(note || "点击添加备注")}">${escapeHtml(notePreview)}</button>
           </span>
           <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
@@ -2972,12 +3033,36 @@ HTML = r"""
       updatePrimaryActionStates();
     }
 
-    function mediaGroupName(id) {
-      return (mediaLibrary.groups || []).find((item) => item.id === id)?.name || "未分组";
-    }
-
     function mediaResourceByName(name) {
       return (mediaLibrary.resources || []).find((item) => String(item.name || "") === String(name || ""));
+    }
+
+    function resourceProfileIds(item) {
+      const ids = new Set();
+      (item?.copies || []).forEach((copy) => {
+        const node = nodes.find((entry) => String(entry.id) === String(copy.node_id || ""));
+        if (node) ids.add(nodeProfileId(node));
+      });
+      return [...ids].filter(Boolean);
+    }
+
+    function resourceProfileLabel(item) {
+      const ids = resourceProfileIds(item);
+      return ids.length ? ids.map(profileName).join("、") : "未绑定 Profile";
+    }
+
+    function profileFilterOptions(selectedId = "") {
+      const profiles = youtubeProfiles.length ? youtubeProfiles : [{ id: "default", name: "Default YouTube Profile" }];
+      return `<option value="">全部 Profile</option>`
+        + profiles.map((profile) => `<option value="${escapeHtml(profile.id)}" ${String(profile.id) === String(selectedId || "") ? "selected" : ""}>${escapeHtml(profile.name || profile.id)}</option>`).join("");
+    }
+
+    function renderProfileQuickBar() {
+      const profiles = youtubeProfiles.length ? youtubeProfiles : [{ id: "default", name: "Default YouTube Profile" }];
+      refs.profileQuickBar.innerHTML = profiles.map((profile, index) => {
+        const active = String(refs.mediaProfileFilter.value || "") === String(profile.id);
+        return `<button class="${active ? "active" : ""}" data-profile-filter-index="${index}" data-profile-filter-id="${escapeHtml(profile.id)}" title="双击改名">${escapeHtml(profile.name || profile.id)}</button>`;
+      }).join("");
     }
 
     function resourceHasNode(item, nodeId) {
@@ -3019,98 +3104,6 @@ HTML = r"""
       }).join("");
     }
 
-    function renderMedia() {
-      const checkedPath = selectedMediaPath();
-      const checkedNodeId = selectedMediaNodeId();
-      const groupId = refs.mediaGroupFilter.value || "";
-      const groups = mediaLibrary.groups || [];
-      const allResources = [...(mediaLibrary.resources || [])];
-      const openedNode = (mediaLibrary.nodes || []).find((item) => String(item.node_id || "") === String(openResourceNodeId));
-      const entries = allResources
-        .filter((item) => !groupId || (groupId === "__ungrouped__" ? !item.group_id : item.group_id === groupId))
-        .filter((item) => resourceHasNode(item, openResourceNodeId))
-        .sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
-      const options = `<option value="">全部分组</option><option value="__ungrouped__">未分组</option>`
-        + groups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
-      const currentFilter = refs.mediaGroupFilter.value;
-      refs.mediaGroupFilter.innerHTML = options;
-      if ([...refs.mediaGroupFilter.options].some((option) => option.value === currentFilter)) refs.mediaGroupFilter.value = currentFilter;
-      const currentUploadGroup = refs.uploadGroupInput.value;
-      refs.uploadGroupInput.innerHTML = `<option value="">上传到未分组</option>`
-        + groups.map((item) => `<option value="${escapeHtml(item.id)}">上传到：${escapeHtml(item.name)}</option>`).join("");
-      if ([...refs.uploadGroupInput.options].some((option) => option.value === currentUploadGroup)) refs.uploadGroupInput.value = currentUploadGroup;
-      refs.mediaDiskList.innerHTML = (mediaLibrary.nodes || []).map((item) => {
-        const percent = Math.max(0, Math.min(100, Number(item.percent || 0)));
-        const nodeId = String(item.node_id || "");
-        const open = nodeId && nodeId === String(openResourceNodeId);
-        const count = allResources.filter((resource) => resourceHasNode(resource, nodeId)).length;
-        return `<div class="disk-card ${open ? "open" : ""}" role="button" tabindex="0" data-resource-node-id="${escapeHtml(nodeId)}" title="双击打开 ${escapeHtml(item.node_name)} 的视频资源">
-          <div class="disk-card-head"><strong>${escapeHtml(item.node_name)}</strong><span>${item.online ? `剩余 ${escapeHtml(fmtBytes(item.free))}` : "离线"}</span></div>
-          <div class="disk-bar"><span style="width:${percent}%"></span></div>
-          <small>已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}（${percent.toFixed(1)}%） · ${count} 个视频</small>
-        </div>`;
-      }).join("");
-      refs.resourceFilterChip.innerHTML = openedNode
-        ? `<span>正在查看：${escapeHtml(openedNode.node_name)} · ${entries.length} 个视频</span><button data-clear-resource-node>显示全部资源</button>`
-        : `<span>双击容量条打开节点资源；当前显示全部节点。</span>`;
-      if (!entries.length) {
-        refs.mediaList.innerHTML = `<div class="empty-state">当前筛选下没有视频资源。</div>`;
-        return;
-      }
-      refs.mediaList.innerHTML = `
-        <div class="media-toolbar">
-          <strong>${escapeHtml(openedNode ? openedNode.node_name : "所有 Agent / Hub")} · ${escapeHtml(groupId ? mediaGroupName(groupId) : "全部资源")}</strong>
-          <small>共 ${entries.length} 个。双击打开详情；右键可查看属性、移动分组、复制/移动到节点。</small>
-        </div>
-        <div class="media-window">
-          <div class="media-window-head">
-            <span>文件名</span>
-            <span>大小</span>
-            <span>上传时间</span>
-            <span>分组 / 副本节点</span>
-          </div>
-          ${entries.map((item) => {
-            const copies = item.copies || [];
-            const copy = copies.find((entry) => String(entry.node_id) === String(openResourceNodeId || selectedNodeId)) || copies[0] || {};
-            const videoPath = copy.video_path || item.name;
-            const nodeId = String(copy.node_id || "");
-            const selected = checkedPath && checkedNodeId === nodeId && checkedPath === videoPath;
-            const current = nodeId === String(selectedNodeId);
-            const name = item.name || videoPath;
-            const copyNames = copies.map((entry) => entry.node_name || entry.node_id).join("、");
-            const lastUsedLabels = copies.map((entry) => `${entry.node_name || entry.node_id}: ${entry.last_used_label || "从未开播"}`).join("；");
-            const ageBase = Number(item.last_used_at || item.created_at || item.modified || 0);
-            const ageDays = ageBase ? Math.max(0, (Date.now() / 1000 - ageBase) / 86400) : 0;
-            const ageTier = Math.floor(ageDays / 3);
-            const nameOpacity = Math.max(0.32, 1 - ageTier * 0.13);
-            const cleanupCandidate = ageTier >= 5;
-            return `
-              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""} ${cleanupCandidate ? "cleanup-candidate" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-group-id="${escapeHtml(item.group_id || "")}" data-group-name="${escapeHtml(mediaGroupName(item.group_id))}" data-copy-names="${escapeHtml(copyNames)}" data-copy-count="${escapeHtml(copies.length)}" data-last-used-label="${escapeHtml(lastUsedLabels || "从未开播")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
-                <span style="opacity:${nameOpacity.toFixed(2)}" title="${escapeHtml(name)}｜冷却 ${ageDays.toFixed(1)} 天｜${cleanupCandidate ? "可人工评估删除" : "活跃"}">${escapeHtml(name)}</span>
-                <span class="muted">${escapeHtml(fmtBytes(item.size || 0))}</span>
-                <span class="muted">${escapeHtml(item.modified_label || "--")}</span>
-                <span title="${escapeHtml(copyNames)}">${escapeHtml(mediaGroupName(item.group_id))} · ${copies.length} 副本</span>
-                <input data-media-check type="radio" name="media" value="${escapeHtml(name)}" data-node-id="${escapeHtml(nodeId)}" data-video-path="${escapeHtml(videoPath)}" ${selected ? "checked" : ""} hidden>
-              </div>
-            `;
-          }).join("")}
-        </div>
-      `;
-    }
-
-    function renderQuickGroups(groups) {
-      const visible = groups.slice(0, QUICK_GROUP_LIMIT);
-      refs.quickGroupBar.style.setProperty("--quick-group-count", String(Math.max(1, visible.length)));
-      if (!visible.length) {
-        refs.quickGroupBar.innerHTML = `<span class="muted">暂无快捷分组</span>`;
-        return;
-      }
-      refs.quickGroupBar.innerHTML = visible.map((group, index) => {
-        const active = String(refs.mediaGroupFilter.value || "") === String(group.id);
-        return `<button class="${active ? "active" : ""}" data-quick-group-index="${index}" data-quick-group-id="${escapeHtml(group.id)}" title="右键改名">${escapeHtml(group.name)}</button>`;
-      }).join("");
-    }
-
     function resourceOwnerCopy(item) {
       const copies = item.copies || [];
       return copies.find((entry) => String(entry.node_id) === String(selectedNodeId)) || copies[0] || {};
@@ -3122,7 +3115,7 @@ HTML = r"""
       const owner = resourceOwnerCopy(item);
       const name = String(item.name || "").toLowerCase();
       if (filters.name && !name.includes(filters.name.toLowerCase())) return false;
-      if (filters.group && (filters.group === "__ungrouped__" ? item.group_id : item.group_id || "") !== (filters.group === "__ungrouped__" ? "" : filters.group)) return false;
+      if (filters.profile && !resourceProfileIds(item).includes(filters.profile)) return false;
       if (filters.copyNode && !copies.some((copy) => String(copy.node_id || "") === String(filters.copyNode))) return false;
       if (filters.ownerNode && String(owner.node_id || "") !== String(filters.ownerNode)) return false;
       const size = Number(item.size || 0);
@@ -3138,46 +3131,37 @@ HTML = r"""
     }
 
     function clearResourceFilters() {
-      resourceTableFilters = { name: "", size: "", age: "", group: "", copyNode: "", ownerNode: "" };
+      resourceTableFilters = { name: "", size: "", age: "", profile: "", copyNode: "", ownerNode: "" };
       openResourceNodeId = "";
-      refs.mediaGroupFilter.value = "";
+      refs.mediaProfileFilter.value = "";
       renderMedia();
     }
 
     function renderMedia() {
       const checkedPath = selectedMediaPath();
       const checkedNodeId = selectedMediaNodeId();
-      const groups = mediaLibrary.groups || [];
       const nodeDisks = mediaLibrary.nodes || [];
       renderNodeSpaceRings(nodeDisks);
       const allResources = [...(mediaLibrary.resources || [])];
-      const groupOptions = `<option value="">全部分组</option><option value="__ungrouped__">未分组</option>`
-        + groups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
-      const currentFilter = refs.mediaGroupFilter.value;
-      refs.mediaGroupFilter.innerHTML = groupOptions;
-      if ([...refs.mediaGroupFilter.options].some((option) => option.value === currentFilter)) refs.mediaGroupFilter.value = currentFilter;
-      else refs.mediaGroupFilter.value = "";
-      resourceTableFilters.group = refs.mediaGroupFilter.value || "";
-      const currentUploadGroup = refs.uploadGroupInput.value;
-      refs.uploadGroupInput.innerHTML = `<option value="">上传到未分组</option>`
-        + groups.map((item) => `<option value="${escapeHtml(item.id)}">上传到：${escapeHtml(item.name)}</option>`).join("");
-      if ([...refs.uploadGroupInput.options].some((option) => option.value === currentUploadGroup)) refs.uploadGroupInput.value = currentUploadGroup;
+      const currentFilter = refs.mediaProfileFilter.value;
+      refs.mediaProfileFilter.innerHTML = profileFilterOptions(currentFilter);
+      if ([...refs.mediaProfileFilter.options].some((option) => option.value === currentFilter)) refs.mediaProfileFilter.value = currentFilter;
+      else refs.mediaProfileFilter.value = "";
+      resourceTableFilters.profile = refs.mediaProfileFilter.value || "";
       if (refs.mediaDiskList) refs.mediaDiskList.innerHTML = "";
       if (refs.resourceFilterChip) refs.resourceFilterChip.hidden = true;
-      renderQuickGroups(groups);
+      renderProfileQuickBar();
 
       const entries = allResources.filter(resourceMatchesFilters).sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
-      const allGroupOptions = `<option value="">全部分组</option><option value="__ungrouped__">未分组</option>`
-        + groups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
       const nodeOptions = `<option value="">全部节点</option>`
         + nodeDisks.map((item) => `<option value="${escapeHtml(item.node_id)}">${escapeHtml(item.node_name)}</option>`).join("");
-      const selectedGroupOptions = allGroupOptions.replace('value="' + escapeHtml(resourceTableFilters.group) + '"', 'value="' + escapeHtml(resourceTableFilters.group) + '" selected');
+      const selectedProfileOptions = profileFilterOptions(resourceTableFilters.profile);
       const selectedCopyNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.copyNode) + '"', 'value="' + escapeHtml(resourceTableFilters.copyNode) + '" selected');
       const selectedOwnerNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.ownerNode) + '"', 'value="' + escapeHtml(resourceTableFilters.ownerNode) + '" selected');
       const resourceNameOptions = allResources.map((item) => `<option value="${escapeHtml(item.name || "")}"></option>`).join("");
       refs.mediaList.innerHTML = `
         <div class="media-toolbar">
-          <strong>所有节点的所有视频</strong>
+          <strong>${resourceTableFilters.profile ? profileName(resourceTableFilters.profile) : "全部 Profile"} · 所有节点视频</strong>
           <span><small>共 ${entries.length} 个。表头可筛选；右键可操作。</small> <button class="tiny" data-clear-resource-filters>全部资源</button></span>
         </div>
         <div class="media-window">
@@ -3185,7 +3169,7 @@ HTML = r"""
             <label>文件名<input data-resource-filter="name" list="resourceNameOptions" type="search" value="${escapeHtml(resourceTableFilters.name)}" placeholder="输入或点选"></label>
             <label>大小<select data-resource-filter="size"><option value="">全部</option><option value="small" ${resourceTableFilters.size === "small" ? "selected" : ""}>小于500M</option><option value="medium" ${resourceTableFilters.size === "medium" ? "selected" : ""}>500M-2G</option><option value="large" ${resourceTableFilters.size === "large" ? "selected" : ""}>大于2G</option></select></label>
             <label>上传时间<select data-resource-filter="age"><option value="">全部</option><option value="7" ${resourceTableFilters.age === "7" ? "selected" : ""}>近7天</option><option value="30" ${resourceTableFilters.age === "30" ? "selected" : ""}>近30天</option><option value="90" ${resourceTableFilters.age === "90" ? "selected" : ""}>近90天</option></select></label>
-            <label>分组<select data-resource-filter="group">${selectedGroupOptions}</select></label>
+            <label>Profile<select data-resource-filter="profile">${selectedProfileOptions}</select></label>
             <label>副本节点<select data-resource-filter="copyNode">${selectedCopyNodeOptions}</select></label>
             <label>归属节点<select data-resource-filter="ownerNode">${selectedOwnerNodeOptions}</select></label>
           </div>
@@ -3204,11 +3188,11 @@ HTML = r"""
             const ageDays = ageBase ? Math.max(0, (Date.now() / 1000 - ageBase) / 86400) : 0;
             const cleanupCandidate = Math.floor(ageDays / 3) >= 5;
             return `
-              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""} ${cleanupCandidate ? "cleanup-candidate" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-group-id="${escapeHtml(item.group_id || "")}" data-group-name="${escapeHtml(mediaGroupName(item.group_id))}" data-copy-names="${escapeHtml(copyNames)}" data-copy-count="${escapeHtml(copies.length)}" data-last-used-label="${escapeHtml(lastUsedLabels || "从未开播")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
+              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""} ${cleanupCandidate ? "cleanup-candidate" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-profile-names="${escapeHtml(resourceProfileLabel(item))}" data-copy-names="${escapeHtml(copyNames)}" data-copy-count="${escapeHtml(copies.length)}" data-last-used-label="${escapeHtml(lastUsedLabels || "从未开播")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
                 <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
                 <span class="muted">${escapeHtml(fmtBytes(item.size || 0))}</span>
                 <span class="muted">${escapeHtml(item.modified_label || "--")}</span>
-                <span>${escapeHtml(mediaGroupName(item.group_id))}</span>
+                <span>${escapeHtml(resourceProfileLabel(item))}</span>
                 <span title="${escapeHtml(copyNames)}">${copies.length} 副本：${escapeHtml(copyNames || "--")}</span>
                 <span>${escapeHtml(copy.node_name || copy.node_id || "--")}</span>
                 <input data-media-check type="radio" name="media" value="${escapeHtml(name)}" data-node-id="${escapeHtml(nodeId)}" data-video-path="${escapeHtml(videoPath)}" ${selected ? "checked" : ""} hidden>
@@ -3254,6 +3238,7 @@ HTML = r"""
     }
 
     function renderYouTubeStreams(streams = [], selectedStreamId = "") {
+      cacheYouTubeStreams(selectedYouTubeProfileId(), streams);
       const previousMain = selectedStreamId || refs.youtubeStreamSelect.value;
       const previousPrepare = refs.youtubePrepareStreamSelect.value;
       const streamOptions = streams.map((item) => {
@@ -3267,6 +3252,34 @@ HTML = r"""
       if (streams.some((item) => item.id === previousMain)) refs.youtubeStreamSelect.value = previousMain;
       if (streams.some((item) => item.id === previousPrepare)) refs.youtubePrepareStreamSelect.value = previousPrepare;
       syncStreamOutputMode();
+    }
+
+    async function ensureYouTubeStreamsForProfile(profileId, nodeId) {
+      profileId = String(profileId || "default");
+      if (!profileId || youtubeStreamsByProfile[profileId] || youtubeStreamLoadState[profileId] === "loading") return;
+      if (!nodeId) return;
+      youtubeStreamLoadState[profileId] = "loading";
+      renderNodes();
+      try {
+        const data = await postNodeAction("/api/nodes/youtube/resources", { node_id: nodeId, profile_id: profileId });
+        if (data.ok) cacheYouTubeStreams(profileId, data.streams || []);
+        else youtubeStreamLoadState[profileId] = "failed";
+      } catch (error) {
+        youtubeStreamLoadState[profileId] = "failed";
+      }
+      renderNodes();
+      renderStreamControls();
+    }
+
+    function preloadNodeYouTubeStreams() {
+      const seen = new Set();
+      nodes.forEach((node) => {
+        if (node.enabled === false || !node.roles?.agent?.enabled) return;
+        const profileId = nodeProfileId(node);
+        if (!profileId || seen.has(profileId)) return;
+        seen.add(profileId);
+        ensureYouTubeStreamsForProfile(profileId, node.id);
+      });
     }
 
     function selectedYouTubeProfileId() {
@@ -3346,12 +3359,17 @@ HTML = r"""
       }
       setYouTubeProfileNameEditing("");
       const data = await youtubeProfileApi("/api/youtube/profiles", {
-        ...youtubeProfilePayload(),
         profile_id: profileId,
         name,
+        client_id: profile?.client_id || "",
+        auto_tune_enabled: Boolean(profile?.auto_tune_enabled),
+        auto_tune_interval_seconds: profile?.auto_tune_interval_seconds || 300,
+        auto_tune_cooldown_seconds: profile?.auto_tune_cooldown_seconds || 900,
+        auto_tune_max_bitrate: profile?.auto_tune_max_bitrate || 6000,
       });
       if (data.ok) {
         renderYouTubeProfiles(data.profiles || [], data.active_profile_id || data.profile?.id || profileId);
+        renderMedia();
         refs.youtubeWizardLog.textContent = `Profile renamed: ${name}`;
       } else {
         if (refs.youtubeProfileNameInput) refs.youtubeProfileNameInput.value = previousName;
@@ -3862,13 +3880,19 @@ HTML = r"""
       }
     }
 
+    function defaultYouTubeBroadcastTitle(node) {
+      const name = String(node?.name || node?.id || "Agent").replace(/\s+/g, " ").trim();
+      const stamp = new Date().toLocaleString("zh-CN", { hour12: false }).replace(/\//g, "-");
+      return `Live - ${name} - ${stamp}`.slice(0, 100);
+    }
+
     async function prepareYouTubeBroadcast() {
-      const title = refs.youtubeTitleInput.value.trim();
       const node = ensureSelectedNodeForProfile();
-      if (!node || !title) {
-        refs.youtubeWizardLog.textContent = "请选择 Agent 并填写直播标题。";
+      if (!node) {
+        refs.youtubeWizardLog.textContent = "请选择 Agent。";
         return;
       }
+      const title = refs.youtubeTitleInput.value.trim() || defaultYouTubeBroadcastTitle(node);
       refs.youtubePrepareBtn.disabled = true;
       try {
         const resolutionMatch = refs.resolutionInput.value.match(/x(\d+)$/i);
@@ -3885,13 +3909,16 @@ HTML = r"""
           resolution: resolutionMatch ? `${resolutionMatch[1]}p` : "720p",
           frame_rate: Number(refs.fpsInput.value || 30) >= 50 ? "60fps" : "30fps",
           enable_auto_start: true,
-          enable_auto_stop: true,
+          enable_auto_stop: false,
         });
         if (!data.ok) {
           refs.youtubeWizardLog.textContent = data.message || "创建 YouTube 直播失败";
           return;
         }
-        refs.youtubeWizardLog.textContent = `直播已创建并绑定。\n${data.result?.title || title}\n${data.result?.watch_url || ""}`;
+        if (data.result?.stream_id) {
+          await saveNodeStreamLock(node.id, { youtube_stream_id: data.result.stream_id });
+        }
+        refs.youtubeWizardLog.textContent = `直播目标已创建并锁定到当前 Agent。\n${data.result?.title || title}\n${data.result?.watch_url || ""}`;
         await refreshYouTubeResources();
         refs.youtubeStreamSelect.value = data.result?.stream_id || "";
         refs.streamOutputModeInput.value = "youtube_api";
@@ -3900,6 +3927,30 @@ HTML = r"""
         refs.youtubeWizardLog.textContent = friendlyError(error, "创建 YouTube 直播失败");
       } finally {
         refs.youtubePrepareBtn.disabled = false;
+      }
+    }
+
+    async function smartStartFromYouTubeWizard() {
+      const node = ensureSelectedNodeForProfile();
+      if (!node) {
+        refs.youtubeWizardLog.textContent = "请选择 Agent。";
+        return;
+      }
+      const streamId = refs.youtubePrepareStreamSelect.value || lockedYoutubeStreamId(node) || refs.youtubeStreamSelect.value;
+      if (streamId && streamId !== lockedYoutubeStreamId(node)) {
+        await saveNodeStreamLock(node.id, { youtube_stream_id: streamId });
+      }
+      rememberSelectedNode(node.id);
+      refs.streamOutputModeInput.value = "youtube_api";
+      renderNodes();
+      renderStreamControls();
+      refs.youtubeSmartStartBtn.disabled = true;
+      refs.youtubeWizardLog.textContent = "正在按当前 Agent 锁定的视频和直播流启动 Smart Start...";
+      try {
+        await smartStart();
+        refs.youtubeWizardLog.textContent = "Smart Start 已执行。可在主界面状态框查看启动结果。";
+      } finally {
+        refs.youtubeSmartStartBtn.disabled = false;
       }
     }
 
@@ -3960,9 +4011,10 @@ HTML = r"""
     function renderStreamControls() {
       const node = selectedNode();
       const h = node?.health || {};
-      const previousLibraryName = refs.streamVideoSelect.selectedOptions[0]?.dataset.libraryName || "";
-      const groups = mediaLibrary.groups || [];
-      const groupName = (id) => groups.find((item) => item.id === id)?.name || "未分组";
+      const lock = nodeStreamLock(node);
+      const previousLibraryName = lock.library_media_name || refs.streamVideoSelect.selectedOptions[0]?.dataset.libraryName || "";
+      const lockedVideoPath = String(lock.video_path || "");
+      const lockedStreamId = lockedYoutubeStreamId(node);
       const videos = mediaLibrary.resources || [];
       refs.streamNodeInput.value = node ? `${node.name || node.id} (${node.id})` : "选择右侧 VPS 节点";
       refs.streamNodeHint.textContent = node
@@ -3973,15 +4025,19 @@ HTML = r"""
         const sourceCopy = localCopy || (item.copies || [])[0] || {};
         const value = localCopy?.video_path || item.name;
         const copyHint = localCopy ? "本机已有" : "开播前自动复制";
-        return `<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}" data-media-local="${localCopy ? "1" : "0"}" data-source-node-id="${escapeHtml(sourceCopy.node_id || "")}">[${escapeHtml(groupName(item.group_id))}] ${escapeHtml(item.name)} · ${copyHint} (${escapeHtml(fmtBytes(item.size || 0))})</option>`;
+        return `<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}" data-media-local="${localCopy ? "1" : "0"}" data-source-node-id="${escapeHtml(sourceCopy.node_id || "")}">[${escapeHtml(resourceProfileLabel(item))}] ${escapeHtml(item.name)} · ${copyHint} (${escapeHtml(fmtBytes(item.size || 0))})</option>`;
       }).join("") : `<option value="">媒体库暂无视频，请先上传</option>`;
       if (previousLibraryName) {
         const option = [...refs.streamVideoSelect.options].find((item) => item.dataset.libraryName === previousLibraryName);
         if (option) option.selected = true;
+      } else if (lockedVideoPath) {
+        const option = [...refs.streamVideoSelect.options].find((item) => item.value === lockedVideoPath);
+        if (option) option.selected = true;
       }
       const config = h.stream_config || {};
       if (config.stream_url && !refs.streamUrlInput.dataset.userEdited) refs.streamUrlInput.value = config.stream_url;
-      if (config.stream_output_mode) refs.streamOutputModeInput.value = config.stream_output_mode;
+      if (lockedStreamId) refs.streamOutputModeInput.value = "youtube_api";
+      else if (config.stream_output_mode) refs.streamOutputModeInput.value = config.stream_output_mode;
       if (config.adaptive_mode) refs.adaptiveModeInput.value = config.adaptive_mode;
       if (config.resolution) refs.resolutionInput.value = config.resolution;
       if (config.fps) refs.fpsInput.value = config.fps;
@@ -3989,22 +4045,36 @@ HTML = r"""
       if (config.audio_bitrate) refs.audioBitrateInput.value = config.audio_bitrate;
       if (config.preset && config.preset !== "copy") refs.presetInput.value = config.preset;
       if (config.keyframe_seconds) refs.keyframeInput.value = config.keyframe_seconds;
-      if (config.youtube_stream_id) refs.youtubeStreamSelect.value = config.youtube_stream_id;
+      const profileId = nodeProfileId(node);
+      const streams = youtubeStreamsByProfile[profileId] || [];
+      const selectedStreamId = lockedStreamId || config.youtube_stream_id || refs.youtubeStreamSelect.value;
+      const streamOptions = streams.map((item) => {
+        const status = item.stream_status || item.life_cycle_status || "ready";
+        return `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title || item.id)} (${escapeHtml(status)})</option>`;
+      }).join("");
+      refs.youtubeStreamSelect.innerHTML = streams.length
+        ? streamOptions
+        : selectedStreamId
+          ? `<option value="${escapeHtml(selectedStreamId)}">已锁定：${escapeHtml(selectedStreamId)}</option>`
+          : `<option value="">先在 Agent 表或 API 模块选择直播流</option>`;
+      if (selectedStreamId) refs.youtubeStreamSelect.value = selectedStreamId;
       syncStreamOutputMode();
     }
 
     function streamPayload({ includeKey = true } = {}) {
       const selectedMediaOption = refs.streamVideoSelect.selectedOptions[0];
+      const node = selectedNode();
+      const lock = nodeStreamLock(node);
       const payload = {
         node_id: selectedNodeId,
-        youtube_profile_id: selectedYouTubeProfileId(),
+        youtube_profile_id: nodeProfileId(node),
         stream_url: refs.streamUrlInput.value.trim(),
         stream_key: includeKey ? refs.streamKeyInput.value.trim() : "",
-        youtube_stream_id: refs.youtubeStreamSelect.value,
-        video_path: refs.streamVideoSelect.value,
-        library_media_name: selectedMediaOption?.dataset.libraryName || "",
-        media_local: selectedMediaOption?.dataset.mediaLocal === "1",
-        source_node_id: selectedMediaOption?.dataset.sourceNodeId || "",
+        youtube_stream_id: lock.youtube_stream_id || refs.youtubeStreamSelect.value,
+        video_path: lock.video_path || refs.streamVideoSelect.value,
+        library_media_name: lock.library_media_name || selectedMediaOption?.dataset.libraryName || "",
+        media_local: lock.media_local !== undefined ? Boolean(lock.media_local) : selectedMediaOption?.dataset.mediaLocal === "1",
+        source_node_id: lock.source_node_id || selectedMediaOption?.dataset.sourceNodeId || "",
         copy_mode: refs.tuneBox.dataset.copyMode === "1",
         adaptive_mode: refs.adaptiveModeInput.value || "auto",
         stream_output_mode: refs.streamOutputModeInput.value || "direct",
@@ -4072,6 +4142,7 @@ HTML = r"""
         renderStreamControls();
         renderYouTubeAgentList();
         renderTailscaleNodeOptions();
+        preloadNodeYouTubeStreams();
         log("状态已刷新");
       } finally {
         refs.refreshBtn.disabled = false;
@@ -4235,10 +4306,6 @@ HTML = r"""
           averageBps: file.size / elapsed,
           etaSeconds: 0,
           message: `${file.name} 已通过 ${uploadRoute?.label || "默认线路"} 上传到 ${node.name || node.id}${savedNameNote}。`,
-        });
-        await postJson("/api/media-library/assign", {
-          filename: uploadFilename,
-          group_id: refs.uploadGroupInput.value || "",
         });
         await refreshAll();
       } catch (error) {
@@ -4964,7 +5031,10 @@ HTML = r"""
         renderMedia();
         renderStreamControls();
         const option = [...refs.streamVideoSelect.options].find((item) => item.dataset.libraryName === mediaName);
-        if (option) option.selected = true;
+        if (option) {
+          option.selected = true;
+          if (selectedNodeId) await saveNodeStreamLock(selectedNodeId, videoLockFromOption(option));
+        }
         updatePrimaryActionStates();
         return;
       }
@@ -5008,14 +5078,14 @@ HTML = r"""
     function showMediaProperties(row) {
       const mediaName = row.dataset.mediaName || "";
       const resource = mediaResourceByName(mediaName);
-      const groupName = mediaGroupName(resource?.group_id || row.dataset.groupId || "");
+      const profileNames = resource ? resourceProfileLabel(resource) : row.dataset.profileNames || "未绑定 Profile";
       const copies = resource?.copies || [];
       const copyLines = copies.length
         ? copies.map((copy) => `- ${copy.node_name || copy.node_id}: ${copy.video_path || mediaName}（${copy.last_used_label || "从未开播"}）`).join("\n")
         : `- ${row.dataset.copyNames || row.dataset.nodeId || "未知节点"}`;
       alert([
         `文件：${mediaName}`,
-        `分组：${groupName}`,
+        `Profile：${profileNames}`,
         `大小：${fmtBytes(Number(row.dataset.size || resource?.size || 0))}`,
         `上传时间：${row.dataset.modifiedLabel || resource?.modified_label || "--"}`,
         `副本数：${copies.length || row.dataset.copyCount || 1}`,
@@ -5023,23 +5093,6 @@ HTML = r"""
         "所在节点 / 路径：",
         copyLines,
       ].join("\n"));
-    }
-
-    async function moveMediaToGroup(row, groupId) {
-      const filename = row.dataset.mediaName || "";
-      const targetGroupId = groupId === "__ungrouped__" ? "" : groupId;
-      if (!filename) return;
-      const targetName = targetGroupId ? mediaGroupName(targetGroupId) : "未分组";
-      const data = await postJson("/api/media-library/assign", { filename, group_id: targetGroupId });
-      renderTransfer({
-        status: data.ok ? "done" : "failed",
-        badge: data.ok ? "完成" : "失败",
-        title: data.ok ? "分组移动完成" : "分组移动失败",
-        target: targetName,
-        percent: data.ok ? 100 : 0,
-        message: data.ok ? `${filename} 已移动到分组：${targetName}` : friendlyError(data.message || "移动分组失败"),
-      });
-      if (data.ok) await refreshAll();
     }
 
     function selectMediaRow(row) {
@@ -5063,17 +5116,9 @@ HTML = r"""
       contextMediaRow = row;
       const sourceNodeId = String(row.dataset.nodeId || "");
       const targets = nodes.filter((node) => node.roles?.agent?.enabled && String(node.id) !== sourceNodeId);
-      const currentGroupId = row.dataset.groupId || "";
-      const groupTargets = [
-        { id: "__ungrouped__", name: "未分组" },
-        ...(mediaLibrary.groups || []),
-      ].filter((group) => String(group.id === "__ungrouped__" ? "" : group.id) !== String(currentGroupId));
       const targetButtons = (action) => targets.length
         ? targets.map((node) => `<button data-media-menu-action="${action}" data-target-node-id="${escapeHtml(node.id)}">${escapeHtml(node.name || node.id)}</button>`).join("")
         : `<button disabled>没有其他在线节点</button>`;
-      refs.mediaGroupTargets.innerHTML = groupTargets.length
-        ? groupTargets.map((group) => `<button data-media-menu-action="move-group" data-target-group-id="${escapeHtml(group.id)}">${escapeHtml(group.name)}</button>`).join("")
-        : `<button disabled>已经在唯一分组</button>`;
       refs.mediaSendTargets.innerHTML = targetButtons("send-node");
       refs.mediaMoveTargets.innerHTML = targetButtons("move-node");
       refs.mediaContextMenu.classList.add("open");
@@ -5420,47 +5465,6 @@ HTML = r"""
       }
     }
 
-    async function manageMediaGroup(action) {
-      const selected = refs.mediaGroupFilter.value;
-      const current = (mediaLibrary.groups || []).find((item) => item.id === selected);
-      if (action !== "create" && !current) return alert("请先选择一个分组。");
-      if (action === "delete" && !confirm(`删除分组“${current.name}”？视频文件不会被删除，将回到未分组。`)) return;
-      const name = action === "delete" ? "" : prompt(action === "create" ? "新分组名称：" : "修改分组名称：", current?.name || "");
-      if (action !== "delete" && !name?.trim()) return;
-      const data = await postJson("/api/media-groups", { action, group_id: current?.id || "", name: name?.trim() || "" });
-      if (!data.ok) return alert(data.message || "分组操作失败");
-      await refreshAll();
-      if (data.group_id) refs.mediaGroupFilter.value = data.group_id;
-      renderMedia();
-    }
-
-    function setQuickGroupManageOpen(open) {
-      refs.quickGroupManageMenu.hidden = !open;
-    }
-
-    async function deleteQuickGroup() {
-      const groups = mediaLibrary.groups || [];
-      const selected = refs.mediaGroupFilter.value;
-      const current = groups.find((item) => item.id === selected) || groups[groups.length - 1];
-      if (!current) return alert("当前没有可减少的分组。");
-      if (!confirm(`删除分组“${current.name}”？视频文件不会被删除，将回到未分组。`)) return;
-      const data = await postJson("/api/media-groups", { action: "delete", group_id: current.id, name: "" });
-      if (!data.ok) return alert(data.message || "分组删除失败");
-      refs.mediaGroupFilter.value = "";
-      resourceTableFilters.group = "";
-      await refreshAll();
-    }
-
-    async function assignSelectedMediaGroup() {
-      const filename = selectedMediaName();
-      if (!filename) return alert("请先选择一个视频。");
-      const selected = refs.mediaGroupFilter.value;
-      const groupId = selected && selected !== "__ungrouped__" ? selected : "";
-      const data = await postJson("/api/media-library/assign", { filename, group_id: groupId });
-      if (!data.ok) return alert(data.message || "移动分组失败");
-      await refreshAll();
-    }
-
     async function cleanupDuplicateMedia() {
       const createdBeforeDays = Number(refs.mediaCleanupAge.value || 30);
       const usageMode = refs.mediaCleanupUsage.value || "any";
@@ -5486,21 +5490,6 @@ HTML = r"""
       }
     }
 
-    async function renameQuickGroup(groupId, currentName) {
-      const nextName = prompt("修改快捷分组名称：", currentName || "");
-      if (!nextName || !nextName.trim() || nextName.trim() === currentName) return;
-      const data = await postJson("/api/media-groups", {
-        action: "rename",
-        group_id: groupId,
-        name: nextName.trim(),
-      });
-      if (!data.ok) return alert(data.message || "分组改名失败");
-      await refreshAll();
-      refs.mediaGroupFilter.value = groupId;
-      resourceTableFilters.group = groupId;
-      renderMedia();
-    }
-
     async function saveNodeYouTubeProfile(selectEl) {
       const nodeId = selectEl?.dataset?.nodeId || "";
       const profileId = selectEl?.value || "";
@@ -5517,9 +5506,11 @@ HTML = r"""
             ...item,
             youtube_profile_id: data.profile_id || profileId,
             youtube_profile_name: data.profile?.name || profileName(data.profile_id || profileId),
+            stream_lock: { ...(item.stream_lock || {}), youtube_stream_id: "" },
           };
         });
-        if (String(selectedNodeId) === String(nodeId) && nodeProfileId(nodes.find((item) => String(item.id) === String(nodeId))) !== selectedYouTubeProfileId()) {
+        ensureYouTubeStreamsForProfile(data.profile_id || profileId, nodeId);
+        if (refs.youtubeWizardModal.classList.contains("open") && String(selectedNodeId) === String(nodeId) && nodeProfileId(nodes.find((item) => String(item.id) === String(nodeId))) !== selectedYouTubeProfileId()) {
           ensureSelectedNodeForProfile();
         }
         renderNodes();
@@ -5534,8 +5525,40 @@ HTML = r"""
       }
     }
 
+    async function saveNodeStreamLock(nodeId, updates, sourceEl = null) {
+      nodeId = String(nodeId || "");
+      if (!nodeId) return null;
+      if (sourceEl) sourceEl.disabled = true;
+      try {
+        const data = await postJson("/api/nodes/stream-lock", { node_id: nodeId, ...updates });
+        if (!data.ok) throw new Error(data.message || "Agent 开播设置保存失败");
+        nodes = nodes.map((item) => String(item.id) === String(nodeId) ? { ...item, stream_lock: data.stream_lock || {} } : item);
+        if (String(selectedNodeId) === String(nodeId)) renderStreamControls();
+        renderNodes();
+        return data;
+      } catch (error) {
+        alert(error.message || "Agent 开播设置保存失败");
+        await refreshAll();
+        return null;
+      } finally {
+        if (sourceEl) sourceEl.disabled = false;
+      }
+    }
+
+    function videoLockFromOption(option) {
+      if (!option || !option.value) {
+        return { video_path: "", library_media_name: "", media_local: false, source_node_id: "" };
+      }
+      return {
+        video_path: option.value,
+        library_media_name: option.dataset.libraryName || "",
+        media_local: option.dataset.mediaLocal === "1",
+        source_node_id: option.dataset.sourceNodeId || "",
+      };
+    }
+
     refs.nodeList.addEventListener("click", (event) => {
-      if (event.target.closest("[data-node-profile-select]")) {
+      if (event.target.closest("[data-node-profile-select], [data-node-stream-select], [data-node-video-select]")) {
         event.stopPropagation();
         return;
       }
@@ -5590,8 +5613,20 @@ HTML = r"""
       renderYouTubeAgentList();
     });
     refs.nodeList.addEventListener("change", (event) => {
-      const selectEl = event.target.closest("[data-node-profile-select]");
-      if (selectEl) saveNodeYouTubeProfile(selectEl);
+      const profileEl = event.target.closest("[data-node-profile-select]");
+      if (profileEl) {
+        saveNodeYouTubeProfile(profileEl);
+        return;
+      }
+      const streamEl = event.target.closest("[data-node-stream-select]");
+      if (streamEl) {
+        saveNodeStreamLock(streamEl.dataset.nodeId, { youtube_stream_id: streamEl.value || "" }, streamEl);
+        return;
+      }
+      const videoEl = event.target.closest("[data-node-video-select]");
+      if (videoEl) {
+        saveNodeStreamLock(videoEl.dataset.nodeId, videoLockFromOption(videoEl.selectedOptions[0]), videoEl);
+      }
     });
     refs.hubNodeList.addEventListener("click", (event) => {
       if (event.target.closest("[data-node-profile-select]")) {
@@ -5673,21 +5708,24 @@ HTML = r"""
       openResourceNodeId = "";
       renderMedia();
     });
-    refs.quickGroupBar.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-quick-group-index]");
+    refs.profileQuickBar.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-profile-filter-id]");
       if (!button) return;
-      const groupId = button.dataset.quickGroupId || "";
-      refs.mediaGroupFilter.value = groupId;
-      resourceTableFilters.group = groupId;
+      const profileId = button.dataset.profileFilterId || "";
+      refs.mediaProfileFilter.value = profileId;
+      resourceTableFilters.profile = profileId;
       renderMedia();
     });
-    refs.quickGroupBar.addEventListener("contextmenu", (event) => {
-      const button = event.target.closest("[data-quick-group-index]");
+    refs.profileQuickBar.addEventListener("dblclick", (event) => {
+      const button = event.target.closest("[data-profile-filter-id]");
       if (!button) return;
       event.preventDefault();
-      const groupId = button.dataset.quickGroupId || "";
-      const currentName = button.textContent.trim();
-      renameQuickGroup(groupId, currentName);
+      const profileId = button.dataset.profileFilterId || "default";
+      const profile = youtubeProfiles.find((item) => String(item.id) === String(profileId));
+      const currentName = profile?.name || profileId;
+      const nextName = prompt("修改 Profile 名称：", currentName);
+      if (nextName === null) return;
+      saveYouTubeProfileName(nextName, profileId);
     });
     refs.mediaList.addEventListener("click", (event) => {
       hideMediaMenu();
@@ -5703,7 +5741,7 @@ HTML = r"""
       const field = event.target?.dataset?.resourceFilter;
       if (!field) return;
       resourceTableFilters[field] = event.target.value || "";
-      if (field === "group") refs.mediaGroupFilter.value = resourceTableFilters.group;
+      if (field === "profile") refs.mediaProfileFilter.value = resourceTableFilters.profile;
       if (field === "name") {
         clearTimeout(resourceNameFilterTimer);
         const caret = event.target.selectionStart ?? event.target.value.length;
@@ -5723,7 +5761,7 @@ HTML = r"""
       const field = event.target?.dataset?.resourceFilter;
       if (!field) return;
       resourceTableFilters[field] = event.target.value || "";
-      if (field === "group") refs.mediaGroupFilter.value = resourceTableFilters.group;
+      if (field === "profile") refs.mediaProfileFilter.value = resourceTableFilters.profile;
       renderMedia();
     });
     refs.mediaList.addEventListener("dblclick", (event) => {
@@ -5749,14 +5787,10 @@ HTML = r"""
       const row = contextMediaRow;
       const action = button.dataset.mediaMenuAction;
       const targetNodeId = button.dataset.targetNodeId || "";
-      const targetGroupId = button.dataset.targetGroupId || "";
       hideMediaMenu();
       if (action === "send-node") {
         selectMediaRow(row);
         pushSelectedMedia([targetNodeId]);
-      } else if (action === "move-group") {
-        selectMediaRow(row);
-        moveMediaToGroup(row, targetGroupId);
       } else if (action === "move-node") {
         const sourceLabel = nodes.find((node) => String(node.id) === String(row.dataset.nodeId))?.name || row.dataset.nodeId;
         const targetLabel = nodes.find((node) => String(node.id) === String(targetNodeId))?.name || targetNodeId;
@@ -5785,7 +5819,6 @@ HTML = r"""
     });
     document.addEventListener("click", (event) => {
       if (!event.target.closest("#mediaContextMenu")) hideMediaMenu();
-      if (!event.target.closest(".quick-group-manage")) setQuickGroupManageOpen(false);
       if (refs.youtubeMoreActions?.open && !event.target.closest("#youtubeMoreActions")) refs.youtubeMoreActions.open = false;
     });
     document.addEventListener("keydown", (event) => {
@@ -5864,31 +5897,15 @@ HTML = r"""
       }
     });
     refs.refreshBtn.addEventListener("click", refreshAll);
-    refs.mediaGroupFilter.addEventListener("change", () => {
-      resourceTableFilters.group = refs.mediaGroupFilter.value || "";
+    refs.mediaProfileFilter.addEventListener("change", () => {
+      resourceTableFilters.profile = refs.mediaProfileFilter.value || "";
       renderMedia();
-    });
-    refs.quickGroupManageBtn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      setQuickGroupManageOpen(refs.quickGroupManageMenu.hidden);
-    });
-    refs.quickGroupCreateBtn.addEventListener("click", () => {
-      setQuickGroupManageOpen(false);
-      manageMediaGroup("create");
-    });
-    refs.quickGroupDeleteBtn.addEventListener("click", () => {
-      setQuickGroupManageOpen(false);
-      deleteQuickGroup();
     });
     refs.resourceMoreBtn.addEventListener("click", () => setResourceToolsOpen(true));
     refs.resourceToolsClose.addEventListener("click", () => setResourceToolsOpen(false));
     refs.resourceToolsModal.addEventListener("click", (event) => {
       if (event.target === refs.resourceToolsModal) setResourceToolsOpen(false);
     });
-    if (refs.mediaGroupAddBtn) refs.mediaGroupAddBtn.addEventListener("click", () => manageMediaGroup("create"));
-    if (refs.mediaGroupRenameBtn) refs.mediaGroupRenameBtn.addEventListener("click", () => manageMediaGroup("rename"));
-    if (refs.mediaGroupDeleteBtn) refs.mediaGroupDeleteBtn.addEventListener("click", () => manageMediaGroup("delete"));
-    if (refs.mediaAssignGroupBtn) refs.mediaAssignGroupBtn.addEventListener("click", assignSelectedMediaGroup);
     refs.mediaCleanupBtn.addEventListener("click", cleanupDuplicateMedia);
     refs.uploadBtn.addEventListener("click", uploadMedia);
     refs.mediaInput.addEventListener("change", updatePrimaryActionStates);
@@ -5965,6 +5982,7 @@ HTML = r"""
     refs.youtubeSaveConfigBtn.addEventListener("click", saveYouTubeConfig);
     refs.youtubeAuthorizeBtn.addEventListener("click", startYouTubeAuthorization);
     refs.youtubePrepareBtn.addEventListener("click", prepareYouTubeBroadcast);
+    refs.youtubeSmartStartBtn.addEventListener("click", smartStartFromYouTubeWizard);
     refs.youtubeHealthBtn.addEventListener("click", readYouTubeHealth);
     refs.youtubeRevokeBtn.addEventListener("click", revokeYouTubeAuthorization);
     refs.youtubeMoreActions.addEventListener("click", (event) => {
@@ -5986,7 +6004,7 @@ HTML = r"""
       el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
     });
     initNodeRoleSplitter();
-    refreshAll();
+    loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
     checkDailyGithubUpdates();
     window.setInterval(checkDailyGithubUpdates, 60 * 60 * 1000);
   </script>
@@ -6367,27 +6385,65 @@ def set_node_youtube_profile(node_id: str, profile_id: str) -> str:
         mapping = {}
     mapping[str(node_id)] = profile_id
     settings["node_youtube_profiles"] = mapping
+    stream_locks = settings.get("node_stream_locks")
+    if isinstance(stream_locks, dict) and str(node_id) in stream_locks and isinstance(stream_locks[str(node_id)], dict):
+        stream_locks[str(node_id)]["youtube_stream_id"] = ""
+        settings["node_stream_locks"] = stream_locks
     save_hub_settings(settings)
     return profile_id
 
 
-def load_media_groups() -> dict[str, Any]:
+def node_stream_lock_map() -> dict[str, dict[str, Any]]:
+    settings = load_hub_settings()
+    mapping = settings.get("node_stream_locks")
+    if not isinstance(mapping, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for node_id, raw in mapping.items():
+        if not isinstance(raw, dict):
+            continue
+        result[str(node_id)] = {
+            "youtube_stream_id": str(raw.get("youtube_stream_id") or "").strip(),
+            "video_path": str(raw.get("video_path") or "").strip(),
+            "library_media_name": str(raw.get("library_media_name") or "").strip(),
+            "media_local": bool(raw.get("media_local")),
+            "source_node_id": str(raw.get("source_node_id") or "").strip(),
+        }
+    return result
+
+
+def set_node_stream_lock(node_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    settings = load_hub_settings()
+    mapping = settings.get("node_stream_locks")
+    if not isinstance(mapping, dict):
+        mapping = {}
+    current = dict(mapping.get(str(node_id)) or {})
+    for key in {"youtube_stream_id", "video_path", "library_media_name", "source_node_id"}:
+        if key in updates:
+            current[key] = str(updates.get(key) or "").strip()
+    if "media_local" in updates:
+        current["media_local"] = bool(updates.get("media_local"))
+    mapping[str(node_id)] = current
+    settings["node_stream_locks"] = mapping
+    save_hub_settings(settings)
+    return node_stream_lock_map().get(str(node_id), {})
+
+
+def load_media_metadata() -> dict[str, Any]:
     ensure_dirs()
     try:
-        payload = json.loads(MEDIA_GROUPS_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(MEDIA_METADATA_FILE.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
-            payload.setdefault("groups", [])
-            payload.setdefault("assignments", {})
             payload.setdefault("duplicate_retention", [])
             return payload
     except Exception:
         pass
-    return {"groups": [], "assignments": {}, "duplicate_retention": []}
+    return {"duplicate_retention": []}
 
 
-def save_media_groups(payload: dict[str, Any]) -> None:
+def save_media_metadata(payload: dict[str, Any]) -> None:
     ensure_dirs()
-    MEDIA_GROUPS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    MEDIA_METADATA_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def cleanup_verified_duplicates(
@@ -6461,7 +6517,7 @@ def cleanup_verified_duplicates(
         remaining.append(record)
     if execute:
         metadata["duplicate_retention"] = remaining
-        save_media_groups(metadata)
+        save_media_metadata(metadata)
     return {
         "ok": True,
         "candidates": candidates,
@@ -6474,9 +6530,9 @@ def cleanup_verified_duplicates(
 
 
 def media_library_payload() -> dict[str, Any]:
-    metadata = load_media_groups()
+    metadata = load_media_metadata()
     cleanup_verified_duplicates(metadata, execute=True)
-    metadata = load_media_groups()
+    metadata = load_media_metadata()
     resources: dict[str, dict[str, Any]] = {}
     node_disks: list[dict[str, Any]] = []
     for node in load_nodes():
@@ -6504,7 +6560,6 @@ def media_library_payload() -> dict[str, Any]:
                 "modified_label": str(video.get("modified_label") or "--"),
                 "created_at": float(video.get("created_at") or video.get("modified") or 0),
                 "last_used_at": float(video.get("last_used_at") or 0),
-                "group_id": str((metadata.get("assignments") or {}).get(name) or ""),
                 "copies": [],
             })
             if float(video.get("modified") or 0) > float(item.get("modified") or 0):
@@ -6522,7 +6577,6 @@ def media_library_payload() -> dict[str, Any]:
             item["last_used_at"] = max(float(item.get("last_used_at") or 0), float(video.get("last_used_at") or 0))
     return {
         "ok": True,
-        "groups": metadata.get("groups") or [],
         "resources": sorted(resources.values(), key=lambda item: float(item.get("modified") or 0), reverse=True),
         "nodes": node_disks,
         "duplicate_retention": metadata.get("duplicate_retention") or [],
@@ -6899,7 +6953,7 @@ def request_node_media_hash(node: dict[str, Any], media: str) -> dict[str, Any]:
 
 
 def register_verified_duplicate(source_node: dict[str, Any], target_node: dict[str, Any], filename: str, sha256: str) -> None:
-    metadata = load_media_groups()
+    metadata = load_media_metadata()
     records = list(metadata.get("duplicate_retention") or [])
     source_id = str(source_node.get("id") or "")
     records = [item for item in records if not (
@@ -6917,7 +6971,7 @@ def register_verified_duplicate(source_node: dict[str, Any], target_node: dict[s
         "status": "waiting-72h",
     })
     metadata["duplicate_retention"] = records
-    save_media_groups(metadata)
+    save_media_metadata(metadata)
 
 
 def verify_and_register_copy(
@@ -7716,62 +7770,6 @@ def api_media_library():
     return jsonify(media_library_payload())
 
 
-@APP.post("/api/media-groups")
-def api_media_groups():
-    payload = request.get_json(silent=True) or {}
-    action = str(payload.get("action") or "create").strip().lower()
-    group_id = secure_filename(str(payload.get("group_id") or "").strip())
-    name = " ".join(str(payload.get("name") or "").split()).strip()
-    metadata = load_media_groups()
-    groups = list(metadata.get("groups") or [])
-    if action == "create":
-        if not name or len(name) > 80:
-            return jsonify({"ok": False, "message": "group name is required and limited to 80 characters"}), 400
-        if len(groups) >= 6:
-            return jsonify({"ok": False, "message": "最多支持 6 个分组"}), 400
-        group_id = f"group-{uuid.uuid4().hex[:10]}"
-        groups.append({"id": group_id, "name": name, "created_at": time.time()})
-    elif action == "rename":
-        target = next((item for item in groups if str(item.get("id")) == group_id), None)
-        if not target:
-            return jsonify({"ok": False, "message": "group not found"}), 404
-        if not name or len(name) > 80:
-            return jsonify({"ok": False, "message": "group name is required and limited to 80 characters"}), 400
-        target["name"] = name
-    elif action == "delete":
-        if not any(str(item.get("id")) == group_id for item in groups):
-            return jsonify({"ok": False, "message": "group not found"}), 404
-        groups = [item for item in groups if str(item.get("id")) != group_id]
-        metadata["assignments"] = {
-            key: value for key, value in (metadata.get("assignments") or {}).items() if str(value) != group_id
-        }
-    else:
-        return jsonify({"ok": False, "message": "unsupported group action"}), 400
-    metadata["groups"] = groups
-    save_media_groups(metadata)
-    return jsonify({"ok": True, "group_id": group_id, "groups": groups})
-
-
-@APP.post("/api/media-library/assign")
-def api_media_library_assign():
-    payload = request.get_json(silent=True) or {}
-    filename = Path(str(payload.get("filename") or "").strip()).name
-    group_id = secure_filename(str(payload.get("group_id") or "").strip())
-    if not filename:
-        return jsonify({"ok": False, "message": "filename is required"}), 400
-    metadata = load_media_groups()
-    if group_id and not any(str(item.get("id")) == group_id for item in metadata.get("groups") or []):
-        return jsonify({"ok": False, "message": "group not found"}), 404
-    assignments = dict(metadata.get("assignments") or {})
-    if group_id:
-        assignments[filename] = group_id
-    else:
-        assignments.pop(filename, None)
-    metadata["assignments"] = assignments
-    save_media_groups(metadata)
-    return jsonify({"ok": True, "filename": filename, "group_id": group_id})
-
-
 @APP.post("/api/media-library/cleanup")
 def api_media_library_cleanup():
     payload = request.get_json(silent=True) or {}
@@ -7784,7 +7782,7 @@ def api_media_library_cleanup():
     if usage_mode not in {"any", "never", "unused"}:
         return jsonify({"ok": False, "message": "invalid usage mode"}), 400
     execute = bool(payload.get("execute"))
-    metadata = load_media_groups()
+    metadata = load_media_metadata()
     result = cleanup_verified_duplicates(
         metadata,
         execute=execute,
@@ -7799,6 +7797,7 @@ def api_media_library_cleanup():
 def api_nodes():
     result = []
     profile_map = node_youtube_profile_map()
+    stream_locks = node_stream_lock_map()
     profiles = {profile["id"]: public_youtube_profile(profile) for profile in load_youtube_profiles_config()["profiles"]}
     default_profile = active_youtube_profile_id()
     for node in load_nodes():
@@ -7810,6 +7809,13 @@ def api_nodes():
         node_view["youtube_profile_id"] = profile_id
         node_view["youtube_profile_name"] = str(profile.get("name") or profile_id)
         node_view["health"] = request_node_json(node, "/api/status") if node.get("enabled", True) else {"ok": False}
+        lock = dict(stream_locks.get(str(node.get("id") or ""), {}))
+        stream_config = node_view["health"].get("stream_config") or {}
+        if not lock.get("youtube_stream_id") and stream_config.get("youtube_stream_id"):
+            lock["youtube_stream_id"] = str(stream_config.get("youtube_stream_id") or "")
+        if not lock.get("video_path") and stream_config.get("video_path"):
+            lock["video_path"] = str(stream_config.get("video_path") or "")
+        node_view["stream_lock"] = lock
         urls = node_role_urls(node)
         agent_health = node_view["health"]
         agent_info = agent_health.get("agent") or {}
@@ -7842,6 +7848,24 @@ def api_node_youtube_profile():
         "node_id": node_id,
         "profile_id": saved_profile_id,
         "profile": profile,
+    })
+
+
+@APP.post("/api/nodes/stream-lock")
+def api_node_stream_lock():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    if not node_by_id(node_id):
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    lock = set_node_stream_lock(node_id, {
+        key: payload.get(key)
+        for key in ("youtube_stream_id", "video_path", "library_media_name", "media_local", "source_node_id")
+        if key in payload
+    })
+    return jsonify({
+        "ok": True,
+        "node_id": node_id,
+        "stream_lock": lock,
     })
 
 
@@ -8628,14 +8652,6 @@ def api_node_media_rename():
     if not media or not new_name:
         return jsonify({"ok": False, "message": "media and new_name are required"}), 400
     result = post_node_json(node, "/api/media/rename", {"media": media, "new_name": new_name}, timeout=30)
-    if result.get("ok"):
-        old_name = Path(media).name
-        metadata = load_media_groups()
-        assignments = dict(metadata.get("assignments") or {})
-        if old_name in assignments:
-            assignments[new_name] = assignments.pop(old_name)
-            metadata["assignments"] = assignments
-            save_media_groups(metadata)
     return jsonify({"node_id": node_id, **result}), 200 if result.get("ok") else int(result.get("status_code") or 502)
 
 
