@@ -617,7 +617,7 @@ HTML = r"""
     .node-space-card { padding-bottom: 10px; }
     .node-space-card h2 { margin-bottom: 2px; }
     .node-space-card p { margin: 0 0 5px; font-size: 12px; line-height: 1.35; }
-    .node-space-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); grid-auto-rows: 88px; gap: 7px; max-height: min(198px, calc(100vh - 420px)); overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
+    .node-space-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); grid-auto-rows: 88px; gap: 7px; max-height: 88px; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
     .node-space-ring-item { min-width: 0; min-height: 0; height: 88px; display: grid; justify-items: center; align-content: center; gap: 2px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; cursor: pointer; }
     .node-space-ring-item:hover, .node-space-ring-item.open { border-color: var(--accent); background: rgba(54,211,153,.09); }
     .node-space-ring-item strong { font-size: 11px; line-height: 1.15; }
@@ -1007,7 +1007,7 @@ HTML = r"""
     }
     .monitor-panel h4 { margin: 0 0 5px; font-size: 13px; color: #d6fff0; }
     .node-table-card { min-height: 0; overflow: hidden; }
-    .node-role-split { display: grid; grid-template-rows: minmax(120px, 1fr) 12px minmax(96px, var(--hub-panel-height, 150px)); height: clamp(420px, 58vh, 650px); min-height: 0; max-height: 650px; font-size: 14px; overflow: hidden; }
+    .node-role-split { display: grid; grid-template-rows: minmax(120px, 1fr) 12px minmax(96px, var(--hub-panel-height, 150px)); height: var(--node-role-split-height, auto); min-height: 330px; font-size: 14px; overflow: hidden; }
     .node-role-pane { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
     .node-role-pane .node-table { max-height: none; min-height: 0; overflow: auto; }
     .node-role-splitter { position: relative; cursor: ns-resize; touch-action: none; user-select: none; }
@@ -1880,6 +1880,40 @@ HTML = r"""
     const HUB_HEIGHT_STORAGE_KEY = "streamHubHubPanelHeight";
     const HUB_PANEL_MIN_HEIGHT = 96;
     const AGENT_PANEL_MIN_HEIGHT = 120;
+    const NODE_SPLIT_MIN_HEIGHT = 330;
+
+    function naturalRolePaneHeight(pane) {
+      if (!pane) return 0;
+      const title = pane.querySelector(".role-group-title");
+      const table = pane.querySelector(".node-table");
+      const styles = getComputedStyle(pane);
+      const padding = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
+      const titleStyles = title ? getComputedStyle(title) : null;
+      const titleMargins = titleStyles ? parseFloat(titleStyles.marginTop) + parseFloat(titleStyles.marginBottom) : 0;
+      return Math.ceil((title?.offsetHeight || 0) + titleMargins + (table?.scrollHeight || 0) + padding + 8);
+    }
+
+    function syncNodeRoleSplitHeight() {
+      const split = refs.nodeRoleSplit;
+      if (!split) return;
+      if (window.matchMedia("(max-width: 1080px)").matches) {
+        split.style.removeProperty("--node-role-split-height");
+        clampHubPanelHeight();
+        return;
+      }
+      const panes = split.querySelectorAll(".node-role-pane");
+      const splitterHeight = refs.nodeRoleSplitter?.offsetHeight || 12;
+      const naturalHeight = naturalRolePaneHeight(panes[0]) + splitterHeight + naturalRolePaneHeight(panes[1]);
+      const splitTop = split.getBoundingClientRect().top;
+      const monitorBottom = document.querySelector(".monitor-card")?.getBoundingClientRect().bottom || 0;
+      const viewportBottom = window.innerHeight - 14;
+      const rowBottom = monitorBottom > splitTop ? monitorBottom : viewportBottom;
+      const availableHeight = Math.max(NODE_SPLIT_MIN_HEIGHT, Math.floor(rowBottom - splitTop));
+      const targetHeight = Math.max(NODE_SPLIT_MIN_HEIGHT, Math.min(naturalHeight, availableHeight));
+      split.style.setProperty("--node-role-split-height", `${targetHeight}px`);
+      clampHubPanelHeight();
+    }
+
     function setHubPanelHeight(height) {
       const split = refs.nodeRoleSplit;
       if (!split) return;
@@ -1929,7 +1963,7 @@ HTML = r"""
         setHubPanelHeight(current + (event.key === "ArrowUp" ? 20 : -20));
         event.preventDefault();
       });
-      window.addEventListener("resize", clampHubPanelHeight);
+      window.addEventListener("resize", syncNodeRoleSplitHeight);
     }
 
     renderTransfer({
@@ -2474,7 +2508,7 @@ HTML = r"""
         <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
         ${activeHubs.map((node) => renderHubRow(node)).join("")}
       ` : `<div class="empty-state">还没有已激活的 Hub。</div>`;
-      window.requestAnimationFrame(clampHubPanelHeight);
+      window.requestAnimationFrame(syncNodeRoleSplitHeight);
     }
 
     function mediaGroupName(id) {
