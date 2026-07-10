@@ -456,6 +456,13 @@ class YouTubeAPIClientTests(unittest.TestCase):
 
         self.assertIn("const YOUTUBE_PROFILE_VISIBLE_SLOTS = 6", app.HTML)
         self.assertIn('class="youtube-control-strip"', app.HTML)
+        self.assertIn("grid-template-columns: minmax(245px, 1.7fr) repeat(4, minmax(112px, 1fr))", app.HTML)
+        self.assertIn('class="wizard-field youtube-control-item"', app.HTML)
+        self.assertIn("API Usage Today（total 10000）", app.HTML)
+        self.assertIn("Auto Tune State", app.HTML)
+        self.assertIn("Auto Tune Time (s)", app.HTML)
+        self.assertIn("Cooldown (s)", app.HTML)
+        self.assertIn("Max Kbps", app.HTML)
         self.assertIn('class="wizard-field youtube-profile-row"', app.HTML)
         self.assertIn('class="youtube-profile-actions"', app.HTML)
         self.assertIn('class="wizard-field youtube-agent-row"', app.HTML)
@@ -463,9 +470,13 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertIn("border-color: #ff3b4f", app.HTML)
         self.assertIn(".youtube-agent-card.active", app.HTML)
         self.assertIn('refs.youtubeProfileQuickBar.addEventListener("dblclick"', app.HTML)
-        self.assertIn('refs.youtubeProfileNameInput.addEventListener("dblclick"', app.HTML)
+        self.assertIn('data-youtube-profile-edit="${escapeHtml(profile.id)}"', app.HTML)
+        self.assertIn('id="youtubeProfileNameInput" type="hidden"', app.HTML)
+        self.assertIn('id="youtubeNodeInput" type="hidden"', app.HTML)
         self.assertIn("function saveYouTubeProfileName", app.HTML)
         self.assertIn("overflow-x: auto", app.HTML)
+        self.assertNotIn('class="youtube-profile-name-line', app.HTML)
+        self.assertNotIn('id="youtubeNodeInput" type="text"', app.HTML)
 
     def test_youtube_health_recommendation_reduces_high_bitrate(self):
         result = youtube_health_recommendation(
