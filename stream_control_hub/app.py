@@ -468,6 +468,69 @@ HTML = r"""
       gap: 12px;
       align-items: center;
     }
+    .task-flow {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .task-card {
+      min-height: 88px;
+      display: grid;
+      gap: 6px;
+      align-content: start;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(19, 32, 28, 0.72);
+      color: var(--text);
+      text-align: left;
+      font-weight: 700;
+    }
+    .task-card strong { font-size: 14px; }
+    .task-card small { color: var(--muted); line-height: 1.35; }
+    .task-card:hover { border-color: var(--accent); background: rgba(54,211,153,.08); }
+    .flow-status {
+      margin-top: 8px;
+      min-height: 28px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 9px;
+      border: 1px dashed rgba(54, 211, 153, 0.46);
+      border-radius: 9px;
+      color: var(--muted);
+      background: rgba(54, 211, 153, 0.06);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .checklist {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .check-step {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(7, 18, 14, 0.35);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .check-step.done {
+      border-color: rgba(54, 211, 153, 0.8);
+      color: var(--text);
+      background: rgba(54, 211, 153, 0.12);
+    }
+    .check-step.blocked {
+      border-color: rgba(251, 191, 36, 0.68);
+      color: #fde68a;
+    }
     h1 { margin: 0; font-size: 26px; letter-spacing: 0; }
     p { color: var(--muted); margin: 5px 0 0; line-height: 1.45; }
     .grid { display: grid; grid-template-columns: minmax(620px, 1.05fr) minmax(540px, 0.95fr); gap: 12px; margin-top: 10px; align-items: start; }
@@ -499,11 +562,47 @@ HTML = r"""
       font: inherit;
     }
     textarea { resize: vertical; min-height: 88px; }
-    button { cursor: pointer; font-weight: 800; }
+    button {
+      position: relative;
+      cursor: pointer;
+      font-weight: 800;
+      transition: transform .12s ease, filter .12s ease, box-shadow .12s ease, border-color .12s ease;
+    }
+    button:hover:not(:disabled) { filter: brightness(1.08); border-color: var(--accent); }
+    button:active:not(:disabled), button.is-clicked:not(:disabled) { transform: translateY(1px) scale(0.99); }
+    button[data-busy="1"]::after {
+      content: "";
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-left: 8px;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      vertical-align: -1px;
+      animation: spin .75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
     button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #04100c; border: none; }
     button.danger { background: #6f1d2d; color: #ffe4ea; }
     button.tiny { padding: 7px 8px; font-size: 12px; border-radius: 8px; white-space: nowrap; }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .action-hint { margin-top: 6px; color: var(--muted); font-size: 12px; font-weight: 800; }
+    .guided-empty {
+      display: grid;
+      gap: 10px;
+      justify-items: center;
+      align-content: center;
+      min-height: 150px;
+      padding: 18px;
+      border: 1px dashed var(--line);
+      border-radius: 10px;
+      text-align: center;
+      color: var(--muted);
+      background: rgba(7, 18, 14, 0.35);
+    }
+    .guided-empty strong { color: var(--text); font-size: 16px; }
+    .guided-empty .actions { justify-content: center; }
     input[type=file] { width: 100%; }
     .media-list, .log { display: grid; gap: 8px; }
     .node, .media {
@@ -1239,7 +1338,7 @@ HTML = r"""
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     @media (max-width: 760px) { .node-space-rings { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @media (max-width: 1080px) {
-      .grid, .split, .hero, .node-detail, .bottom-section, .media-workspace, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
+      .grid, .split, .hero, .task-flow, .node-detail, .bottom-section, .media-workspace, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .bottom-section { grid-column: auto; }
       .monitor-card, .node-table-card { min-height: auto; }
       .node-monitor { min-height: 420px; }
@@ -1276,6 +1375,26 @@ HTML = r"""
       </div>
     </section>
 
+    <section class="task-flow" aria-label="常用任务入口">
+      <button class="task-card" type="button" data-scroll-target=".command-strip">
+        <strong>我要开播</strong>
+        <small>按顺序选择推流服务器、视频和 YouTube 目标，再一键 Smart Start。</small>
+      </button>
+      <button class="task-card" type="button" data-scroll-target=".upload-card">
+        <strong>我要上传视频</strong>
+        <small>先选推流服务器，再把视频直接上传到该服务器。</small>
+      </button>
+      <button class="task-card" type="button" data-open-connect>
+        <strong>我要接入新 VPS</strong>
+        <small>输入 Tailscale 100.x 地址，系统自动检测并接入 Agent。</small>
+      </button>
+      <button class="task-card" type="button" data-scroll-target=".monitor-card">
+        <strong>我要看异常</strong>
+        <small>查看在线、推流、磁盘、网络和最近操作反馈。</small>
+      </button>
+    </section>
+    <div class="flow-status" id="flowStatus" aria-live="polite">先接入或选择一台推流服务器，然后上传/选择视频即可开播。</div>
+
     <section class="card command-strip">
       <div class="command-head">
         <div>
@@ -1284,6 +1403,7 @@ HTML = r"""
         </div>
         <span class="pill warn">核对节点后再开播</span>
       </div>
+      <div class="checklist" id="smartStartChecklist" aria-live="polite"></div>
       <div class="command-grid">
         <div class="command-field">
           <label>当前控制节点</label>
@@ -1758,6 +1878,8 @@ HTML = r"""
       syncAllHubsBtn: document.getElementById("syncAllHubsBtn"),
       editableHubTitle: document.getElementById("editableHubTitle"),
       themeSelect: document.getElementById("themeSelect"),
+      flowStatus: document.getElementById("flowStatus"),
+      smartStartChecklist: document.getElementById("smartStartChecklist"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
       nodeSpaceRings: document.getElementById("nodeSpaceRings"),
@@ -1882,6 +2004,84 @@ HTML = r"""
     const HUB_PANEL_MIN_HEIGHT = 96;
     const AGENT_PANEL_MIN_HEIGHT = 120;
     const NODE_SPLIT_MIN_HEIGHT = 330;
+
+    function uiMessage(message) {
+      if (refs.flowStatus) refs.flowStatus.textContent = message;
+    }
+
+    function flashButton(button) {
+      if (!button || button.disabled) return;
+      button.classList.remove("is-clicked");
+      void button.offsetWidth;
+      button.classList.add("is-clicked");
+      window.setTimeout(() => button.classList.remove("is-clicked"), 180);
+    }
+
+    function setButtonReady(button, ready, reason = "") {
+      if (!button || button.dataset.busy === "1") return;
+      button.disabled = !ready;
+      button.title = ready ? "" : reason;
+      button.dataset.disabledReason = ready ? "" : reason;
+    }
+
+    function prerequisiteSnapshot() {
+      const node = selectedNode();
+      const hasNode = Boolean(node?.id);
+      const mediaOption = refs.streamVideoSelect?.selectedOptions?.[0];
+      const hasVideo = Boolean(refs.streamVideoSelect?.value || mediaOption?.dataset?.libraryName);
+      const mode = refs.streamOutputModeInput?.value || "direct";
+      const youtubeApiMode = mode === "youtube_api";
+      const relayMode = mode === "local_relay";
+      const hasTarget = relayMode || (youtubeApiMode ? Boolean(refs.youtubeStreamSelect?.value) : Boolean(refs.streamKeyInput?.value.trim()));
+      const hasUploadFile = Boolean(refs.mediaInput?.files?.[0]);
+      const nodeReady = hasNode && node?.enabled !== false;
+      return { node, hasNode, nodeReady, hasVideo, mode, youtubeApiMode, relayMode, hasTarget, hasUploadFile };
+    }
+
+    function renderChecklist(state) {
+      if (!refs.smartStartChecklist) return;
+      const targetLabel = state.relayMode ? "本地中继" : state.youtubeApiMode ? "YouTube API 直播流" : "手动直播码";
+      const steps = [
+        { label: "推流服务器", done: state.nodeReady, reason: "先接入或选择一台推流服务器" },
+        { label: "服务器视频", done: state.hasVideo, reason: "先上传或选择一个视频" },
+        { label: targetLabel, done: state.hasTarget, reason: state.youtubeApiMode ? "先连接 YouTube 并选择直播流" : "填写直播码或切换到本地中继" },
+      ];
+      refs.smartStartChecklist.innerHTML = steps.map((step) => `
+        <span class="check-step ${step.done ? "done" : "blocked"}" title="${escapeHtml(step.done ? "已完成" : step.reason)}">
+          ${step.done ? "✓" : "·"} ${escapeHtml(step.label)}
+        </span>
+      `).join("");
+    }
+
+    function updatePrimaryActionStates() {
+      const state = prerequisiteSnapshot();
+      renderChecklist(state);
+      const missing = [];
+      if (!state.nodeReady) missing.push("选择推流服务器");
+      if (!state.hasVideo) missing.push("选择视频");
+      if (!state.hasTarget) missing.push(state.youtubeApiMode ? "选择 YouTube 直播流" : state.relayMode ? "" : "填写直播码");
+      const smartReady = state.nodeReady && state.hasVideo && state.hasTarget;
+      const previewReady = state.nodeReady && state.hasVideo;
+      const uploadReady = state.nodeReady && state.hasUploadFile && !activeUpload;
+      setButtonReady(refs.previewTuneBtn, previewReady, previewReady ? "" : "先选择推流服务器和视频");
+      setButtonReady(refs.smartStartBtn, smartReady, smartReady ? "" : `还缺少：${missing.filter(Boolean).join("、")}`);
+      setButtonReady(refs.uploadBtn, uploadReady, uploadReady ? "" : state.nodeReady ? "先选择一个视频文件" : "先选择推流服务器");
+      if (!nodes.length) {
+        uiMessage("还没有推流服务器。点击“我要接入新 VPS”，输入 Tailscale 100.x 地址即可接入。");
+      } else if (!state.nodeReady) {
+        uiMessage("请选择一台在线推流服务器。");
+      } else if (!state.hasVideo) {
+        uiMessage(`已选择 ${state.node?.name || state.node?.id}。下一步：上传视频或从资源管理里选一个视频。`);
+      } else if (!state.hasTarget) {
+        uiMessage(state.youtubeApiMode ? "已选择视频。下一步：连接 YouTube API 并选择直播流。" : "已选择视频。下一步：填写直播码，或切换为本地中继。");
+      } else {
+        uiMessage("开播条件已就绪，可以点击 Smart Start。");
+      }
+    }
+
+    function scrollToSelector(selector) {
+      document.querySelector(selector)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
 
     function naturalRolePaneHeight(pane) {
       if (!pane) return 0;
@@ -2318,6 +2518,18 @@ HTML = r"""
 
     function renderMonitor(node) {
       if (!node) {
+        return `
+          <div class="guided-empty">
+            <strong>还没有推流服务器</strong>
+            <span>先在目标 VPS 安装 Agent，然后输入它的 Tailscale 100.x 地址，系统会自动检测并接入。</span>
+            <div class="actions">
+              <button class="primary" data-open-connect>接入推流服务器</button>
+              <button data-scroll-target=".bottom-section">查看安装命令</button>
+            </div>
+          </div>
+        `;
+      }
+      if (!node) {
         return `<div class="empty-state">还没有配置节点。把 VPS 节点加入 config/nodes.json 后会显示在这里。</div>`;
       }
       const h = node.health || {};
@@ -2487,8 +2699,9 @@ HTML = r"""
       refs.hubNodeCount.textContent = String(activeHubs.length);
       if (!nodes.length) {
         refs.nodeMonitor.innerHTML = renderMonitor(null);
-        refs.nodeList.innerHTML = `<div class="empty-state">还没有配置节点。</div>`;
-        refs.hubNodeList.innerHTML = `<div class="empty-state">还没有配置节点。</div>`;
+        refs.nodeList.innerHTML = `<div class="guided-empty"><strong>等待接入 Agent</strong><span>点击“接入推流服务器”，或先复制一键安装命令到目标 VPS。</span><button class="primary" data-open-connect>连接 Agent</button></div>`;
+        refs.hubNodeList.innerHTML = `<div class="empty-state">还没有激活的 Hub。</div>`;
+        updatePrimaryActionStates();
         return;
       }
       if (!nodes.some((node) => String(node.id) === String(selectedNodeId))) {
@@ -2510,6 +2723,7 @@ HTML = r"""
         ${activeHubs.map((node) => renderHubRow(node)).join("")}
       ` : `<div class="empty-state">还没有已激活的 Hub。</div>`;
       window.requestAnimationFrame(syncNodeRoleSplitHeight);
+      updatePrimaryActionStates();
     }
 
     function mediaGroupName(id) {
@@ -2757,12 +2971,14 @@ HTML = r"""
           }).join("") : `<div class="empty-state">当前筛选下没有视频资源。</div>`}
         </div>
       `;
+      updatePrimaryActionStates();
     }
 
     function syncStreamOutputMode() {
       const mode = refs.streamOutputModeInput.value || "direct";
       refs.streamKeyInput.disabled = mode !== "direct";
       refs.youtubeStreamSelect.disabled = mode !== "youtube_api";
+      updatePrimaryActionStates();
     }
 
     function setYouTubeModalOpen(open) {
@@ -3473,6 +3689,8 @@ HTML = r"""
         renderTransfer({ status: "failed", badge: "失败", title: "上传未开始", message: "请先选择一个视频文件。" });
         return;
       }
+      refs.uploadBtn.dataset.busy = "1";
+      uiMessage("正在准备上传线路，请稍等。");
       refs.uploadBtn.disabled = true;
       refs.cancelUploadBtn.disabled = false;
       const uploadId = `browser_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -3649,9 +3867,11 @@ HTML = r"""
             : friendlyError(error, "上传失败"),
         });
       } finally {
+        delete refs.uploadBtn.dataset.busy;
         refs.uploadBtn.disabled = false;
         refs.cancelUploadBtn.disabled = true;
         if (activeUpload === uploadState) activeUpload = null;
+        updatePrimaryActionStates();
       }
     }
 
@@ -4069,7 +4289,9 @@ HTML = r"""
         refs.tuneBox.textContent = "请先选择右侧节点，并选择该节点服务器视频。";
         return;
       }
+      refs.previewTuneBtn.dataset.busy = "1";
       refs.previewTuneBtn.disabled = true;
+      uiMessage("正在分析节点和视频，生成推荐参数。");
       refs.tuneBox.textContent = "正在让节点分析 CPU / 内存 / 网络 / 视频源...";
       try {
         const data = await postNodeAction("/api/nodes/stream/recommend", payload);
@@ -4080,7 +4302,9 @@ HTML = r"""
           refs.tuneBox.textContent = data.message || "智能调优失败";
         }
       } finally {
+        delete refs.previewTuneBtn.dataset.busy;
         refs.previewTuneBtn.disabled = false;
+        updatePrimaryActionStates();
       }
     }
 
@@ -4153,7 +4377,9 @@ HTML = r"""
         refs.tuneBox.textContent = `无法启动：还缺少 ${missing.join("、")}。`;
         return;
       }
+      refs.smartStartBtn.dataset.busy = "1";
       refs.smartStartBtn.disabled = true;
+      uiMessage("Smart Start 正在启动，会先确认视频和推流参数。");
       refs.tuneBox.textContent = "正在启动 Smart Start：会在选中节点停止重复推流，并启动一个干净 FFmpeg。";
       try {
         const mediaResult = await ensureSmartStartMedia(payload);
@@ -4188,7 +4414,9 @@ HTML = r"""
         renderTransfer({ status: "failed", badge: "失败", title: "Smart Start 未启动", message });
         log(`Smart Start 失败：${message}`);
       } finally {
+        delete refs.smartStartBtn.dataset.busy;
         refs.smartStartBtn.disabled = false;
+        updatePrimaryActionStates();
       }
     }
 
@@ -4255,6 +4483,7 @@ HTML = r"""
         renderStreamControls();
         const option = [...refs.streamVideoSelect.options].find((item) => item.dataset.libraryName === mediaName);
         if (option) option.selected = true;
+        updatePrimaryActionStates();
         return;
       }
       if (action === "rename") {
@@ -4336,6 +4565,7 @@ HTML = r"""
       row.classList.add("selected");
       const input = row.querySelector("[data-media-check]");
       if (input) input.checked = true;
+      updatePrimaryActionStates();
     }
 
     function hideMediaMenu() {
@@ -5080,6 +5310,23 @@ HTML = r"""
       event.preventDefault();
       document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
     });
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest("button");
+      if (button) flashButton(button);
+      const connectButton = event.target.closest("[data-open-connect]");
+      if (connectButton) {
+        event.preventDefault();
+        setTailscaleWizardOpen(true);
+        uiMessage("正在打开 Agent 快速连接。输入目标服务器的 Tailscale 100.x 地址即可检测并接入。");
+        return;
+      }
+      const scrollButton = event.target.closest("[data-scroll-target]");
+      if (scrollButton) {
+        event.preventDefault();
+        scrollToSelector(scrollButton.dataset.scrollTarget);
+        uiMessage("已跳到对应操作区域。");
+      }
+    });
     refs.refreshBtn.addEventListener("click", refreshAll);
     refs.mediaGroupFilter.addEventListener("change", () => {
       resourceTableFilters.group = refs.mediaGroupFilter.value || "";
@@ -5108,6 +5355,7 @@ HTML = r"""
     if (refs.mediaAssignGroupBtn) refs.mediaAssignGroupBtn.addEventListener("click", assignSelectedMediaGroup);
     refs.mediaCleanupBtn.addEventListener("click", cleanupDuplicateMedia);
     refs.uploadBtn.addEventListener("click", uploadMedia);
+    refs.mediaInput.addEventListener("change", updatePrimaryActionStates);
     refs.cancelUploadBtn.addEventListener("click", cancelActiveUpload);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdates);
     refs.showInstallCommandsBtn.addEventListener("click", showInstallCommands);
@@ -5148,6 +5396,9 @@ HTML = r"""
     refs.applyTuneBtn.addEventListener("click", applyLastTune);
     refs.smartStartBtn.addEventListener("click", smartStart);
     refs.streamOutputModeInput.addEventListener("change", syncStreamOutputMode);
+    refs.streamVideoSelect.addEventListener("change", updatePrimaryActionStates);
+    refs.streamKeyInput.addEventListener("input", updatePrimaryActionStates);
+    refs.youtubeStreamSelect.addEventListener("change", updatePrimaryActionStates);
     refs.streamUrlInput.addEventListener("input", () => { refs.streamUrlInput.dataset.userEdited = "1"; });
     [refs.presetInput, refs.videoBitrateInput, refs.audioBitrateInput, refs.fpsInput, refs.resolutionInput, refs.keyframeInput].forEach((el) => {
       el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
