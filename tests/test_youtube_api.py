@@ -451,6 +451,22 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertIn("account-a", [item["id"] for item in listed.get_json()["profiles"]])
         self.assertEqual(deleted.status_code, 200)
 
+    def test_youtube_profile_panel_layout_supports_rename_and_scroll(self):
+        from stream_control_hub import app
+
+        self.assertIn("const YOUTUBE_PROFILE_VISIBLE_SLOTS = 6", app.HTML)
+        self.assertIn('class="youtube-control-strip"', app.HTML)
+        self.assertIn('class="wizard-field youtube-profile-row"', app.HTML)
+        self.assertIn('class="youtube-profile-actions"', app.HTML)
+        self.assertIn('class="wizard-field youtube-agent-row"', app.HTML)
+        self.assertIn(".profile-chip.active", app.HTML)
+        self.assertIn("border-color: #ff3b4f", app.HTML)
+        self.assertIn(".youtube-agent-card.active", app.HTML)
+        self.assertIn('refs.youtubeProfileQuickBar.addEventListener("dblclick"', app.HTML)
+        self.assertIn('refs.youtubeProfileNameInput.addEventListener("dblclick"', app.HTML)
+        self.assertIn("function saveYouTubeProfileName", app.HTML)
+        self.assertIn("overflow-x: auto", app.HTML)
+
     def test_youtube_health_recommendation_reduces_high_bitrate(self):
         result = youtube_health_recommendation(
             {

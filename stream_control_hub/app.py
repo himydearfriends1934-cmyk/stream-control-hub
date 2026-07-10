@@ -844,36 +844,91 @@ HTML = r"""
       white-space: nowrap;
     }
     .youtube-import-panel textarea, .oauth-manual-field { display: none; }
-    .profile-quick-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 7px;
+    .youtube-control-strip {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: minmax(190px, 1fr) minmax(250px, 1.2fr) minmax(250px, 1.2fr);
+      gap: 10px;
+      align-items: end;
+    }
+    .youtube-profile-row,
+    .youtube-agent-row {
+      grid-column: 1 / -1;
+    }
+    .youtube-profile-picker {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
       align-items: center;
     }
+    .profile-quick-row {
+      --youtube-profile-slots: 6;
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 7px;
+      align-items: stretch;
+      min-width: 0;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-bottom: 2px;
+      scrollbar-width: thin;
+    }
     .profile-chip {
-      max-width: 180px;
-      padding: 8px 10px;
-      border-radius: 999px;
+      flex: 0 0 calc((100% - 35px) / var(--youtube-profile-slots));
+      min-width: 128px;
+      min-height: 38px;
+      padding: 7px 9px;
+      border-radius: 8px;
       border: 1px solid var(--line);
       background: rgba(255,255,255,.04);
       color: var(--muted);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+      white-space: normal;
+      text-align: center;
     }
     .profile-chip.active {
-      border-color: var(--accent);
-      color: var(--text);
-      background: rgba(54,211,153,.18);
-      box-shadow: 0 0 0 1px rgba(54,211,153,.16) inset;
+      border-color: #ff3b4f;
+      color: #fff7f8;
+      background: rgba(255,59,79,.22);
+      box-shadow: 0 0 0 1px rgba(255,59,79,.3) inset;
+    }
+    .youtube-profile-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      justify-content: flex-end;
     }
     .profile-stepper {
-      width: 38px;
-      height: 38px;
+      width: 30px;
+      height: 30px;
       padding: 0;
       border-radius: 999px;
-      font-size: 18px;
+      font-size: 15px;
       line-height: 1;
+    }
+    .youtube-profile-name-line {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .youtube-profile-name-line input[readonly] {
+      cursor: pointer;
+      color: var(--muted);
+      background: rgba(255,255,255,.035);
+    }
+    .youtube-profile-name-line input.editing {
+      color: var(--text);
+      border-color: #ff3b4f;
+      box-shadow: 0 0 0 1px rgba(255,59,79,.24) inset;
     }
     .node-profile-select {
       width: 100%;
@@ -889,30 +944,46 @@ HTML = r"""
       font-size: 11px;
       font-weight: 800;
     }
-    .youtube-agent-list {
+    .youtube-agent-head {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+    }
+    .youtube-agent-list {
+      display: flex;
+      flex-wrap: nowrap;
       gap: 7px;
-      max-height: 150px;
-      overflow: auto;
+      overflow-x: auto;
+      overflow-y: hidden;
       padding: 7px;
       border: 1px solid rgba(49, 89, 76, .78);
       border-radius: 10px;
       background: rgba(7, 18, 14, .5);
+      scrollbar-width: thin;
     }
     .youtube-agent-card {
+      flex: 0 0 calc((100% - 35px) / 6);
+      min-width: 150px;
       display: grid;
       gap: 3px;
       padding: 8px 9px;
       border: 1px solid var(--line);
-      border-radius: 9px;
+      border-radius: 8px;
       color: var(--text);
       background: rgba(25,43,37,.72);
       text-align: left;
+      overflow-wrap: anywhere;
+      white-space: normal;
     }
-    .youtube-agent-card.active { border-color: var(--accent); background: rgba(54,211,153,.13); }
-    .youtube-agent-card.streaming { opacity: .5; filter: grayscale(.5); }
-    .youtube-agent-card small { color: var(--muted); }
+    .youtube-agent-card.active {
+      border-color: #ff3b4f;
+      background: rgba(255,59,79,.22);
+      box-shadow: 0 0 0 1px rgba(255,59,79,.28) inset;
+    }
+    .youtube-agent-card.streaming:not(.active) { opacity: .5; filter: grayscale(.5); }
+    .youtube-agent-card small { color: var(--muted); line-height: 1.25; }
+    .youtube-agent-card strong { line-height: 1.25; }
     .youtube-details {
       display: grid;
       gap: 10px;
@@ -1416,6 +1487,9 @@ HTML = r"""
       .node-row { grid-template-columns: 24px minmax(0, 1fr); }
       .node-state, .row-actions { grid-column: 2; }
       .wizard-grid, .wizard-role-grid, .wizard-existing-grid, .wizard-step-grid, .wizard-actions { grid-template-columns: 1fr; }
+      .youtube-control-strip { grid-template-columns: 1fr; }
+      .youtube-agent-card { flex-basis: min(220px, 70vw); }
+      .profile-chip { flex-basis: min(190px, 70vw); }
     }
   </style>
 </head>
@@ -1808,46 +1882,49 @@ HTML = r"""
         <textarea id="youtubeJsonInput" spellcheck="false" placeholder="也可以把 Google OAuth client JSON 直接粘贴到这里。"></textarea>
       </div>
       <div class="wizard-grid">
-        <div class="wizard-field">
+        <div class="youtube-control-strip">
+          <div class="wizard-field">
+            <label>API Usage Today</label>
+            <input id="youtubeUsageInput" type="text" readonly value="0 calls / 0 units">
+          </div>
+          <div class="wizard-field">
+            <label>Auto Tune</label>
+            <div class="command-pair">
+              <select id="youtubeAutoTuneEnabledInput">
+                <option value="0">Off</option>
+                <option value="1">On</option>
+              </select>
+              <input id="youtubeAutoTuneIntervalInput" type="number" min="60" max="3600" step="60" value="300" title="Check interval seconds">
+            </div>
+          </div>
+          <div class="wizard-field">
+            <label>Cooldown / Max Kbps</label>
+            <div class="command-pair">
+              <input id="youtubeAutoTuneCooldownInput" type="number" min="60" max="7200" step="60" value="900" title="Cooldown seconds">
+              <input id="youtubeAutoTuneMaxBitrateInput" type="number" min="800" max="30000" step="100" value="6000" title="Max video bitrate Kbps">
+            </div>
+          </div>
+        </div>
+        <div class="wizard-field youtube-profile-row">
           <label>YouTube Profile</label>
           <select id="youtubeProfileSelect" hidden></select>
-          <div class="profile-quick-row" id="youtubeProfileQuickBar"></div>
-        </div>
-        <div class="wizard-field">
-          <label>Profile Name</label>
-          <input id="youtubeProfileNameInput" type="text" maxlength="80" placeholder="Account A / Channel group">
-        </div>
-        <div class="wizard-field">
-          <label>API Usage Today</label>
-          <input id="youtubeUsageInput" type="text" readonly value="0 calls / 0 units">
-        </div>
-        <div class="wizard-field">
-          <label>Profile Actions</label>
-          <div class="command-pair">
-            <button class="profile-stepper" id="youtubeProfileAddBtn" type="button" title="新增 Profile">+</button>
-            <button class="profile-stepper" id="youtubeProfileDeleteBtn" type="button" title="删除当前 Profile">-</button>
+          <div class="youtube-profile-picker">
+            <div class="profile-quick-row" id="youtubeProfileQuickBar"></div>
+            <div class="youtube-profile-actions" aria-label="Profile actions">
+              <button class="profile-stepper" id="youtubeProfileAddBtn" type="button" title="Add Profile">+</button>
+              <button class="profile-stepper" id="youtubeProfileDeleteBtn" type="button" title="Delete current Profile">-</button>
+            </div>
           </div>
         </div>
-        <div class="wizard-field">
-          <label>Auto Tune</label>
-          <div class="command-pair">
-            <select id="youtubeAutoTuneEnabledInput">
-              <option value="0">Off</option>
-              <option value="1">On</option>
-            </select>
-            <input id="youtubeAutoTuneIntervalInput" type="number" min="60" max="3600" step="60" value="300" title="Check interval seconds">
-          </div>
+        <div class="youtube-profile-name-line youtube-profile-row">
+          <span>Profile Name</span>
+          <input id="youtubeProfileNameInput" type="text" maxlength="80" placeholder="Account A / Channel group" readonly title="Double-click to rename">
         </div>
-        <div class="wizard-field">
-          <label>Cooldown / Max Kbps</label>
-          <div class="command-pair">
-            <input id="youtubeAutoTuneCooldownInput" type="number" min="60" max="7200" step="60" value="900" title="Cooldown seconds">
-            <input id="youtubeAutoTuneMaxBitrateInput" type="number" min="800" max="30000" step="100" value="6000" title="Max video bitrate Kbps">
+        <div class="wizard-field youtube-agent-row">
+          <div class="youtube-agent-head">
+            <label>当前 Agent</label>
+            <input id="youtubeNodeInput" type="text" readonly value="先选择 Agent">
           </div>
-        </div>
-        <div class="wizard-field">
-          <label>当前 Agent</label>
-          <input id="youtubeNodeInput" type="text" readonly value="先选择 Agent">
           <div class="youtube-agent-list" id="youtubeAgentList"></div>
         </div>
         <div class="wizard-field">
@@ -2072,6 +2149,8 @@ HTML = r"""
     let youtubeOauthPollTimer = null;
     let youtubeProfiles = [];
     let activeYouTubeProfileId = "default";
+    const YOUTUBE_PROFILE_VISIBLE_SLOTS = 6;
+    let youtubeProfileNameEditing = false;
 
     const HUB_HEIGHT_STORAGE_KEY = "streamHubHubPanelHeight";
     const HUB_PANEL_MIN_HEIGHT = 96;
@@ -3145,9 +3224,63 @@ HTML = r"""
       };
     }
 
+    function currentYouTubeProfile() {
+      const profileId = selectedYouTubeProfileId();
+      return youtubeProfiles.find((item) => String(item.id) === String(profileId)) || null;
+    }
+
+    function setYouTubeProfileNameEditing(editing) {
+      youtubeProfileNameEditing = Boolean(editing);
+      if (!refs.youtubeProfileNameInput) return;
+      refs.youtubeProfileNameInput.readOnly = !youtubeProfileNameEditing;
+      refs.youtubeProfileNameInput.classList.toggle("editing", youtubeProfileNameEditing);
+      if (youtubeProfileNameEditing) {
+        refs.youtubeProfileNameInput.focus();
+        refs.youtubeProfileNameInput.select();
+      }
+    }
+
+    async function saveYouTubeProfileName(nextName) {
+      const profileId = selectedYouTubeProfileId();
+      const profile = currentYouTubeProfile();
+      const previousName = profile?.name || profileId || "YouTube Profile";
+      const name = String(nextName || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      if (!name) {
+        refs.youtubeProfileNameInput.value = previousName;
+        setYouTubeProfileNameEditing(false);
+        return;
+      }
+      if (name === previousName) {
+        setYouTubeProfileNameEditing(false);
+        return;
+      }
+      setYouTubeProfileNameEditing(false);
+      const data = await youtubeProfileApi("/api/youtube/profiles", {
+        ...youtubeProfilePayload(),
+        profile_id: profileId,
+        name,
+      });
+      if (data.ok) {
+        renderYouTubeProfiles(data.profiles || [], data.active_profile_id || data.profile?.id || profileId);
+        refs.youtubeWizardLog.textContent = `Profile renamed: ${name}`;
+      } else {
+        refs.youtubeProfileNameInput.value = previousName;
+        refs.youtubeWizardLog.textContent = data.message || "Profile rename failed";
+      }
+    }
+
+    function cancelYouTubeProfileNameEdit() {
+      const profile = currentYouTubeProfile();
+      refs.youtubeProfileNameInput.value = profile?.name || selectedYouTubeProfileId();
+      setYouTubeProfileNameEditing(false);
+    }
+
     function applyYouTubeProfileToForm(profile = {}) {
       activeYouTubeProfileId = profile.id || activeYouTubeProfileId || "default";
-      if (refs.youtubeProfileNameInput) refs.youtubeProfileNameInput.value = profile.name || activeYouTubeProfileId;
+      if (refs.youtubeProfileNameInput) {
+        refs.youtubeProfileNameInput.value = profile.name || activeYouTubeProfileId;
+        setYouTubeProfileNameEditing(false);
+      }
       if (refs.youtubeClientIdInput) refs.youtubeClientIdInput.value = profile.client_id || "";
       if (refs.youtubeClientSecretInput) refs.youtubeClientSecretInput.value = "";
       if (refs.youtubeAutoTuneEnabledInput) refs.youtubeAutoTuneEnabledInput.value = profile.auto_tune_enabled ? "1" : "0";
@@ -3180,10 +3313,12 @@ HTML = r"""
     function renderYouTubeProfileQuickBar() {
       if (!refs.youtubeProfileQuickBar) return;
       const profiles = youtubeProfiles.length ? youtubeProfiles : [{ id: "default", name: "Default YouTube Profile", usage: {} }];
+      refs.youtubeProfileQuickBar.style.setProperty("--youtube-profile-slots", String(YOUTUBE_PROFILE_VISIBLE_SLOTS));
       refs.youtubeProfileQuickBar.innerHTML = profiles.map((profile) => {
         const active = String(profile.id) === String(selectedYouTubeProfileId());
         const usage = profile.usage?.estimated_units || 0;
-        return `<button type="button" class="profile-chip ${active ? "active" : ""}" data-youtube-profile-chip="${escapeHtml(profile.id)}" title="${escapeHtml(profile.name || profile.id)}">${escapeHtml(profile.name || profile.id)} · ${usage}u</button>`;
+        const label = profile.name || profile.id;
+        return `<button type="button" class="profile-chip ${active ? "active" : ""}" data-youtube-profile-chip="${escapeHtml(profile.id)}" aria-pressed="${active ? "true" : "false"}" title="Double-click to rename: ${escapeHtml(label)}">${escapeHtml(label)} · ${usage}u</button>`;
       }).join("");
     }
 
@@ -3265,7 +3400,7 @@ HTML = r"""
       refs.youtubeAgentList.innerHTML = matches.map((node) => {
         const streaming = nodeStreaming(node);
         const active = String(node.id) === String(selectedNodeId);
-        return `<button type="button" class="youtube-agent-card ${active ? "active" : ""} ${streaming ? "streaming" : ""}" data-youtube-agent-id="${escapeHtml(node.id)}" ${streaming ? "disabled" : ""}>
+        return `<button type="button" class="youtube-agent-card ${active ? "active" : ""} ${streaming ? "streaming" : ""}" data-youtube-agent-id="${escapeHtml(node.id)}" aria-pressed="${active ? "true" : "false"}" ${streaming ? "disabled" : ""}>
           <strong>${escapeHtml(node.name || node.id)}</strong>
           <small>${escapeHtml(node.youtube_profile_name || profileName(nodeProfileId(node)))}${streaming ? " · 已开播" : ""}</small>
         </button>`;
@@ -5689,6 +5824,27 @@ HTML = r"""
       if (!chip) return;
       refs.youtubeProfileSelect.value = chip.dataset.youtubeProfileChip || "default";
       selectYouTubeProfile();
+    });
+    refs.youtubeProfileQuickBar.addEventListener("dblclick", (event) => {
+      const chip = event.target.closest("[data-youtube-profile-chip]");
+      if (!chip) return;
+      refs.youtubeProfileSelect.value = chip.dataset.youtubeProfileChip || "default";
+      applyYouTubeProfileToForm(currentYouTubeProfile() || {});
+      setYouTubeProfileNameEditing(true);
+    });
+    refs.youtubeProfileNameInput.addEventListener("dblclick", () => setYouTubeProfileNameEditing(true));
+    refs.youtubeProfileNameInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && youtubeProfileNameEditing) {
+        event.preventDefault();
+        saveYouTubeProfileName(refs.youtubeProfileNameInput.value);
+      }
+      if (event.key === "Escape" && youtubeProfileNameEditing) {
+        event.preventDefault();
+        cancelYouTubeProfileNameEdit();
+      }
+    });
+    refs.youtubeProfileNameInput.addEventListener("blur", () => {
+      if (youtubeProfileNameEditing) saveYouTubeProfileName(refs.youtubeProfileNameInput.value);
     });
     refs.youtubeAgentList.addEventListener("click", (event) => {
       const card = event.target.closest("[data-youtube-agent-id]");
