@@ -1336,7 +1336,7 @@ HTML = r"""
     .node-table-head,
     .node-row {
       display: grid;
-      grid-template-columns: 22px minmax(0, 1fr) 64px 72px minmax(220px, .72fr);
+      grid-template-columns: 22px minmax(0, 1fr) 64px 112px minmax(118px, .42fr);
       gap: 6px;
       align-items: center;
       min-width: 0;
@@ -1353,7 +1353,7 @@ HTML = r"""
     }
     .node-role-split .node-table-head { position: static; }
     .node-row {
-      min-height: 68px;
+      min-height: 76px;
       padding: 6px 8px;
       border: 1px solid rgba(49, 89, 76, 0.75);
       border-radius: 10px;
@@ -1379,9 +1379,9 @@ HTML = r"""
     .node-row.control-hub .node-state { color: var(--text); }
     .node-row.offline-node, .node-space-ring-item.offline-node { opacity: .68; }
     .node-row.offline-node:hover, .node-space-ring-item.offline-node:hover { opacity: .9; }
-    .node-name { min-width: 0; display: grid; gap: 3px; align-content: center; }
+    .node-name { min-width: 0; display: grid; gap: 5px; align-content: center; }
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .node-agent-line { display: grid; grid-template-columns: minmax(105px, .72fr) minmax(0, 2.25fr); gap: 7px; align-items: center; min-width: 0; }
+    .node-agent-line { display: flex; gap: 7px; align-items: center; min-width: 0; }
     .node-name-edit { min-width: 0; cursor: text; }
     .node-name-edit:hover { color: #fff; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
     .node-name-input { width: 100%; min-width: 100px; height: 30px; padding: 4px 7px; border-radius: 7px; border: 1px solid #ff3b4f; background: rgba(7,18,14,.78); color: #fff; font-weight: 900; outline: none; }
@@ -1391,13 +1391,13 @@ HTML = r"""
       grid-template-columns: minmax(0, .9fr) minmax(0, 1fr) minmax(0, 1.2fr);
       gap: 5px;
       align-items: center;
-      flex: 1 1 auto;
       min-width: 0;
     }
     .node-live-field {
       display: grid;
-      gap: 2px;
-      align-items: stretch;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 5px;
+      align-items: center;
       min-width: 0;
       padding: 3px 4px;
       border: 1px solid rgba(54, 211, 153, .22);
@@ -1426,12 +1426,44 @@ HTML = r"""
       background-color: rgba(11, 31, 25, .94);
     }
     .node-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 800; }
+    .stream-switch {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2px;
+      padding: 3px;
+      border: 1px solid rgba(54, 211, 153, .34);
+      border-radius: 999px;
+      background: rgba(7,18,14,.64);
+    }
+    .stream-switch button {
+      min-width: 0;
+      min-height: 28px;
+      padding: 4px 6px;
+      border-radius: 999px;
+      border-color: transparent;
+      font-size: 11px;
+      font-weight: 900;
+      color: var(--muted);
+      background: transparent;
+    }
+    .stream-switch button.active {
+      color: #06120f;
+      background: var(--accent);
+      box-shadow: 0 0 12px rgba(54, 211, 153, .42);
+    }
+    .stream-switch.running { border-color: rgba(255, 59, 79, .55); }
+    .stream-switch.running button.active {
+      color: #fff7f8;
+      background: #ff3b4f;
+      box-shadow: 0 0 12px rgba(255, 59, 79, .42);
+    }
     .dot { width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid rgba(255,255,255,0.2); border-radius: 999px; background: #fbbf24; box-shadow: inset 0 0 3px rgba(255,255,255,0.5), 0 0 10px rgba(251, 191, 36, 0.65); }
     .dot.ok { background: #28e39f; box-shadow: inset 0 0 3px rgba(255,255,255,0.65), 0 0 12px rgba(40, 227, 159, 0.85); }
     .dot.off { background: #52615c; border-color: rgba(255,255,255,0.1); box-shadow: inset 0 0 3px rgba(0,0,0,0.55); }
     .dot.stream-live { background: #ff334f; box-shadow: inset 0 0 3px rgba(255,255,255,0.7), 0 0 13px rgba(255, 51, 79, 0.95); }
     .dot.stream-idle { background: #4a5551; border-color: rgba(255,255,255,0.08); box-shadow: inset 0 0 3px rgba(0,0,0,0.6); }
-    .row-actions { display: grid; grid-template-columns: repeat(4, minmax(54px, 1fr)); gap: 4px; align-items: center; }
+    .row-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-start; min-width: 0; }
+    .node-version-pill { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d6fff0; font-size: 12px; font-weight: 900; }
     .role-row { min-height: 54px; }
     .role-row .row-actions { grid-template-columns: repeat(2, minmax(72px, 1fr)); }
     .role-group + .role-group { margin-top: 12px; }
@@ -1445,6 +1477,7 @@ HTML = r"""
     .role-settings-status { display: grid; gap: 8px; }
     .role-settings-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.58); }
     .role-settings-item small { display: block; margin-top: 3px; color: var(--muted); }
+    .role-settings-item .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
     .control-transfer-box { display: grid; gap: 8px; margin-top: 10px; padding: 10px; border: 1px dashed var(--line); border-radius: 10px; background: rgba(7,18,14,.42); }
     .control-transfer-box h3 { margin: 0; font-size: 15px; }
     .control-transfer-box input { width: 100%; }
@@ -1592,7 +1625,7 @@ HTML = r"""
       .node-table-head { display: none; }
       .node-row { grid-template-columns: 24px minmax(0, 1fr); }
       .node-agent-line { grid-template-columns: 1fr; }
-      .node-live-locks { grid-template-columns: 1fr; flex-basis: 100%; }
+      .node-live-locks { grid-template-columns: 1fr; }
       .node-state, .row-actions { grid-column: 2; }
       .wizard-grid, .wizard-role-grid, .wizard-existing-grid, .wizard-step-grid, .wizard-actions { grid-template-columns: 1fr; }
       .youtube-control-strip { grid-template-columns: 1fr; }
@@ -2423,7 +2456,9 @@ HTML = r"""
     });
 
     function selectedNodeIds() {
-      return [...document.querySelectorAll("[data-node-check]:checked")].map((el) => el.value);
+      const ids = new Set([...document.querySelectorAll("[data-node-check]:checked")].map((el) => el.value));
+      if (selectedNodeId) ids.add(String(selectedNodeId));
+      return [...ids];
     }
 
     function selectedMediaName() {
@@ -2984,37 +3019,39 @@ HTML = r"""
       const online = Boolean(node.roles?.agent?.enabled ?? nodeOnline(node));
       const streaming = nodeStreaming(node);
       const selected = String(node.id) === String(selectedNodeId);
-      const checked = checkedIds.has(String(node.id));
+      const checked = selected || checkedIds.has(String(node.id));
       const currentProfileName = profileName(nodeProfileId(node));
       const currentStreamName = lockedYoutubeStreamLabel(node);
       const currentVideoName = lockedVideoLabel(node);
+      const agentVersion = h.agent?.version || "未识别";
       return `
         <div class="node-row ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="点击选中；删除/取消角色请打开后面的设置">
           <input data-node-check type="checkbox" value="${escapeHtml(node.id)}" ${checked ? "checked" : ""} ${node.enabled === false ? "disabled" : ""} title="选中后可推送资源或升级">
           <span class="node-name">
             <span class="node-agent-line">
               <strong class="node-name-edit" data-node-name-edit data-node-id="${escapeHtml(node.id)}" title="双击修改 Agent 名称">${escapeHtml(node.name || node.id)}</strong>
-              <div class="node-live-locks">
-                <label class="node-live-field" title="当前 Profile：${escapeHtml(currentProfileName)}"><span class="node-live-label">Profile</span>
-                  <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="当前 Profile：${escapeHtml(currentProfileName)}">${profileOptions(nodeProfileId(node))}</select>
-                </label>
-                <label class="node-live-field" title="当前直播流：${escapeHtml(currentStreamName)}"><span class="node-live-label">直播流</span>
-                  <select class="node-live-select" data-node-stream-select data-node-id="${escapeHtml(node.id)}" title="当前直播流：${escapeHtml(currentStreamName)}">${nodeYoutubeStreamOptions(node)}</select>
-                </label>
-                <label class="node-live-field" title="当前视频：${escapeHtml(currentVideoName)}"><span class="node-live-label">视频</span>
-                  <select class="node-live-select" data-node-video-select data-node-id="${escapeHtml(node.id)}" title="当前视频：${escapeHtml(currentVideoName)}">${nodeVideoOptions(node)}</select>
-                </label>
-              </div>
+              <small>${escapeHtml(h.hostname || node.id)}</small>
             </span>
-            <small>${escapeHtml(h.hostname || node.id)} · 版本 ${escapeHtml(h.agent?.version || "未识别")}</small>
+            <div class="node-live-locks">
+              <label class="node-live-field" title="当前 Profile：${escapeHtml(currentProfileName)}"><span class="node-live-label">Profile</span>
+                <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="当前 Profile：${escapeHtml(currentProfileName)}">${profileOptions(nodeProfileId(node))}</select>
+              </label>
+              <label class="node-live-field" title="当前直播流：${escapeHtml(currentStreamName)}"><span class="node-live-label">直播流</span>
+                <select class="node-live-select" data-node-stream-select data-node-id="${escapeHtml(node.id)}" title="当前直播流：${escapeHtml(currentStreamName)}">${nodeYoutubeStreamOptions(node)}</select>
+              </label>
+              <label class="node-live-field" title="当前视频：${escapeHtml(currentVideoName)}"><span class="node-live-label">视频</span>
+                <select class="node-live-select" data-node-video-select data-node-id="${escapeHtml(node.id)}" title="当前视频：${escapeHtml(currentVideoName)}">${nodeVideoOptions(node)}</select>
+              </label>
+            </div>
           </span>
           <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
-          <span class="node-state">${streamDot(streaming)}${streaming ? "推流中" : "未推流"}</span>
+          <span class="stream-switch ${streaming ? "running" : ""}" data-stream-switch data-node-id="${escapeHtml(node.id)}" title="左边开播（Smart Start），右边关闭推流">
+            <button type="button" class="${streaming ? "active" : ""}" data-stream-toggle-action="start" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>${streaming ? "推流中" : "开"}</button>
+            <button type="button" class="${streaming ? "" : "active"}" data-stream-toggle-action="stop" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>${streaming ? "关" : "未推流"}</button>
+          </span>
           <span class="row-actions">
-            <button class="tiny" data-node-action="stop-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>停止推流</button>
-            <button class="tiny" data-node-action="restart-stream" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启推流</button>
-            <button class="tiny danger" data-node-action="reboot-vps" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>重启 VPS</button>
             <button class="tiny settings-button" data-role-settings data-node-id="${escapeHtml(node.id)}" title="节点角色设置" aria-label="节点角色设置">⚙</button>
+            <span class="node-version-pill" title="版本 ${escapeHtml(agentVersion)}">${escapeHtml(agentVersion)}</span>
           </span>
         </div>
       `;
@@ -3066,10 +3103,10 @@ HTML = r"""
       refs.nodeList.innerHTML = agentRows.length ? `
         <div class="node-table-head">
           <span></span>
-          <span>节点</span>
+          <span>Agent / 直播目标</span>
           <span>在线</span>
           <span>推流</span>
-          <span>操作</span>
+          <span>设置 / 版本</span>
         </div>
         ${agentRows.map((node) => renderNodeRow(node, checkedIds)).join("")}
       ` : `<div class="empty-state">还没有配置 Agent 节点。</div>`;
@@ -5017,6 +5054,15 @@ HTML = r"""
       }
     }
 
+    async function smartStartNode(nodeId) {
+      rememberSelectedNode(nodeId);
+      renderNodes();
+      renderMedia();
+      renderStreamControls();
+      renderYouTubeAgentList();
+      await smartStart();
+    }
+
     async function postNodeAction(path, payload) {
       const resp = await fetch(path, {
         method: "POST",
@@ -5178,11 +5224,11 @@ HTML = r"""
       refs.mediaContextMenu.style.top = `${Math.max(8, top)}px`;
     }
 
-    async function handleNodeAction(action, nodeId) {
+    async function handleNodeAction(action, nodeId, options = {}) {
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const nodeName = node?.name || nodeId;
       if (action === "stop-stream") {
-        if (!confirm(`确认停止 ${nodeName} 的推流？`)) {
+        if (options.confirmStop !== false && !confirm(`确认停止 ${nodeName} 的推流？`)) {
           return;
         }
         log(`请求停止推流：${nodeName}`);
@@ -5228,7 +5274,17 @@ HTML = r"""
       refs.roleSettingsTitle.textContent = `${node.name || node.id} · 角色设置`;
       refs.roleSettingsNameInput.value = node.name || node.id;
       refs.roleSettingsSummary.textContent = "角色维护功能不会直接执行；选择后还需通过保护确认。取消角色默认保留数据。";
-      refs.roleSettingsActions.innerHTML = ["agent", "hub"].map((role) => {
+      const agentOnline = Boolean(node.roles?.agent?.enabled);
+      const streamRunning = nodeStreaming(node);
+      const streamTools = `<div class="role-settings-item">
+        <span><strong>推流维护</strong><small>当前状态：${streamRunning ? "推流中" : "未推流"}。低频或危险操作集中放在这里。</small></span>
+        <span class="actions">
+          <button data-settings-node-action="stop-stream" ${agentOnline && streamRunning ? "" : "disabled"}>停止推流</button>
+          <button data-settings-node-action="restart-stream" ${agentOnline ? "" : "disabled"}>重启推流</button>
+          <button class="danger" data-settings-node-action="reboot-vps" ${agentOnline ? "" : "disabled"}>重启 VPS</button>
+        </span>
+      </div>`;
+      refs.roleSettingsActions.innerHTML = streamTools + ["agent", "hub"].map((role) => {
         const info = node.roles?.[role] || {};
         const enabled = Boolean(info.enabled);
         const label = role === "hub" ? "Hub" : "Agent";
@@ -5670,7 +5726,23 @@ HTML = r"""
       beginNodeNameEdit(nameEl);
     });
 
-    refs.nodeList.addEventListener("click", (event) => {
+    refs.nodeList.addEventListener("click", async (event) => {
+      const streamToggleButton = event.target.closest("[data-stream-toggle-action]");
+      if (streamToggleButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        const nodeId = streamToggleButton.dataset.nodeId || "";
+        const node = nodes.find((item) => String(item.id) === String(nodeId));
+        const streaming = nodeStreaming(node);
+        if (streamToggleButton.dataset.streamToggleAction === "start") {
+          if (streaming) return;
+          await smartStartNode(nodeId);
+        } else {
+          if (!streaming) return;
+          await handleNodeAction("stop-stream", nodeId, { confirmStop: false });
+        }
+        return;
+      }
       if (event.target.closest("[data-node-profile-select], [data-node-stream-select], [data-node-video-select], [data-node-name-input]")) {
         event.stopPropagation();
         return;
@@ -5697,6 +5769,14 @@ HTML = r"""
         return;
       }
       if (event.target.closest("[data-node-check]")) {
+        const check = event.target.closest("[data-node-check]");
+        if (check?.checked) {
+          rememberSelectedNode(check.value);
+          renderNodes();
+          renderMedia();
+          renderStreamControls();
+          renderYouTubeAgentList();
+        }
         return;
       }
       const row = event.target.closest("[data-node-row]");
@@ -5751,9 +5831,15 @@ HTML = r"""
       if (selectEl) saveNodeYouTubeProfile(selectEl);
     });
     refs.roleSettingsClose.addEventListener("click", () => setRoleSettingsOpen(false));
-    refs.roleSettingsModal.addEventListener("click", (event) => {
+    refs.roleSettingsModal.addEventListener("click", async (event) => {
       if (event.target === refs.roleSettingsModal) {
         setRoleSettingsOpen(false);
+        return;
+      }
+      const nodeActionButton = event.target.closest("[data-settings-node-action]");
+      if (nodeActionButton) {
+        await handleNodeAction(nodeActionButton.dataset.settingsNodeAction, roleSettingsNodeId);
+        setRoleSettingsOpen(true, roleSettingsNodeId);
         return;
       }
       const button = event.target.closest("[data-settings-role]");
