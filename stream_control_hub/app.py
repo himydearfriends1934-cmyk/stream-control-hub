@@ -471,8 +471,8 @@ HTML = r"""
     h1 { margin: 0; font-size: 26px; letter-spacing: 0; }
     p { color: var(--muted); margin: 5px 0 0; line-height: 1.45; }
     .grid { display: grid; grid-template-columns: minmax(620px, 1.05fr) minmax(540px, 0.95fr); gap: 12px; margin-top: 10px; align-items: start; }
-    .left-stack, .side-stack { display: grid; gap: 10px; align-content: start; }
-    .grid > .side-stack { align-self: stretch; grid-template-rows: 1fr; }
+    .left-stack, .side-stack { display: grid; gap: 10px; align-content: start; min-width: 0; }
+    .grid > .side-stack { align-self: start; grid-template-rows: auto; }
     .media-workspace { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(620px, 1.05fr) minmax(540px, 0.95fr); gap: 12px; align-items: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 0.9fr 1.15fr 1.35fr; gap: 10px; }
     .card {
@@ -614,18 +614,18 @@ HTML = r"""
     .resource-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
     .resource-header p { margin: 0; font-size: 12px; }
     .upload-stack { display: grid; gap: 12px; align-content: start; min-width: 0; }
-    .node-space-card { padding-bottom: 12px; }
-    .node-space-card h2 { margin-bottom: 3px; }
-    .node-space-card p { margin: 0 0 9px; font-size: 12px; }
-    .node-space-rings { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-auto-rows: 112px; gap: 8px; max-height: 244px; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
-    .node-space-ring-item { min-width: 0; height: 112px; display: grid; justify-items: center; align-content: center; gap: 3px; padding: 6px 4px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; cursor: pointer; }
+    .node-space-card { padding-bottom: 10px; }
+    .node-space-card h2 { margin-bottom: 2px; }
+    .node-space-card p { margin: 0 0 5px; font-size: 12px; line-height: 1.35; }
+    .node-space-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); grid-auto-rows: 88px; gap: 7px; max-height: min(198px, calc(100vh - 420px)); overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
+    .node-space-ring-item { min-width: 0; min-height: 0; height: 88px; display: grid; justify-items: center; align-content: center; gap: 2px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; cursor: pointer; }
     .node-space-ring-item:hover, .node-space-ring-item.open { border-color: var(--accent); background: rgba(54,211,153,.09); }
-    .node-space-ring-item strong { font-size: 12px; line-height: 1.2; }
+    .node-space-ring-item strong { font-size: 11px; line-height: 1.15; }
     .node-space-ring-item strong, .node-space-ring-item small { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .node-space-ring-item small { color: var(--muted); font-size: 11px; }
-    .node-space-ring { width: clamp(58px, 5vw, 70px); height: clamp(58px, 5vw, 70px); display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--accent) calc(var(--disk-percent) * 1%), rgba(255,255,255,.09) 0); }
+    .node-space-ring-item small { color: var(--muted); font-size: 10px; }
+    .node-space-ring { width: clamp(48px, 4vw, 54px); height: clamp(48px, 4vw, 54px); display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--accent) calc(var(--disk-percent) * 1%), rgba(255,255,255,.09) 0); }
     .node-space-ring::before { content: ""; grid-area: 1 / 1; width: 74%; height: 74%; border-radius: 50%; background: var(--panel); }
-    .node-space-ring span { grid-area: 1 / 1; z-index: 1; font-size: 13px; font-weight: 900; }
+    .node-space-ring span { grid-area: 1 / 1; z-index: 1; font-size: 12px; font-weight: 900; }
     .node-space-ring.offline { filter: grayscale(1); opacity: .55; }
     .resource-filter-chip {
       display: flex;
@@ -1006,8 +1006,8 @@ HTML = r"""
       background: rgba(9, 17, 14, 0.58);
     }
     .monitor-panel h4 { margin: 0 0 5px; font-size: 13px; color: #d6fff0; }
-    .node-table-card { min-height: 0; }
-    .node-role-split { display: grid; grid-template-rows: minmax(110px, 1fr) 12px var(--hub-panel-height, 150px); min-height: 330px; max-height: 650px; font-size: 14px; }
+    .node-table-card { min-height: 0; overflow: hidden; }
+    .node-role-split { display: grid; grid-template-rows: minmax(120px, 1fr) 12px minmax(96px, var(--hub-panel-height, 150px)); height: clamp(420px, 58vh, 650px); min-height: 0; max-height: 650px; font-size: 14px; overflow: hidden; }
     .node-role-pane { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
     .node-role-pane .node-table { max-height: none; min-height: 0; overflow: auto; }
     .node-role-splitter { position: relative; cursor: ns-resize; touch-action: none; user-select: none; }
@@ -1048,7 +1048,7 @@ HTML = r"""
       border-bottom: 1px solid rgba(49, 89, 76, 0.55);
     }
     .node-row {
-      min-height: 44px;
+      min-height: 68px;
       padding: 6px 8px;
       border: 1px solid rgba(49, 89, 76, 0.75);
       border-radius: 10px;
@@ -1074,9 +1074,10 @@ HTML = r"""
     .node-row.control-hub .node-state { color: var(--text); }
     .node-row.offline-node, .node-space-ring-item.offline-node { opacity: .68; }
     .node-row.offline-node:hover, .node-space-ring-item.offline-node:hover { opacity: .9; }
+    .node-name { min-width: 0; display: grid; gap: 2px; align-content: center; }
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .node-name small { color: var(--muted); display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .node-note { display: inline-block; max-width: 9em; margin-top: 3px; padding: 2px 6px; border: 1px dashed var(--line); border-radius: 999px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 700; cursor: pointer; }
+    .node-name small { color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-note { display: block; justify-self: start; max-width: 9em; padding: 2px 6px; border: 1px dashed var(--line); border-radius: 999px; color: var(--muted); background: transparent; font-size: 11px; line-height: 1.15; font-weight: 700; cursor: pointer; }
     .node-note:hover { color: var(--text); border-color: var(--accent); }
     .node-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 800; }
     .dot { width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid rgba(255,255,255,0.2); border-radius: 999px; background: #fbbf24; box-shadow: inset 0 0 3px rgba(255,255,255,0.5), 0 0 10px rgba(251, 191, 36, 0.65); }
@@ -1085,6 +1086,7 @@ HTML = r"""
     .dot.stream-live { background: #ff334f; box-shadow: inset 0 0 3px rgba(255,255,255,0.7), 0 0 13px rgba(255, 51, 79, 0.95); }
     .dot.stream-idle { background: #4a5551; border-color: rgba(255,255,255,0.08); box-shadow: inset 0 0 3px rgba(0,0,0,0.6); }
     .row-actions { display: grid; grid-template-columns: repeat(4, minmax(54px, 1fr)); gap: 4px; align-items: center; }
+    .role-row { min-height: 54px; }
     .role-row .row-actions { grid-template-columns: repeat(2, minmax(72px, 1fr)); }
     .role-group + .role-group { margin-top: 12px; }
     .role-group-title { display: flex; justify-content: space-between; align-items: center; margin: 0 0 6px; color: #d6fff0; }
@@ -1876,14 +1878,25 @@ HTML = r"""
     let activeYouTubeProfileId = "default";
 
     const HUB_HEIGHT_STORAGE_KEY = "streamHubHubPanelHeight";
+    const HUB_PANEL_MIN_HEIGHT = 96;
+    const AGENT_PANEL_MIN_HEIGHT = 120;
     function setHubPanelHeight(height) {
       const split = refs.nodeRoleSplit;
       if (!split) return;
-      const available = Math.max(220, split.getBoundingClientRect().height - 12);
-      const value = Math.max(90, Math.min(available - 110, Number(height) || 150));
+      const available = Math.max(HUB_PANEL_MIN_HEIGHT + AGENT_PANEL_MIN_HEIGHT, split.getBoundingClientRect().height - 12);
+      const value = Math.max(HUB_PANEL_MIN_HEIGHT, Math.min(available - AGENT_PANEL_MIN_HEIGHT, Number(height) || 150));
       split.style.setProperty("--hub-panel-height", `${value}px`);
       refs.nodeRoleSplitter?.setAttribute("aria-valuenow", String(Math.round(value)));
+      refs.nodeRoleSplitter?.setAttribute("aria-valuemin", String(HUB_PANEL_MIN_HEIGHT));
+      refs.nodeRoleSplitter?.setAttribute("aria-valuemax", String(Math.round(available - AGENT_PANEL_MIN_HEIGHT)));
       localStorage.setItem(HUB_HEIGHT_STORAGE_KEY, String(Math.round(value)));
+    }
+
+    function clampHubPanelHeight() {
+      const current = parseFloat(getComputedStyle(refs.nodeRoleSplit).getPropertyValue("--hub-panel-height"))
+        || Number(localStorage.getItem(HUB_HEIGHT_STORAGE_KEY))
+        || 150;
+      setHubPanelHeight(current);
     }
 
     function initNodeRoleSplitter() {
@@ -1916,6 +1929,7 @@ HTML = r"""
         setHubPanelHeight(current + (event.key === "ArrowUp" ? 20 : -20));
         event.preventDefault();
       });
+      window.addEventListener("resize", clampHubPanelHeight);
     }
 
     renderTransfer({
@@ -2460,6 +2474,7 @@ HTML = r"""
         <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
         ${activeHubs.map((node) => renderHubRow(node)).join("")}
       ` : `<div class="empty-state">还没有已激活的 Hub。</div>`;
+      window.requestAnimationFrame(clampHubPanelHeight);
     }
 
     function mediaGroupName(id) {
