@@ -843,7 +843,76 @@ HTML = r"""
       cursor: pointer;
       white-space: nowrap;
     }
-    .youtube-import-panel textarea { min-height: 76px; }
+    .youtube-import-panel textarea, .oauth-manual-field { display: none; }
+    .profile-quick-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      align-items: center;
+    }
+    .profile-chip {
+      max-width: 180px;
+      padding: 8px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.04);
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .profile-chip.active {
+      border-color: var(--accent);
+      color: var(--text);
+      background: rgba(54,211,153,.18);
+      box-shadow: 0 0 0 1px rgba(54,211,153,.16) inset;
+    }
+    .profile-stepper {
+      width: 38px;
+      height: 38px;
+      padding: 0;
+      border-radius: 999px;
+      font-size: 18px;
+      line-height: 1;
+    }
+    .node-profile-select {
+      width: 100%;
+      min-width: 120px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    .node-profile-label {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .youtube-agent-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 7px;
+      max-height: 150px;
+      overflow: auto;
+      padding: 7px;
+      border: 1px solid rgba(49, 89, 76, .78);
+      border-radius: 10px;
+      background: rgba(7, 18, 14, .5);
+    }
+    .youtube-agent-card {
+      display: grid;
+      gap: 3px;
+      padding: 8px 9px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      color: var(--text);
+      background: rgba(25,43,37,.72);
+      text-align: left;
+    }
+    .youtube-agent-card.active { border-color: var(--accent); background: rgba(54,211,153,.13); }
+    .youtube-agent-card.streaming { opacity: .5; filter: grayscale(.5); }
+    .youtube-agent-card small { color: var(--muted); }
     .youtube-details {
       display: grid;
       gap: 10px;
@@ -1730,7 +1799,7 @@ HTML = r"""
         <div class="youtube-import-head">
           <div>
             <strong>导入 Google OAuth JSON</strong>
-            <small>上传下载的 client_secret_*.json，或把 JSON 粘贴到下面；Hub 会自动填入 Client ID / Secret。</small>
+            <small>上传 Google 下载的 client_secret_*.json，Hub 会自动读取 OAuth Client ID / Secret。</small>
           </div>
           <label class="youtube-json-upload-label" for="youtubeJsonFileInput">上传 JSON 文件</label>
           <button id="youtubeJsonPickBtn" type="button">选择 JSON</button>
@@ -1741,7 +1810,8 @@ HTML = r"""
       <div class="wizard-grid">
         <div class="wizard-field">
           <label>YouTube Profile</label>
-          <select id="youtubeProfileSelect"></select>
+          <select id="youtubeProfileSelect" hidden></select>
+          <div class="profile-quick-row" id="youtubeProfileQuickBar"></div>
         </div>
         <div class="wizard-field">
           <label>Profile Name</label>
@@ -1754,8 +1824,8 @@ HTML = r"""
         <div class="wizard-field">
           <label>Profile Actions</label>
           <div class="command-pair">
-            <button id="youtubeProfileAddBtn" type="button">Add</button>
-            <button id="youtubeProfileDeleteBtn" type="button">Delete</button>
+            <button class="profile-stepper" id="youtubeProfileAddBtn" type="button" title="新增 Profile">+</button>
+            <button class="profile-stepper" id="youtubeProfileDeleteBtn" type="button" title="删除当前 Profile">-</button>
           </div>
         </div>
         <div class="wizard-field">
@@ -1778,6 +1848,7 @@ HTML = r"""
         <div class="wizard-field">
           <label>当前 Agent</label>
           <input id="youtubeNodeInput" type="text" readonly value="先选择 Agent">
+          <div class="youtube-agent-list" id="youtubeAgentList"></div>
         </div>
         <div class="wizard-field">
           <label>已有可复用直播流</label>
@@ -1789,11 +1860,11 @@ HTML = r"""
           <label>直播标题</label>
           <input id="youtubeTitleInput" type="text" maxlength="100" placeholder="直播标题">
         </div>
-        <div class="wizard-field">
+        <div class="wizard-field oauth-manual-field">
           <label>OAuth Client ID</label>
           <input id="youtubeClientIdInput" type="text" autocomplete="off" placeholder="Google TV / Limited Input Client ID">
         </div>
-        <div class="wizard-field">
+        <div class="wizard-field oauth-manual-field">
           <label>Client Secret（可选）</label>
           <input id="youtubeClientSecretInput" type="password" autocomplete="off" placeholder="部分 OAuth 客户端没有 secret">
         </div>
@@ -1817,15 +1888,15 @@ HTML = r"""
         <button id="youtubeHealthBtn">读取健康反馈</button>
         <button class="danger" id="youtubeRevokeBtn">断开授权</button>
       </div>
+      <div class="wizard-status" id="youtubeWizardLog">
+        <div class="wizard-status-line">选择 Profile 和 Agent 后检查状态。首次使用只需上传 client_secret_*.json。</div>
+      </div>
       <div class="youtube-details" id="youtubeResourceDetails">
         <div class="youtube-details-head">
           <strong>YouTube Studio Details</strong>
           <span>Click refresh to load broadcast and stream settings.</span>
         </div>
         <div class="youtube-detail-empty">No YouTube resources loaded yet.</div>
-      </div>
-      <div class="wizard-status" id="youtubeWizardLog">
-        <div class="wizard-status-line">选择要分配的 Agent 后检查状态。首次使用需要在 Hub 保存 YouTube OAuth Client ID。</div>
       </div>
     </div>
   </div>
@@ -1950,6 +2021,7 @@ HTML = r"""
       youtubeWizardLog: document.getElementById("youtubeWizardLog"),
       youtubeResourceDetails: document.getElementById("youtubeResourceDetails"),
       youtubeProfileSelect: document.getElementById("youtubeProfileSelect"),
+      youtubeProfileQuickBar: document.getElementById("youtubeProfileQuickBar"),
       youtubeProfileNameInput: document.getElementById("youtubeProfileNameInput"),
       youtubeUsageInput: document.getElementById("youtubeUsageInput"),
       youtubeProfileAddBtn: document.getElementById("youtubeProfileAddBtn"),
@@ -1959,6 +2031,7 @@ HTML = r"""
       youtubeAutoTuneCooldownInput: document.getElementById("youtubeAutoTuneCooldownInput"),
       youtubeAutoTuneMaxBitrateInput: document.getElementById("youtubeAutoTuneMaxBitrateInput"),
       youtubeNodeInput: document.getElementById("youtubeNodeInput"),
+      youtubeAgentList: document.getElementById("youtubeAgentList"),
       youtubePrepareStreamSelect: document.getElementById("youtubePrepareStreamSelect"),
       youtubeTitleInput: document.getElementById("youtubeTitleInput"),
       youtubeClientIdInput: document.getElementById("youtubeClientIdInput"),
@@ -2512,6 +2585,26 @@ HTML = r"""
       return Boolean(node.health?.stream?.running);
     }
 
+    function profileName(profileId) {
+      const profile = youtubeProfiles.find((item) => String(item.id) === String(profileId));
+      return profile?.name || profileId || "Default";
+    }
+
+    function profileOptions(selectedId) {
+      const profiles = youtubeProfiles.length ? youtubeProfiles : [{ id: "default", name: "Default YouTube Profile" }];
+      const selected = selectedId || activeYouTubeProfileId || profiles[0]?.id || "default";
+      return profiles.map((profile) => `<option value="${escapeHtml(profile.id)}" ${String(profile.id) === String(selected) ? "selected" : ""}>${escapeHtml(profile.name || profile.id)}</option>`).join("");
+    }
+
+    function nodeProfileId(node) {
+      return String(node?.youtube_profile_id || activeYouTubeProfileId || "default");
+    }
+
+    function nodesForActiveProfile() {
+      const profileId = selectedYouTubeProfileId();
+      return nodes.filter((node) => node.enabled !== false && Boolean(node.roles?.agent?.enabled) && nodeProfileId(node) === profileId);
+    }
+
     function selectedNode() {
       return nodes.find((node) => String(node.id) === String(selectedNodeId)) || nodes[0] || null;
     }
@@ -2651,6 +2744,8 @@ HTML = r"""
           <span class="node-name">
             <strong>${escapeHtml(node.name || node.id)}</strong>
             <small>${escapeHtml(h.hostname || node.id)} · 版本 ${escapeHtml(h.agent?.version || "未识别")}</small>
+            <span class="node-profile-label">Profile</span>
+            <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="选择这个 Agent 隶属的 YouTube Profile">${profileOptions(nodeProfileId(node))}</select>
             <button class="node-note" data-node-note data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(note || "点击添加备注")}">${escapeHtml(notePreview)}</button>
           </span>
           <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
@@ -2673,7 +2768,7 @@ HTML = r"""
       return `
         <div class="node-row role-row ${current ? "control-hub" : ""}" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
           <span>${stateDot(enabled, false)}</span>
-          <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>${current ? "当前控制 Hub · " : ""}Hub 版本 ${escapeHtml(version)}</small></span>
+          <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>${current ? "当前控制 Hub · " : ""}Hub 版本 ${escapeHtml(version)}</small><span class="node-profile-label">Profile</span><select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="选择这个 Hub 隶属的 YouTube Profile">${profileOptions(nodeProfileId(node))}</select></span>
           <span class="node-state">${current ? "控制中" : enabled ? "已启用" : "未启用"}</span>
           <span class="node-state">8788</span>
           <span class="row-actions">
@@ -2989,8 +3084,9 @@ HTML = r"""
         youtubeOauthPollTimer = null;
       }
       if (open) {
-        const node = selectedNode();
+        const node = ensureSelectedNodeForProfile();
         refs.youtubeNodeInput.value = node ? `${node.name || node.id} (${node.id})` : "先选择 Agent";
+        renderYouTubeAgentList();
         if (!refs.youtubeScheduleInput.value) {
           const planned = new Date(Date.now() + 5 * 60 * 1000);
           const local = new Date(planned.getTime() - planned.getTimezoneOffset() * 60 * 1000);
@@ -3076,6 +3172,19 @@ HTML = r"""
         refs.youtubeProfileSelect.value = activeYouTubeProfileId;
       }
       applyYouTubeProfileToForm(profiles.find((profile) => profile.id === refs.youtubeProfileSelect.value) || profiles[0] || {});
+      renderYouTubeProfileQuickBar();
+      renderNodes();
+      renderYouTubeAgentList();
+    }
+
+    function renderYouTubeProfileQuickBar() {
+      if (!refs.youtubeProfileQuickBar) return;
+      const profiles = youtubeProfiles.length ? youtubeProfiles : [{ id: "default", name: "Default YouTube Profile", usage: {} }];
+      refs.youtubeProfileQuickBar.innerHTML = profiles.map((profile) => {
+        const active = String(profile.id) === String(selectedYouTubeProfileId());
+        const usage = profile.usage?.estimated_units || 0;
+        return `<button type="button" class="profile-chip ${active ? "active" : ""}" data-youtube-profile-chip="${escapeHtml(profile.id)}" title="${escapeHtml(profile.name || profile.id)}">${escapeHtml(profile.name || profile.id)} · ${usage}u</button>`;
+      }).join("");
     }
 
     async function loadYouTubeProfiles() {
@@ -3096,7 +3205,7 @@ HTML = r"""
       });
       if (data.ok) {
         renderYouTubeProfiles(data.profiles || [], data.active_profile_id || data.profile?.id || "");
-        refs.youtubeWizardLog.textContent = "YouTube Profile created. Paste its OAuth JSON or Client ID, then save.";
+        refs.youtubeWizardLog.textContent = "YouTube Profile created. Upload client_secret_*.json, then save.";
       }
     }
 
@@ -3120,8 +3229,49 @@ HTML = r"""
       const profileId = selectedYouTubeProfileId();
       const profile = youtubeProfiles.find((item) => item.id === profileId) || {};
       applyYouTubeProfileToForm(profile);
+      renderYouTubeProfileQuickBar();
+      ensureSelectedNodeForProfile();
+      renderYouTubeAgentList();
+      renderNodes();
       await youtubeProfileApi("/api/youtube/profiles/select", { profile_id: profileId });
       await refreshYouTubeResources();
+    }
+
+    function ensureSelectedNodeForProfile() {
+      const matches = nodesForActiveProfile();
+      if (!matches.length) {
+        rememberSelectedNode("");
+        return null;
+      }
+      if (!matches.some((node) => String(node.id) === String(selectedNodeId))) {
+        const idle = matches.find((node) => !nodeStreaming(node));
+        rememberSelectedNode((idle || matches[0]).id || "");
+      }
+      return selectedYouTubeAgent();
+    }
+
+    function selectedYouTubeAgent() {
+      return nodesForActiveProfile().find((node) => String(node.id) === String(selectedNodeId)) || null;
+    }
+
+    function renderYouTubeAgentList() {
+      if (!refs.youtubeAgentList) return;
+      const matches = nodesForActiveProfile();
+      if (!matches.length) {
+        refs.youtubeAgentList.innerHTML = `<div class="youtube-detail-empty">这个 Profile 还没有绑定 Agent。请先在节点表的 Profile 下拉里分配。</div>`;
+        refs.youtubeNodeInput.value = "当前 Profile 暂无 Agent";
+        return;
+      }
+      refs.youtubeAgentList.innerHTML = matches.map((node) => {
+        const streaming = nodeStreaming(node);
+        const active = String(node.id) === String(selectedNodeId);
+        return `<button type="button" class="youtube-agent-card ${active ? "active" : ""} ${streaming ? "streaming" : ""}" data-youtube-agent-id="${escapeHtml(node.id)}" ${streaming ? "disabled" : ""}>
+          <strong>${escapeHtml(node.name || node.id)}</strong>
+          <small>${escapeHtml(node.youtube_profile_name || profileName(nodeProfileId(node)))}${streaming ? " · 已开播" : ""}</small>
+        </button>`;
+      }).join("");
+      const node = matches.find((item) => String(item.id) === String(selectedNodeId));
+      refs.youtubeNodeInput.value = node ? `${node.name || node.id} (${node.id})` : "先选择 Agent";
     }
 
     function compactValue(value) {
@@ -3251,16 +3401,24 @@ HTML = r"""
     }
 
     async function refreshYouTubeResources() {
-      const node = selectedNode();
+      const matches = nodesForActiveProfile();
+      let node = matches.find((item) => String(item.id) === String(selectedNodeId));
+      if (!node && matches.length) {
+        node = ensureSelectedNodeForProfile();
+      }
       if (!node) {
-        refs.youtubeWizardLog.textContent = "请先选择一个 Agent。";
+        renderYouTubeStreams([]);
+        renderYouTubeAgentList();
+        renderYouTubeResourceDetails({});
+        refs.youtubeWizardLog.textContent = "当前 Profile 还没有可用 Agent。请先在节点列表给 Agent 选择这个 Profile。";
         return null;
       }
       refs.youtubeRefreshBtn.disabled = true;
       refs.youtubeNodeInput.value = `${node.name || node.id} (${node.id})`;
+      renderYouTubeAgentList();
       refs.youtubeWizardLog.textContent = "正在由 Hub 读取 YouTube 授权和直播资源...";
       try {
-        const data = await postNodeAction("/api/nodes/youtube/resources", { node_id: selectedNodeId, profile_id: selectedYouTubeProfileId() });
+        const data = await postNodeAction("/api/nodes/youtube/resources", { node_id: node.id, profile_id: selectedYouTubeProfileId() });
         if (!data.ok && data.configured === undefined) {
           renderYouTubeStreams([]);
           refs.youtubeWizardLog.textContent = data.message || "YouTube API 读取失败";
@@ -3268,7 +3426,7 @@ HTML = r"""
         }
         if (!data.configured) {
           renderYouTubeStreams([]);
-          refs.youtubeWizardLog.textContent = "当前 Hub 尚未配置 YOUTUBE_CLIENT_ID。请先在这里保存 Google TV / Limited Input OAuth Client ID，再连接 YouTube。";
+          refs.youtubeWizardLog.textContent = "当前 Hub 尚未配置 YouTube OAuth。请先上传 client_secret_*.json 并保存 API 配置，再连接 YouTube。";
           return data;
         }
         if (!data.authorized) {
@@ -3280,7 +3438,7 @@ HTML = r"""
           refs.youtubeWizardLog.textContent = data.message || "YouTube API 读取失败";
           return data;
         }
-        const selectedId = selectedNode()?.health?.stream_config?.youtube_stream_id || "";
+        const selectedId = node.health?.stream_config?.youtube_stream_id || "";
         renderYouTubeStreams(data.streams || [], selectedId);
         renderYouTubeResourceDetails(data);
         if (data.profile) {
@@ -3310,8 +3468,15 @@ HTML = r"""
       if (youtubeOauthPollTimer) clearTimeout(youtubeOauthPollTimer);
       youtubeOauthPollTimer = setTimeout(async () => {
         try {
+          const node = selectedYouTubeAgent();
+          if (!node) {
+            youtubeOauthSession = "";
+            youtubeOauthPollTimer = null;
+            refs.youtubeWizardLog.textContent = "当前 Profile 没有可用 Agent，已停止授权检查。";
+            return;
+          }
           const data = await postNodeAction("/api/nodes/youtube/oauth/poll", {
-            node_id: selectedNodeId,
+            node_id: node.id,
             profile_id: selectedYouTubeProfileId(),
             session_id: youtubeOauthSession,
           });
@@ -3338,8 +3503,9 @@ HTML = r"""
     }
 
     async function startYouTubeAuthorization() {
-      if (!selectedNodeId) {
-        refs.youtubeWizardLog.textContent = "请先选择一个 Agent。";
+      const node = ensureSelectedNodeForProfile();
+      if (!node) {
+        refs.youtubeWizardLog.textContent = "当前 Profile 还没有可用 Agent。";
         return;
       }
       refs.youtubeAuthorizeBtn.disabled = true;
@@ -3348,7 +3514,7 @@ HTML = r"""
           const saved = await saveYouTubeConfig({ refreshAfter: false, keepSecret: true, quiet: true });
           if (!saved?.ok) return;
         }
-        const data = await postNodeAction("/api/nodes/youtube/oauth/start", { node_id: selectedNodeId, profile_id: selectedYouTubeProfileId() });
+        const data = await postNodeAction("/api/nodes/youtube/oauth/start", { node_id: node.id, profile_id: selectedYouTubeProfileId() });
         if (!data.ok) {
           refs.youtubeWizardLog.textContent = data.message || "无法启动 YouTube 授权";
           return;
@@ -3423,8 +3589,9 @@ HTML = r"""
     }
 
     async function saveYouTubeConfig(options = {}) {
-      if (!selectedNodeId) {
-        refs.youtubeWizardLog.textContent = "请先选择一个 Agent。";
+      const node = ensureSelectedNodeForProfile();
+      if (!node) {
+        refs.youtubeWizardLog.textContent = "当前 Profile 还没有可用 Agent。";
         return { ok: false };
       }
       if (!refs.youtubeClientIdInput.value.trim() && refs.youtubeJsonInput.value.trim()) {
@@ -3433,14 +3600,14 @@ HTML = r"""
       const clientId = refs.youtubeClientIdInput.value.trim();
       const clientSecret = refs.youtubeClientSecretInput.value.trim();
       if (!clientId) {
-        refs.youtubeWizardLog.textContent = "请先填写 Google OAuth Client ID。";
+        refs.youtubeWizardLog.textContent = "请先上传 Google 下载的 client_secret_*.json。";
         return { ok: false };
       }
       refs.youtubeSaveConfigBtn.disabled = true;
       if (!options.quiet) refs.youtubeWizardLog.textContent = "正在把 YouTube API 配置保存到当前 Hub...";
       try {
         const data = await postNodeAction("/api/nodes/youtube/config", {
-          node_id: selectedNodeId,
+          node_id: node.id,
           ...youtubeProfilePayload(),
           client_id: clientId,
           client_secret: clientSecret,
@@ -3468,7 +3635,8 @@ HTML = r"""
 
     async function prepareYouTubeBroadcast() {
       const title = refs.youtubeTitleInput.value.trim();
-      if (!selectedNodeId || !title) {
+      const node = ensureSelectedNodeForProfile();
+      if (!node || !title) {
         refs.youtubeWizardLog.textContent = "请选择 Agent 并填写直播标题。";
         return;
       }
@@ -3479,7 +3647,7 @@ HTML = r"""
           ? new Date(refs.youtubeScheduleInput.value).toISOString()
           : "";
         const data = await postNodeAction("/api/nodes/youtube/prepare", {
-          node_id: selectedNodeId,
+          node_id: node.id,
           profile_id: selectedYouTubeProfileId(),
           title,
           privacy_status: refs.youtubePrivacyInput.value,
@@ -3508,7 +3676,8 @@ HTML = r"""
 
     async function readYouTubeHealth() {
       const streamId = refs.youtubeStreamSelect.value || refs.youtubePrepareStreamSelect.value;
-      if (!selectedNodeId || !streamId) {
+      const node = ensureSelectedNodeForProfile();
+      if (!node || !streamId) {
         refs.youtubeWizardLog.textContent = "请先选择 Agent 和 YouTube 直播流。";
         return;
       }
@@ -3517,7 +3686,7 @@ HTML = r"""
       try {
         const data = await postNodeAction("/api/nodes/youtube/health", {
           ...streamPayload({ includeKey: false }),
-          node_id: selectedNodeId,
+          node_id: node.id,
           profile_id: selectedYouTubeProfileId(),
           youtube_stream_id: streamId,
         });
@@ -3548,9 +3717,10 @@ HTML = r"""
     }
 
     async function revokeYouTubeAuthorization() {
-      if (!selectedNodeId || !window.confirm("确认断开当前 Agent 的 YouTube 授权？")) return;
+      const node = ensureSelectedNodeForProfile();
+      if (!node || !window.confirm("确认断开当前 Agent 的 YouTube 授权？")) return;
       try {
-        const data = await postNodeAction("/api/nodes/youtube/oauth/revoke", { node_id: selectedNodeId, profile_id: selectedYouTubeProfileId() });
+        const data = await postNodeAction("/api/nodes/youtube/oauth/revoke", { node_id: node.id, profile_id: selectedYouTubeProfileId() });
         refs.youtubeWizardLog.textContent = data.ok ? "YouTube 授权已断开。" : (data.message || "断开授权失败");
         if (data.ok) renderYouTubeStreams([]);
       } catch (error) {
@@ -3671,6 +3841,7 @@ HTML = r"""
         renderNodes();
         renderMedia();
         renderStreamControls();
+        renderYouTubeAgentList();
         renderTailscaleNodeOptions();
         log("状态已刷新");
       } finally {
@@ -5101,7 +5272,44 @@ HTML = r"""
       renderMedia();
     }
 
+    async function saveNodeYouTubeProfile(selectEl) {
+      const nodeId = selectEl?.dataset?.nodeId || "";
+      const profileId = selectEl?.value || "";
+      const node = nodes.find((item) => String(item.id) === String(nodeId));
+      const previousProfileId = nodeProfileId(node);
+      if (!nodeId || !profileId || profileId === previousProfileId) return;
+      selectEl.disabled = true;
+      try {
+        const data = await postJson("/api/nodes/youtube-profile", { node_id: nodeId, profile_id: profileId });
+        if (!data.ok) throw new Error(data.message || "Profile 保存失败");
+        nodes = nodes.map((item) => {
+          if (String(item.id) !== String(nodeId)) return item;
+          return {
+            ...item,
+            youtube_profile_id: data.profile_id || profileId,
+            youtube_profile_name: data.profile?.name || profileName(data.profile_id || profileId),
+          };
+        });
+        if (String(selectedNodeId) === String(nodeId) && nodeProfileId(nodes.find((item) => String(item.id) === String(nodeId))) !== selectedYouTubeProfileId()) {
+          ensureSelectedNodeForProfile();
+        }
+        renderNodes();
+        renderMedia();
+        renderStreamControls();
+        renderYouTubeAgentList();
+      } catch (error) {
+        selectEl.value = previousProfileId;
+        alert(error.message || "Profile 保存失败");
+      } finally {
+        selectEl.disabled = false;
+      }
+    }
+
     refs.nodeList.addEventListener("click", (event) => {
+      if (event.target.closest("[data-node-profile-select]")) {
+        event.stopPropagation();
+        return;
+      }
       const noteButton = event.target.closest("[data-node-note]");
       if (noteButton) {
         event.preventDefault();
@@ -5150,8 +5358,17 @@ HTML = r"""
       renderNodes();
       renderMedia();
       renderStreamControls();
+      renderYouTubeAgentList();
+    });
+    refs.nodeList.addEventListener("change", (event) => {
+      const selectEl = event.target.closest("[data-node-profile-select]");
+      if (selectEl) saveNodeYouTubeProfile(selectEl);
     });
     refs.hubNodeList.addEventListener("click", (event) => {
+      if (event.target.closest("[data-node-profile-select]")) {
+        event.stopPropagation();
+        return;
+      }
       const settingsButton = event.target.closest("[data-role-settings]");
       if (settingsButton) {
         event.preventDefault();
@@ -5169,6 +5386,10 @@ HTML = r"""
       const row = event.target.closest("[data-hub-row]");
       if (!row) return;
       switchHubWithFallback(row.dataset.nodeId);
+    });
+    refs.hubNodeList.addEventListener("change", (event) => {
+      const selectEl = event.target.closest("[data-node-profile-select]");
+      if (selectEl) saveNodeYouTubeProfile(selectEl);
     });
     refs.roleSettingsClose.addEventListener("click", () => setRoleSettingsOpen(false));
     refs.roleSettingsModal.addEventListener("click", (event) => {
@@ -5454,7 +5675,7 @@ HTML = r"""
     refs.youtubeImportJsonBtn.addEventListener("click", openYouTubeJsonImport);
     refs.youtubeWizardClose.addEventListener("click", () => setYouTubeModalOpen(false));
     refs.youtubeWizardModal.addEventListener("click", (event) => {
-      if (event.target === refs.youtubeWizardModal) setYouTubeModalOpen(false);
+      if (event.target === refs.youtubeWizardModal) event.preventDefault();
     });
     refs.youtubeJsonPickBtn.addEventListener("click", () => refs.youtubeJsonFileInput.click());
     refs.youtubeJsonFileInput.addEventListener("change", loadYouTubeOAuthJsonFile);
@@ -5463,6 +5684,22 @@ HTML = r"""
     });
     refs.youtubeJsonInput.addEventListener("blur", () => applyYouTubeOAuthJsonText(refs.youtubeJsonInput.value, "粘贴的 JSON"));
     refs.youtubeProfileSelect.addEventListener("change", selectYouTubeProfile);
+    refs.youtubeProfileQuickBar.addEventListener("click", (event) => {
+      const chip = event.target.closest("[data-youtube-profile-chip]");
+      if (!chip) return;
+      refs.youtubeProfileSelect.value = chip.dataset.youtubeProfileChip || "default";
+      selectYouTubeProfile();
+    });
+    refs.youtubeAgentList.addEventListener("click", (event) => {
+      const card = event.target.closest("[data-youtube-agent-id]");
+      if (!card || card.disabled) return;
+      rememberSelectedNode(card.dataset.youtubeAgentId || "");
+      renderNodes();
+      renderMedia();
+      renderStreamControls();
+      renderYouTubeAgentList();
+      refreshYouTubeResources();
+    });
     refs.youtubeProfileAddBtn.addEventListener("click", createYouTubeProfile);
     refs.youtubeProfileDeleteBtn.addEventListener("click", deleteYouTubeProfile);
     refs.youtubeRefreshBtn.addEventListener("click", refreshYouTubeResources);
@@ -5847,6 +6084,28 @@ def load_hub_settings() -> dict[str, Any]:
 def save_hub_settings(settings: dict[str, Any]) -> None:
     ensure_dirs()
     HUB_SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def node_youtube_profile_map() -> dict[str, str]:
+    settings = load_hub_settings()
+    mapping = settings.get("node_youtube_profiles")
+    return {str(key): safe_youtube_profile_id(str(value)) for key, value in (mapping or {}).items()} if isinstance(mapping, dict) else {}
+
+
+def set_node_youtube_profile(node_id: str, profile_id: str) -> str:
+    profile_id = safe_youtube_profile_id(profile_id or active_youtube_profile_id())
+    config = load_youtube_profiles_config()
+    valid_profiles = {profile["id"] for profile in config["profiles"]}
+    if profile_id not in valid_profiles:
+        raise YouTubeAPIError("YouTube profile not found", status_code=404, reason="profile_not_found")
+    settings = load_hub_settings()
+    mapping = settings.get("node_youtube_profiles")
+    if not isinstance(mapping, dict):
+        mapping = {}
+    mapping[str(node_id)] = profile_id
+    settings["node_youtube_profiles"] = mapping
+    save_hub_settings(settings)
+    return profile_id
 
 
 def load_media_groups() -> dict[str, Any]:
@@ -7276,10 +7535,17 @@ def api_media_library_cleanup():
 @APP.get("/api/nodes")
 def api_nodes():
     result = []
+    profile_map = node_youtube_profile_map()
+    profiles = {profile["id"]: public_youtube_profile(profile) for profile in load_youtube_profiles_config()["profiles"]}
+    default_profile = active_youtube_profile_id()
     for node in load_nodes():
         node_view = dict(node)
         node_view.pop("token", None)
         node_view.pop("control_token", None)
+        profile_id = profile_map.get(str(node.get("id") or ""), default_profile)
+        profile = profiles.get(profile_id) or profiles.get(default_profile) or {}
+        node_view["youtube_profile_id"] = profile_id
+        node_view["youtube_profile_name"] = str(profile.get("name") or profile_id)
         node_view["health"] = request_node_json(node, "/api/status") if node.get("enabled", True) else {"ok": False}
         urls = node_role_urls(node)
         agent_health = node_view["health"]
@@ -7294,6 +7560,26 @@ def api_nodes():
         }
         result.append(node_view)
     return jsonify(result)
+
+
+@APP.post("/api/nodes/youtube-profile")
+def api_node_youtube_profile():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    profile_id = safe_youtube_profile_id(str(payload.get("profile_id") or ""))
+    if not node_by_id(node_id):
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    try:
+        saved_profile_id = set_node_youtube_profile(node_id, profile_id)
+    except Exception as exc:
+        return youtube_error_response(exc)
+    profile = public_youtube_profile(youtube_profile_by_id(saved_profile_id))
+    return jsonify({
+        "ok": True,
+        "node_id": node_id,
+        "profile_id": saved_profile_id,
+        "profile": profile,
+    })
 
 
 @APP.post("/api/nodes/note")
