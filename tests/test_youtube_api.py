@@ -466,6 +466,8 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertIn('class="youtube-more-actions"', app.HTML)
         self.assertIn('<summary>更多</summary>', app.HTML)
         self.assertIn('class="youtube-more-menu"', app.HTML)
+        self.assertIn('<button id="youtubePrepareBtn">准备直播目标</button>', app.HTML)
+        self.assertNotIn('<button id="youtubePrepareBtn">创建并绑定直播</button>', app.HTML)
         self.assertIn('class="wizard-field youtube-profile-row"', app.HTML)
         self.assertIn('class="youtube-profile-actions"', app.HTML)
         self.assertIn('class="wizard-field youtube-agent-row"', app.HTML)

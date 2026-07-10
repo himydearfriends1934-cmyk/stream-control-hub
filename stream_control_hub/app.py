@@ -2025,7 +2025,7 @@ HTML = r"""
       <div class="wizard-actions">
         <button id="youtubeSaveConfigBtn">保存 API 配置</button>
         <button class="primary" id="youtubeAuthorizeBtn">连接 YouTube</button>
-        <button id="youtubePrepareBtn">创建并绑定直播</button>
+        <button id="youtubePrepareBtn">准备直播目标</button>
         <details class="youtube-more-actions" id="youtubeMoreActions">
           <summary>更多</summary>
           <div class="youtube-more-menu">
