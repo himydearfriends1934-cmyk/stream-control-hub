@@ -799,6 +799,45 @@ def ffmpeg_processes() -> list[dict[str, Any]]:
     return processes
 
 
+def ffmpeg_runtime_status(
+    state: dict[str, Any],
+    processes: list[dict[str, Any]],
+    net: dict[str, Any],
+    system_cpu_percent: float,
+) -> dict[str, Any]:
+    speed = None
+    log_path = DATA_DIR / "ffmpeg.log"
+    try:
+        size = log_path.stat().st_size
+        stream_offset = max(0, int(state.get("stream_log_offset") or 0))
+        with log_path.open("rb") as handle:
+            handle.seek(max(stream_offset, size - 65536))
+            tail = handle.read().decode("utf-8", errors="replace")
+        matches = re.findall(r"speed=\s*([0-9]+(?:\.[0-9]+)?)x", tail)
+        if matches:
+            speed = float(matches[-1])
+    except OSError:
+        pass
+    cpu_count = os.cpu_count() or 1
+    ffmpeg_cpu = round(sum(float(item.get("cpu_percent") or 0) for item in processes), 2)
+    upload_kbps = round(max(0, int(net.get("current_upload_bps") or 0)) * 8 / 1000, 2)
+    stream_config = state.get("stream_config") or {}
+    expected_kbps = max(
+        0,
+        int(stream_config.get("video_bitrate") or 0) + int(stream_config.get("audio_bitrate") or 0),
+    )
+    return {
+        "speed": speed,
+        "speed_available": speed is not None,
+        "system_cpu_percent": round(float(system_cpu_percent or 0), 2),
+        "ffmpeg_cpu_percent": ffmpeg_cpu,
+        "ffmpeg_cpu_normalized_percent": round(min(100.0, ffmpeg_cpu / cpu_count), 2),
+        "upload_kbps": upload_kbps,
+        "expected_upload_kbps": expected_kbps,
+        "upload_ratio": round(upload_kbps / expected_kbps, 3) if expected_kbps and upload_kbps else None,
+    }
+
+
 def run_command(args: list[str], timeout: int = 15) -> dict[str, Any]:
     if not shutil.which(args[0]):
         return {"ok": False, "message": f"{args[0]} is not installed"}
@@ -1123,6 +1162,7 @@ def launch_stream_process(
     log_path = DATA_DIR / "ffmpeg.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = log_path.open("ab")
+    log_offset = log_file.tell()
     log_path.chmod(0o600)
     try:
         try:
@@ -1177,6 +1217,7 @@ def launch_stream_process(
     state["has_stream_key"] = bool(payload.get("stream_key"))
     state["stream_desired"] = True
     state["stream_pid"] = proc.pid
+    state["stream_log_offset"] = log_offset
     state["stream_started_at_epoch"] = now
     state["stream_config"] = {
         key: value for key, value in payload.items() if key != "stream_key" and not key.startswith("_")
@@ -1350,11 +1391,13 @@ def api_status():
     quota_limit = int(os.environ.get("STREAM_AGENT_TRAFFIC_QUOTA_BYTES", "0") or 0)
     total_used = net["bytes_recv"] + net["bytes_sent"]
     public_origin = discover_public_origin()
+    cpu_percent = cpu_percent_sample()
+    runtime = ffmpeg_runtime_status(state, processes, net, cpu_percent)
     return jsonify({
         "ok": True,
         "hostname": platform.node(),
         "platform": platform.platform(),
-        "cpu_percent": cpu_percent_sample(),
+        "cpu_percent": cpu_percent,
         "cpu_count": os.cpu_count() or 1,
         "load_avg": [round(item, 2) for item in load_avg],
         "memory": memory,
@@ -1390,6 +1433,7 @@ def api_status():
             "auto_restart": auto_restart,
             "relay": {"enabled": False},
             "tuning": {"fifo_enabled": False},
+            "runtime": runtime,
         },
         "stream_config": {
             "has_stream_key": bool(state.get("has_stream_key")) and STREAM_RESTART_FILE.exists(),

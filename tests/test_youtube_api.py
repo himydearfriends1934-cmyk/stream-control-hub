@@ -851,6 +851,101 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(app.youtube_autotune_resolution_bitrate({"resolution": "720x1280", "fps": 30}), 2500)
         self.assertEqual(app.youtube_autotune_resolution_bitrate({"resolution": "1280x720", "fps": 30}), 2500)
 
+    def test_autotune_uses_agent_runtime_for_starvation_decisions(self):
+        from stream_control_hub import app
+
+        config = {
+            "video_bitrate": 4500,
+            "audio_bitrate": 192,
+            "resolution": "1280x720",
+            "fps": 30,
+            "preset": "superfast",
+        }
+        health = {
+            "severity": "critical",
+            "analysis": {
+                "configuration_issues": [{"type": "videoIngestionStarved", "severity": "error"}],
+            },
+        }
+        recommendation = {**config, "video_bitrate": 3600}
+
+        overloaded, runtime, _ = app.youtube_autotune_apply_runtime(
+            health,
+            recommendation,
+            {"cpu_count": 1, "stream": {"runtime": {"speed": 0.91, "system_cpu_percent": 88, "ffmpeg_cpu_percent": 96}}},
+            config,
+            {},
+        )
+        self.assertEqual(runtime["classification"], "encoder_overloaded")
+        self.assertEqual(overloaded["video_bitrate"], 4500)
+        self.assertEqual(overloaded["preset"], "ultrafast")
+
+        healthy_config = {**config, "video_bitrate": 1179}
+        healthy, runtime, _ = app.youtube_autotune_apply_runtime(
+            health,
+            {**healthy_config, "video_bitrate": 943},
+            {
+                "cpu_count": 1,
+                "stream": {"runtime": {
+                    "speed": 1.0,
+                    "system_cpu_percent": 42,
+                    "ffmpeg_cpu_percent": 70,
+                    "upload_kbps": 1400,
+                }},
+            },
+            healthy_config,
+            {"youtube_recommended_bitrate": 2500},
+        )
+        self.assertEqual(runtime["classification"], "healthy")
+        self.assertEqual(healthy["video_bitrate"], 2500)
+
+        network_limited, runtime, _ = app.youtube_autotune_apply_runtime(
+            health,
+            recommendation,
+            {
+                "cpu_count": 1,
+                "stream": {"runtime": {
+                    "speed": 1.0,
+                    "system_cpu_percent": 40,
+                    "ffmpeg_cpu_percent": 60,
+                    "upload_kbps": 500,
+                }},
+            },
+            config,
+            {},
+        )
+        self.assertEqual(runtime["classification"], "network_starved")
+        self.assertEqual(network_limited["video_bitrate"], 4500)
+        self.assertEqual(network_limited["preset"], "superfast")
+
+    def test_agent_parses_latest_ffmpeg_speed_and_runtime_load(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "ffmpeg.log"
+            log_file.write_text(
+                "frame=100 speed=0.82x\rframe=200 speed=0.99x\r",
+                encoding="utf-8",
+            )
+            state = {
+                "stream_log_offset": 0,
+                "stream_config": {"video_bitrate": 2500, "audio_bitrate": 128},
+            }
+            with patch.object(headless_agent, "DATA_DIR", Path(tmp)), patch.object(
+                headless_agent.os, "cpu_count", return_value=1
+            ):
+                runtime = headless_agent.ffmpeg_runtime_status(
+                    state,
+                    [{"pid": 123, "cpu_percent": 87.5}],
+                    {"current_upload_bps": 320_000},
+                    64.0,
+                )
+
+        self.assertEqual(runtime["speed"], 0.99)
+        self.assertTrue(runtime["speed_available"])
+        self.assertEqual(runtime["ffmpeg_cpu_percent"], 87.5)
+        self.assertEqual(runtime["upload_kbps"], 2560.0)
+
 
 if __name__ == "__main__":
     unittest.main()

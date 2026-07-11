@@ -373,6 +373,103 @@ def youtube_autotune_resolution_bitrate(payload: dict[str, Any]) -> int:
     return 13000
 
 
+def youtube_autotune_runtime_snapshot(status: dict[str, Any], stream_config: dict[str, Any]) -> dict[str, Any]:
+    stream = status.get("stream") or {}
+    runtime = stream.get("runtime") or {}
+    processes = stream.get("processes") or []
+    cpu_count = max(1, int(status.get("cpu_count") or 1))
+    ffmpeg_cpu = float(runtime.get("ffmpeg_cpu_percent") or sum(float(item.get("cpu_percent") or 0) for item in processes))
+    system_cpu = float(runtime.get("system_cpu_percent") or status.get("cpu_percent") or 0)
+    raw_speed = runtime.get("speed")
+    speed = float(raw_speed) if raw_speed is not None else None
+    upload_kbps = float(runtime.get("upload_kbps") or max(0, int((status.get("net") or {}).get("current_upload_bps") or 0)) * 8 / 1000)
+    expected_kbps = max(
+        0,
+        int(stream_config.get("video_bitrate") or 0) + int(stream_config.get("audio_bitrate") or 0),
+    )
+    upload_ratio = upload_kbps / expected_kbps if upload_kbps > 0 and expected_kbps else None
+    normalized_ffmpeg_cpu = min(100.0, ffmpeg_cpu / cpu_count)
+    encoder_overloaded = system_cpu >= 85 or normalized_ffmpeg_cpu >= 90 or (speed is not None and speed < 0.97)
+    network_starved = (
+        upload_ratio is not None
+        and upload_ratio < 0.75
+        and speed is not None
+        and speed >= 0.97
+        and not encoder_overloaded
+    )
+    runtime_healthy = (
+        speed is not None
+        and speed >= 0.98
+        and system_cpu < 85
+        and normalized_ffmpeg_cpu < 90
+        and (upload_ratio is None or upload_ratio >= 0.75)
+    )
+    classification = "encoder_overloaded" if encoder_overloaded else "network_starved" if network_starved else "healthy" if runtime_healthy else "unknown"
+    return {
+        "classification": classification,
+        "speed": round(speed, 3) if speed is not None else None,
+        "system_cpu_percent": round(system_cpu, 2),
+        "ffmpeg_cpu_percent": round(ffmpeg_cpu, 2),
+        "ffmpeg_cpu_normalized_percent": round(normalized_ffmpeg_cpu, 2),
+        "upload_kbps": round(upload_kbps, 2),
+        "expected_upload_kbps": expected_kbps,
+        "upload_ratio": round(upload_ratio, 3) if upload_ratio is not None else None,
+    }
+
+
+def youtube_autotune_apply_runtime(
+    health: dict[str, Any],
+    recommendation: dict[str, Any],
+    status: dict[str, Any],
+    stream_config: dict[str, Any],
+    entry: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    runtime = youtube_autotune_runtime_snapshot(status, stream_config)
+    issue_fingerprint = youtube_autotune_issue_fingerprint(health)
+    if issue_fingerprint != "videoingestionstarved":
+        return dict(recommendation), runtime, []
+    result = dict(recommendation)
+    decisions = []
+    current_bitrate = int(stream_config.get("video_bitrate") or 0)
+    explicit_bitrate = int((health.get("analysis") or {}).get("recommended_video_bitrate") or 0)
+    fallback_bitrate = int(entry.get("youtube_recommended_bitrate") or 0) or youtube_autotune_resolution_bitrate(stream_config)
+    classification = runtime["classification"]
+    if classification == "encoder_overloaded":
+        if not explicit_bitrate:
+            result["video_bitrate"] = current_bitrate
+        preset = str(stream_config.get("preset") or "veryfast")
+        faster_presets = {"veryfast": "superfast", "superfast": "ultrafast"}
+        if preset in faster_presets:
+            result["preset"] = faster_presets[preset]
+            decisions.append(
+                f"Agent encoder pressure detected (speed={runtime['speed']}, CPU={runtime['system_cpu_percent']}%); use {result['preset']} before changing bitrate again."
+            )
+        elif int(stream_config.get("fps") or 30) > 30:
+            result["fps"] = 30
+            decisions.append("Agent remains encoder-bound on the fastest preset; reduce frame rate to 30 FPS.")
+        elif int(stream_config.get("fps") or 30) > 24:
+            result["fps"] = 24
+            decisions.append("Agent remains encoder-bound at 30 FPS; reduce frame rate to 24 FPS.")
+        else:
+            decisions.append("Agent is encoder-bound but already uses the fastest preset and 24 FPS; hold parameters for observation.")
+    elif classification == "network_starved":
+        if not explicit_bitrate:
+            result["video_bitrate"] = current_bitrate
+        result["preset"] = stream_config.get("preset") or "veryfast"
+        decisions.append(
+            f"FFmpeg speed is stable but upload is only {runtime['upload_kbps']} Kbps; treat this as a network path issue and do not restart the encoder."
+        )
+    elif classification == "healthy":
+        result["video_bitrate"] = explicit_bitrate or max(current_bitrate, fallback_bitrate)
+        result["preset"] = stream_config.get("preset") or "veryfast"
+        decisions.append(
+            f"Agent speed and CPU are healthy; do not reduce bitrate for ingestion starvation alone, and restore at least {fallback_bitrate} Kbps."
+        )
+    else:
+        decisions.append("Agent runtime telemetry is incomplete; keep the guarded YouTube recommendation and wait for another sample.")
+    return result, runtime, decisions
+
+
 def youtube_autotune_history_adjustments(
     state: dict[str, Any], event: dict[str, Any], issue_fingerprint: str
 ) -> int:
@@ -458,7 +555,6 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     continue
                 health = client.stream_health(str(stream_config.get("youtube_stream_id") or ""), stream_config)
                 recommendation = health.get("recommendation") or {}
-                diff = youtube_autotune_payload_diff(stream_config, recommendation, profile)
                 severity = str(health.get("severity") or "").lower()
                 issue_fingerprint = youtube_autotune_issue_fingerprint(health)
                 previous_fingerprint = str(entry.get("active_issue_fingerprint") or "")
@@ -475,12 +571,20 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 explicit_bitrate = int((health.get("analysis") or {}).get("recommended_video_bitrate") or 0)
                 if explicit_bitrate:
                     entry["youtube_recommended_bitrate"] = explicit_bitrate
+                recommendation, runtime, runtime_decisions = youtube_autotune_apply_runtime(
+                    health, recommendation, status, stream_config, entry
+                )
+                diff = youtube_autotune_payload_diff(stream_config, recommendation, profile)
                 event.update({
                     "severity": severity or "unknown",
                     "api_problems": youtube_autotune_problems(health),
-                    "recommendation_reasons": [str(value)[:500] for value in (health.get("analysis") or {}).get("reasons") or []][:12],
+                    "recommendation_reasons": (
+                        [str(value)[:500] for value in (health.get("analysis") or {}).get("reasons") or []]
+                        + [str(value)[:500] for value in runtime_decisions]
+                    )[:12],
                     "recommended": youtube_autotune_parameter_snapshot(recommendation),
                     "changes": youtube_autotune_parameter_snapshot(diff),
+                    "runtime": runtime,
                 })
                 entry["last_health"] = health.get("health") or {}
                 entry["last_analysis"] = health.get("analysis") or {}
@@ -3246,6 +3350,13 @@ HTML = r"""
             <time>${escapeHtml(shortDateTime(event.time || event.timestamp))}</time>
           </div>
           <div class="autotune-history-line"><strong>API 问题：</strong>${escapeHtml(problems)}</div>
+          ${event.runtime ? `<div class="autotune-history-line"><strong>Agent 运行：</strong>${escapeHtml([
+            `判断 ${event.runtime.classification || "unknown"}`,
+            `速度 ${event.runtime.speed == null ? "--" : `${event.runtime.speed}x`}`,
+            `CPU ${event.runtime.system_cpu_percent ?? "--"}%`,
+            `FFmpeg ${event.runtime.ffmpeg_cpu_percent ?? "--"}%`,
+            `上传 ${event.runtime.upload_kbps ?? "--"}/${event.runtime.expected_upload_kbps ?? "--"} Kbps`,
+          ].join(" · "))}</div>` : ""}
           <div class="autotune-history-line"><strong>调参判断：</strong>${escapeHtml(reasons)}</div>
           <div class="autotune-history-line"><strong>更改前：</strong>${escapeHtml(autotuneParameterText(event.before))}</div>
           <div class="autotune-history-line"><strong>更改 Agent：</strong>${escapeHtml(autotuneParameterText(event.changes))}</div>
