@@ -2422,6 +2422,11 @@ HTML = r"""
       document.querySelector(selector)?.scrollIntoView({ behavior: "smooth", block: "start" });
     }
 
+    function showDiagnostics(message, { scroll = true } = {}) {
+      refs.updateBox.textContent = message;
+      if (scroll) scrollToSelector(".log-card");
+    }
+
     function naturalRolePaneHeight(pane) {
       if (!pane) return 0;
       const title = pane.querySelector(".role-group-title");
@@ -2535,6 +2540,24 @@ HTML = r"""
 
     function log(message) {
       refs.logBox.textContent = `${new Date().toLocaleTimeString()} ${message}\n${refs.logBox.textContent}`.trim();
+    }
+
+    function statusSummaryText() {
+      const agentRows = nodes.filter((node) => Boolean(node.roles?.agent?.enabled));
+      const onlineAgents = agentRows.filter((node) => nodeOnline(node)).length;
+      const streamingAgents = agentRows.filter((node) => nodeStreaming(node)).length;
+      const resources = mediaLibrary.resources || [];
+      const copies = resources.reduce((total, item) => total + ((item.copies || []).length || 0), 0);
+      const selected = selectedNode();
+      return [
+        "状态已刷新",
+        "",
+        `Agent：${onlineAgents}/${agentRows.length} 在线，${streamingAgents} 个正在推流`,
+        `视频资源：${resources.length} 个文件，${copies} 个节点副本`,
+        `当前选择：${selected ? `${selected.name || selected.id} (${selected.id})` : "未选择 Agent"}`,
+        "",
+        "下方 AGENT 表、资源管理、开播表单都已更新。",
+      ].join("\n");
     }
 
     function nodeStatusPill(node) {
@@ -4337,8 +4360,12 @@ HTML = r"""
 
     async function refreshAll() {
       refs.refreshBtn.disabled = true;
+      uiMessage("正在刷新 Hub、Agent 和资源状态...");
+      showDiagnostics("正在刷新状态，请稍候...", { scroll: false });
       try {
         const [nodeResp, libraryResp] = await Promise.all([fetch("/api/nodes"), fetch("/api/media-library")]);
+        if (!nodeResp.ok) throw new Error(nodeResp.statusText || "节点状态读取失败");
+        if (!libraryResp.ok) throw new Error(libraryResp.statusText || "媒体库读取失败");
         nodes = await nodeResp.json();
         mediaLibrary = await libraryResp.json();
         renderNodes();
@@ -4347,7 +4374,14 @@ HTML = r"""
         renderYouTubeAgentList();
         renderTailscaleNodeOptions();
         preloadNodeYouTubeStreams();
+        showDiagnostics(statusSummaryText(), { scroll: false });
+        uiMessage("状态已刷新。AGENT 表、资源管理和开播表单已经更新。");
         log("状态已刷新");
+      } catch (error) {
+        const message = friendlyError(error, "状态刷新失败");
+        showDiagnostics(`状态刷新失败\n\n${message}`);
+        uiMessage(message);
+        log(message);
       } finally {
         refs.refreshBtn.disabled = false;
       }
@@ -4748,17 +4782,68 @@ HTML = r"""
     }
 
     async function showPolicy() {
-      refs.updateBox.textContent = "Loading upload policy...";
-      const resp = await fetch("/api/policy");
-      const data = await resp.json();
-      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      refs.policyBtn.disabled = true;
+      uiMessage("正在读取上传策略...");
+      showDiagnostics("正在读取 Upload Policy，请稍候...");
+      try {
+        const resp = await fetch("/api/policy");
+        const data = await resp.json().catch(() => ({ ok: false, message: resp.statusText }));
+        if (!resp.ok || data.ok === false) throw new Error(data.message || resp.statusText || "Upload Policy 读取失败");
+        const policy = data.policy || {};
+        showDiagnostics([
+          "Upload Policy 上传策略",
+          "",
+          `策略名称：${policy.name || "--"}`,
+          `安全：临时令牌只保存在内存；上传窗口成功/失败后自动关闭；失败会取消残留上传；保留磁盘空间保护。`,
+          `稳定：上传前探测线路；分片重试；禁止自动回退到内网线路。`,
+          `速度：公网窗口/公网直连优先；按分片上传。`,
+          "",
+          JSON.stringify(data, null, 2),
+        ].join("\n"));
+        uiMessage("Upload Policy 已显示在操作日志区域。");
+      } catch (error) {
+        const message = friendlyError(error, "Upload Policy 读取失败");
+        showDiagnostics(`Upload Policy 读取失败\n\n${message}`);
+        uiMessage(message);
+      } finally {
+        refs.policyBtn.disabled = false;
+      }
     }
 
     async function showAudit() {
-      refs.updateBox.textContent = "Loading push audit...";
-      const resp = await fetch("/api/push-audit?limit=20");
-      const data = await resp.json();
-      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      refs.auditBtn.disabled = true;
+      uiMessage("正在读取最近推送记录...");
+      showDiagnostics("正在读取 Push Audit，请稍候...");
+      try {
+        const resp = await fetch("/api/push-audit?limit=20");
+        const data = await resp.json().catch(() => ({ ok: false, message: resp.statusText }));
+        if (!resp.ok || data.ok === false) throw new Error(data.message || resp.statusText || "Push Audit 读取失败");
+        const events = data.events || [];
+        const summary = events.length
+          ? events.slice(0, 5).map((event) => {
+              const state = event.ok ? "成功" : "失败";
+              const media = event.media || "--";
+              const nodeId = event.node_id || "--";
+              const speed = event.average_bytes_per_second ? `${fmtBytes(event.average_bytes_per_second)}/s` : "--";
+              return `- ${state} · ${media} -> ${nodeId} · ${speed}`;
+            }).join("\n")
+          : "还没有视频推送记录。";
+        showDiagnostics([
+          "Push Audit 最近推送记录",
+          "",
+          `记录数：${events.length}`,
+          summary,
+          "",
+          JSON.stringify(data, null, 2),
+        ].join("\n"));
+        uiMessage("Push Audit 已显示在操作日志区域。");
+      } catch (error) {
+        const message = friendlyError(error, "Push Audit 读取失败");
+        showDiagnostics(`Push Audit 读取失败\n\n${message}`);
+        uiMessage(message);
+      } finally {
+        refs.auditBtn.disabled = false;
+      }
     }
 
     async function showTailscaleStatus() {
