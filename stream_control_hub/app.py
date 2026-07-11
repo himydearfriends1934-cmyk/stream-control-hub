@@ -2886,9 +2886,9 @@ HTML = r"""
       const lock = { ...nodeStreamLock(node) };
       if (!nodeStreaming(node)) return lock;
       const config = nodeStreamConfig(node);
-      if (config.stream_output_mode === "youtube_api" && config.youtube_stream_id) {
+      if (config.youtube_stream_id) {
         lock.youtube_stream_id = String(config.youtube_stream_id || "");
-      } else {
+      } else if (config.stream_output_mode && config.stream_output_mode !== "youtube_api") {
         lock.youtube_stream_id = "";
       }
       if (config.video_path) lock.video_path = String(config.video_path || "");
@@ -2896,6 +2896,12 @@ HTML = r"""
       if (config.media_local !== undefined) lock.media_local = Boolean(config.media_local);
       if (config.source_node_id) lock.source_node_id = String(config.source_node_id || "");
       return lock;
+    }
+
+    function nodeRowYoutubeStreamId(node, lock = nodeRowStreamLock(node)) {
+      const config = nodeStreamConfig(node);
+      if (nodeStreaming(node) && config.youtube_stream_id) return String(config.youtube_stream_id || "");
+      return String(lock.youtube_stream_id || config.youtube_stream_id || "");
     }
 
     function nodeStreamModeLabel(config) {
@@ -3129,7 +3135,7 @@ HTML = r"""
       const selected = String(node.id) === String(selectedNodeId);
       const rowProfileId = nodeRowProfileId(node);
       const rowLock = nodeRowStreamLock(node);
-      const rowStreamId = String(rowLock.youtube_stream_id || "");
+      const rowStreamId = nodeRowYoutubeStreamId(node, rowLock);
       const currentProfileName = profileName(rowProfileId);
       const currentStreamName = lockedYoutubeStreamLabel(node, rowStreamId, rowProfileId);
       const currentVideoName = lockedVideoLabel(node, rowLock);
@@ -3473,7 +3479,7 @@ HTML = r"""
       const seen = new Set();
       nodes.forEach((node) => {
         if (node.enabled === false || !node.roles?.agent?.enabled) return;
-        const profileId = nodeProfileId(node);
+        const profileId = nodeRowProfileId(node);
         if (!profileId || seen.has(profileId)) return;
         seen.add(profileId);
         ensureYouTubeStreamsForProfile(profileId, node.id);
