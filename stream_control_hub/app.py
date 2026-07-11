@@ -28,6 +28,7 @@ from flask import Flask, jsonify, make_response, request
 from werkzeug.utils import secure_filename
 
 from .youtube_api import YouTubeAPIClient, YouTubeAPIError
+from .stream_tuning import youtube_live_bitrate_for_payload
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -171,7 +172,7 @@ def default_youtube_profile() -> dict[str, Any]:
         "auto_tune_interval_seconds": 300,
         "auto_tune_cooldown_seconds": 900,
         "auto_tune_min_bitrate": 800,
-        "auto_tune_max_bitrate": 6000,
+        "auto_tune_max_bitrate": 40000,
         "created_at": "",
         "updated_at": "",
     }
@@ -244,7 +245,7 @@ def public_youtube_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "auto_tune_interval_seconds": int(profile.get("auto_tune_interval_seconds") or 300),
         "auto_tune_cooldown_seconds": int(profile.get("auto_tune_cooldown_seconds") or 900),
         "auto_tune_min_bitrate": int(profile.get("auto_tune_min_bitrate") or 800),
-        "auto_tune_max_bitrate": int(profile.get("auto_tune_max_bitrate") or 6000),
+        "auto_tune_max_bitrate": int(profile.get("auto_tune_max_bitrate") or 40000),
         "usage": youtube_usage_for_profile(profile_id),
     }
 
@@ -309,7 +310,7 @@ def youtube_autotune_payload_diff(current: dict[str, Any], recommendation: dict[
             result[key] = recommendation.get(key)
     if "video_bitrate" in recommendation:
         minimum = max(300, int(profile.get("auto_tune_min_bitrate") or 800))
-        maximum = max(minimum, int(profile.get("auto_tune_max_bitrate") or 6000))
+        maximum = max(minimum, int(profile.get("auto_tune_max_bitrate") or 40000))
         next_bitrate = max(minimum, min(maximum, int(recommendation.get("video_bitrate") or 0)))
         if next_bitrate and next_bitrate != int(current.get("video_bitrate") or 0):
             result["video_bitrate"] = next_bitrate
@@ -357,20 +358,7 @@ def youtube_autotune_issue_fingerprint(health: dict[str, Any]) -> str:
 
 
 def youtube_autotune_resolution_bitrate(payload: dict[str, Any]) -> int:
-    resolution = str(payload.get("resolution") or "1280x720").lower().replace("×", "x")
-    try:
-        width, height = (int(value.strip()) for value in resolution.split("x", 1))
-    except (TypeError, ValueError):
-        width, height = 1280, 720
-    short_side, long_side = sorted((max(1, width), max(1, height)))
-    fps = int(payload.get("fps") or 30)
-    if short_side <= 720 and long_side <= 1280:
-        return 4000 if fps > 30 else 2500
-    if short_side <= 1080 and long_side <= 1920:
-        return 6000 if fps > 30 else 4500
-    if short_side <= 1440 and long_side <= 2560:
-        return 9000
-    return 13000
+    return youtube_live_bitrate_for_payload(payload)
 
 
 def youtube_autotune_runtime_snapshot(status: dict[str, Any], stream_config: dict[str, Any]) -> dict[str, Any]:
@@ -382,12 +370,13 @@ def youtube_autotune_runtime_snapshot(status: dict[str, Any], stream_config: dic
     system_cpu = float(runtime.get("system_cpu_percent") or status.get("cpu_percent") or 0)
     raw_speed = runtime.get("speed")
     speed = float(raw_speed) if raw_speed is not None else None
-    upload_kbps = float(runtime.get("upload_kbps") or max(0, int((status.get("net") or {}).get("current_upload_bps") or 0)) * 8 / 1000)
+    raw_upload_kbps = runtime.get("upload_kbps")
+    upload_kbps = float(raw_upload_kbps) if raw_upload_kbps is not None else None
     expected_kbps = max(
         0,
         int(stream_config.get("video_bitrate") or 0) + int(stream_config.get("audio_bitrate") or 0),
     )
-    upload_ratio = upload_kbps / expected_kbps if upload_kbps > 0 and expected_kbps else None
+    upload_ratio = upload_kbps / expected_kbps if upload_kbps is not None and upload_kbps >= 0 and expected_kbps else None
     normalized_ffmpeg_cpu = min(100.0, ffmpeg_cpu / cpu_count)
     encoder_overloaded = system_cpu >= 85 or normalized_ffmpeg_cpu >= 90 or (speed is not None and speed < 0.97)
     network_starved = (
@@ -411,10 +400,39 @@ def youtube_autotune_runtime_snapshot(status: dict[str, Any], stream_config: dic
         "system_cpu_percent": round(system_cpu, 2),
         "ffmpeg_cpu_percent": round(ffmpeg_cpu, 2),
         "ffmpeg_cpu_normalized_percent": round(normalized_ffmpeg_cpu, 2),
-        "upload_kbps": round(upload_kbps, 2),
+        "upload_kbps": round(upload_kbps, 2) if upload_kbps is not None else None,
         "expected_upload_kbps": expected_kbps,
         "upload_ratio": round(upload_ratio, 3) if upload_ratio is not None else None,
     }
+
+
+def youtube_autotune_smooth_runtime(entry: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+    samples = [item for item in entry.get("runtime_samples") or [] if isinstance(item, dict)]
+    samples = (samples + [dict(runtime)])[-5:]
+    entry["runtime_samples"] = samples
+    if len(samples) < 2:
+        return runtime
+
+    def median_value(key: str) -> float | None:
+        values = sorted(float(item[key]) for item in samples if item.get(key) is not None)
+        if not values:
+            return None
+        middle = len(values) // 2
+        return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+
+    classifications = [str(item.get("classification") or "unknown") for item in samples[-3:]]
+    counts = {value: classifications.count(value) for value in set(classifications) if value != "unknown"}
+    classification = max(counts, key=counts.get) if counts and max(counts.values()) >= 2 else "unknown"
+    result = dict(runtime)
+    result["classification"] = classification
+    for key in (
+        "speed", "system_cpu_percent", "ffmpeg_cpu_percent", "ffmpeg_cpu_normalized_percent",
+        "upload_kbps", "upload_ratio",
+    ):
+        value = median_value(key)
+        result[key] = round(value, 3) if value is not None else None
+    result["sample_count"] = len(samples)
+    return result
 
 
 def youtube_autotune_apply_runtime(
@@ -424,7 +442,7 @@ def youtube_autotune_apply_runtime(
     stream_config: dict[str, Any],
     entry: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
-    runtime = youtube_autotune_runtime_snapshot(status, stream_config)
+    runtime = youtube_autotune_smooth_runtime(entry, youtube_autotune_runtime_snapshot(status, stream_config))
     issue_fingerprint = youtube_autotune_issue_fingerprint(health)
     if issue_fingerprint != "videoingestionstarved":
         return dict(recommendation), runtime, []
@@ -568,6 +586,7 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     )
                     entry["recovery_applied"] = False
                     entry["consecutive_issues"] = 0
+                    entry["runtime_samples"] = []
                 explicit_bitrate = int((health.get("analysis") or {}).get("recommended_video_bitrate") or 0)
                 if explicit_bitrate:
                     entry["youtube_recommended_bitrate"] = explicit_bitrate
@@ -605,7 +624,7 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     continue
                 entry["consecutive_issues"] = int(entry.get("consecutive_issues") or 0) + 1
                 entry["pending_diff"] = diff
-                required_checks = 1 if severity == "critical" else 2
+                required_checks = 2 if severity == "critical" else 3
                 if entry["consecutive_issues"] < required_checks:
                     append_youtube_autotune_history(state, {**event, "outcome": "pending", "after": event["before"]})
                     continue
@@ -2170,7 +2189,7 @@ HTML = r"""
           <div class="command-advanced-grid">
             <div class="command-field">
               <label>RTMP 地址</label>
-              <input id="streamUrlInput" type="text" value="rtmp://a.rtmp.youtube.com/live2">
+              <input id="streamUrlInput" type="text" value="rtmps://a.rtmp.youtube.com/live2">
             </div>
             <div class="command-field">
               <label>分辨率 / FPS</label>
@@ -2182,8 +2201,8 @@ HTML = r"""
             <div class="command-field">
               <label>码率</label>
               <div class="command-pair">
-                <input id="videoBitrateInput" type="number" value="4500" min="800" placeholder="视频 kbps">
-                <input id="audioBitrateInput" type="number" value="192" min="64" placeholder="音频 kbps">
+                <input id="videoBitrateInput" type="number" value="4000" min="800" placeholder="视频 kbps">
+                <input id="audioBitrateInput" type="number" value="128" min="64" placeholder="音频 kbps">
               </div>
             </div>
             <div class="command-field">
@@ -2466,7 +2485,7 @@ HTML = r"""
           </div>
           <div class="wizard-field youtube-control-item">
             <label>Max Kbps</label>
-            <input id="youtubeAutoTuneMaxBitrateInput" type="number" min="800" max="30000" step="100" value="6000" title="Max video bitrate Kbps">
+            <input id="youtubeAutoTuneMaxBitrateInput" type="number" min="800" max="40000" step="100" value="40000" title="Max video bitrate Kbps">
           </div>
         </div>
         <div class="wizard-field youtube-profile-row">
@@ -3483,7 +3502,7 @@ HTML = r"""
             <div class="mini-table" style="margin-top: 10px;">
               ${miniRow(`${parameterStateLabel}视频参数`, streamVideoParameters)}
               ${miniRow(`${parameterStateLabel}编码参数`, streamEncodingParameters)}
-              ${miniRow("YouTube 智能调参", youtubeSmartTuneEnabled ? `开启 · 检查 ${youtubeProfile.auto_tune_interval_seconds || 300}s · 冷却 ${youtubeProfile.auto_tune_cooldown_seconds || 900}s · 上限 ${youtubeProfile.auto_tune_max_bitrate || 6000}kbps` : "关闭")}
+              ${miniRow("YouTube 智能调参", youtubeSmartTuneEnabled ? `开启 · 检查 ${youtubeProfile.auto_tune_interval_seconds || 300}s · 冷却 ${youtubeProfile.auto_tune_cooldown_seconds || 900}s · 上限 ${youtubeProfile.auto_tune_max_bitrate || 40000}kbps` : "关闭")}
               ${miniRow("Agent 自适应模式", `${config.adaptive_mode || "--"} · ${adaptive.enabled ? `${adaptive.status || "idle"} / ${adaptive.last_error || "正常"}` : "运行时关闭"}`)}
               ${miniRow("Agent 自动重启", autoRestart.enabled ? `开启 · ${autoRestart.last_error || "正常"}` : "关闭")}
               ${miniRow("本地中继", relay.enabled ? `${relay.mode || "relay"} · ${relay.reachable ? "可达" : "不可达"}` : relay.message || "关闭")}
@@ -3888,7 +3907,7 @@ HTML = r"""
         auto_tune_enabled: refs.youtubeAutoTuneEnabledInput?.value === "1",
         auto_tune_interval_seconds: Number(refs.youtubeAutoTuneIntervalInput?.value || 300),
         auto_tune_cooldown_seconds: Number(refs.youtubeAutoTuneCooldownInput?.value || 900),
-        auto_tune_max_bitrate: Number(refs.youtubeAutoTuneMaxBitrateInput?.value || 6000),
+        auto_tune_max_bitrate: Number(refs.youtubeAutoTuneMaxBitrateInput?.value || 40000),
       };
     }
 
@@ -3948,7 +3967,7 @@ HTML = r"""
         auto_tune_enabled: Boolean(profile?.auto_tune_enabled),
         auto_tune_interval_seconds: profile?.auto_tune_interval_seconds || 300,
         auto_tune_cooldown_seconds: profile?.auto_tune_cooldown_seconds || 900,
-        auto_tune_max_bitrate: profile?.auto_tune_max_bitrate || 6000,
+        auto_tune_max_bitrate: profile?.auto_tune_max_bitrate || 40000,
       });
       if (data.ok) {
         renderYouTubeProfiles(data.profiles || [], data.active_profile_id || data.profile?.id || profileId);
@@ -3978,7 +3997,7 @@ HTML = r"""
       if (refs.youtubeAutoTuneEnabledInput) refs.youtubeAutoTuneEnabledInput.value = profile.auto_tune_enabled ? "1" : "0";
       if (refs.youtubeAutoTuneIntervalInput) refs.youtubeAutoTuneIntervalInput.value = profile.auto_tune_interval_seconds || 300;
       if (refs.youtubeAutoTuneCooldownInput) refs.youtubeAutoTuneCooldownInput.value = profile.auto_tune_cooldown_seconds || 900;
-      if (refs.youtubeAutoTuneMaxBitrateInput) refs.youtubeAutoTuneMaxBitrateInput.value = profile.auto_tune_max_bitrate || 6000;
+      if (refs.youtubeAutoTuneMaxBitrateInput) refs.youtubeAutoTuneMaxBitrateInput.value = profile.auto_tune_max_bitrate || 40000;
       const usage = profile.usage || {};
       if (refs.youtubeUsageInput) {
         refs.youtubeUsageInput.value = `${usage.calls || 0} calls / ${usage.estimated_units || 0} units`;
@@ -4032,7 +4051,7 @@ HTML = r"""
           auto_tune_enabled: false,
           auto_tune_interval_seconds: 300,
           auto_tune_cooldown_seconds: 900,
-          auto_tune_max_bitrate: 6000,
+          auto_tune_max_bitrate: 40000,
       });
       if (data.ok) {
         renderYouTubeProfiles(data.profiles || [], data.active_profile_id || data.profile?.id || "");
@@ -4660,8 +4679,8 @@ HTML = r"""
         adaptive_mode: refs.adaptiveModeInput.value || "auto",
         stream_output_mode: refs.streamOutputModeInput.value || "direct",
         preset: refs.presetInput.value.trim() || "veryfast",
-        video_bitrate: Number(refs.videoBitrateInput.value || 4500),
-        audio_bitrate: Number(refs.audioBitrateInput.value || 192),
+        video_bitrate: Number(refs.videoBitrateInput.value || 4000),
+        audio_bitrate: Number(refs.audioBitrateInput.value || 128),
         fps: Number(refs.fpsInput.value || 30),
         resolution: refs.resolutionInput.value.trim() || "1280x720",
         keyframe_seconds: Number(refs.keyframeInput.value || 2),
@@ -6298,7 +6317,7 @@ HTML = r"""
           auto_tune_interval_seconds: profile.auto_tune_interval_seconds || 300,
           auto_tune_cooldown_seconds: profile.auto_tune_cooldown_seconds || 900,
           auto_tune_min_bitrate: profile.auto_tune_min_bitrate || 800,
-          auto_tune_max_bitrate: profile.auto_tune_max_bitrate || 6000,
+          auto_tune_max_bitrate: profile.auto_tune_max_bitrate || 40000,
         });
         if (!data.ok) throw new Error(data.message || "智能调参保存失败");
         rememberSelectedNode(nodeId);
@@ -9587,7 +9606,7 @@ def api_node_media_delete():
 
 
 def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
-    stream_url = str(payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2").strip().rstrip("/")
+    stream_url = str(payload.get("stream_url") or "rtmps://a.rtmp.youtube.com/live2").strip().rstrip("/")
     stream_key = str(payload.get("stream_key") or "").strip()
     if stream_key.lower().startswith(("rtmp://", "rtmps://")):
         parsed_key = stream_key.rstrip("/")
@@ -9606,8 +9625,8 @@ def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
         "adaptive_mode": str(payload.get("adaptive_mode") or "auto").strip().lower() or "auto",
         "stream_output_mode": str(payload.get("stream_output_mode") or "direct").strip().lower() or "direct",
         "preset": str(payload.get("preset") or "veryfast").strip() or "veryfast",
-        "video_bitrate": int(payload.get("video_bitrate") or 4500),
-        "audio_bitrate": int(payload.get("audio_bitrate") or 192),
+        "video_bitrate": int(payload.get("video_bitrate") or 4000),
+        "audio_bitrate": int(payload.get("audio_bitrate") or 128),
         "fps": int(payload.get("fps") or 30),
         "resolution": str(payload.get("resolution") or "1280x720").strip() or "1280x720",
         "keyframe_seconds": int(payload.get("keyframe_seconds") or 2),
@@ -9919,7 +9938,7 @@ def api_youtube_profile_save():
         "auto_tune_interval_seconds": max(60, min(3600, int(payload.get("auto_tune_interval_seconds") or 300))),
         "auto_tune_cooldown_seconds": max(60, min(7200, int(payload.get("auto_tune_cooldown_seconds") or 900))),
         "auto_tune_min_bitrate": max(300, min(20000, int(payload.get("auto_tune_min_bitrate") or 800))),
-        "auto_tune_max_bitrate": max(800, min(30000, int(payload.get("auto_tune_max_bitrate") or 6000))),
+        "auto_tune_max_bitrate": max(800, min(40000, int(payload.get("auto_tune_max_bitrate") or 40000))),
     }
     profile = save_youtube_profile_config(profile_id, updates)
     return jsonify({
@@ -10045,7 +10064,7 @@ def api_nodes_youtube_config():
             "auto_tune_interval_seconds": max(60, min(3600, int(payload.get("auto_tune_interval_seconds") or (existing or {}).get("auto_tune_interval_seconds") or 300))),
             "auto_tune_cooldown_seconds": max(60, min(7200, int(payload.get("auto_tune_cooldown_seconds") or (existing or {}).get("auto_tune_cooldown_seconds") or 900))),
             "auto_tune_min_bitrate": max(300, min(20000, int(payload.get("auto_tune_min_bitrate") or (existing or {}).get("auto_tune_min_bitrate") or 800))),
-            "auto_tune_max_bitrate": max(800, min(30000, int(payload.get("auto_tune_max_bitrate") or (existing or {}).get("auto_tune_max_bitrate") or 6000))),
+            "auto_tune_max_bitrate": max(800, min(40000, int(payload.get("auto_tune_max_bitrate") or (existing or {}).get("auto_tune_max_bitrate") or 40000))),
         },
     )
     client = youtube_client_for_id(profile_id)

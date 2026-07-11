@@ -731,6 +731,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
             }), encoding="utf-8")
             status = MagicMock(side_effect=[
                 {"ok": True, "stream": {"running": True}, "stream_config": stream_config},
+                {"ok": True, "stream": {"running": True}, "stream_config": stream_config},
                 {"ok": True, "stream_config": {**stream_config, "video_bitrate": 4800}},
             ])
             with patch.object(app, "YOUTUBE_AUTOTUNE_STATE_FILE", state_file), patch.object(
@@ -749,11 +750,15 @@ class YouTubeAPIClientTests(unittest.TestCase):
                 app, "request_node_json", status
             ), patch.object(app, "youtube_client_for_id", return_value=client), patch.object(
                 app, "post_node_json", return_value={"ok": True, "message": "stream restarted"}
-            ), patch.object(app.time, "time", return_value=10_000):
-                result = app.youtube_autotune_tick()
+            ):
+                with patch.object(app.time, "time", return_value=10_000):
+                    first = app.youtube_autotune_tick()
+                with patch.object(app.time, "time", return_value=10_400):
+                    result = app.youtube_autotune_tick()
 
             saved = json.loads(state_file.read_text(encoding="utf-8"))
 
+        self.assertEqual(first["adjusted"], 0)
         self.assertEqual(result["adjusted"], 1)
         event = saved["history"][0]
         self.assertEqual(event["outcome"], "adjusted")
@@ -798,15 +803,21 @@ class YouTubeAPIClientTests(unittest.TestCase):
         client.local_status.return_value = {"authorized": True}
         client.stream_health.side_effect = [
             starvation_health(4500, 3600),
+            starvation_health(4500, 3600),
             starvation_health(3600, 2880),
+            starvation_health(3600, 2880),
+            starvation_health(2880, 2304),
             starvation_health(2880, 2304),
             starvation_health(2500, 2000),
         ]
         statuses = MagicMock(side_effect=[
             {"ok": True, "stream": {"running": True}, "stream_config": stream_config(4500)},
+            {"ok": True, "stream": {"running": True}, "stream_config": stream_config(4500)},
             {"ok": True, "stream_config": stream_config(3600)},
             {"ok": True, "stream": {"running": True}, "stream_config": stream_config(3600)},
+            {"ok": True, "stream": {"running": True}, "stream_config": stream_config(3600)},
             {"ok": True, "stream_config": stream_config(2880)},
+            {"ok": True, "stream": {"running": True}, "stream_config": stream_config(2880)},
             {"ok": True, "stream": {"running": True}, "stream_config": stream_config(2880)},
             {"ok": True, "stream_config": stream_config(2500)},
             {"ok": True, "stream": {"running": True}, "stream_config": stream_config(2500)},
@@ -833,7 +844,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
             ), patch.object(app, "youtube_client_for_id", return_value=client), patch.object(
                 app, "post_node_json", post
             ):
-                for timestamp in (10_000, 10_100, 10_200, 10_300):
+                for timestamp in (10_000, 10_100, 10_200, 10_300, 10_400, 10_500, 10_600):
                     with patch.object(app.time, "time", return_value=timestamp):
                         app.youtube_autotune_tick()
             saved = json.loads(state_file.read_text(encoding="utf-8"))
@@ -848,8 +859,8 @@ class YouTubeAPIClientTests(unittest.TestCase):
     def test_autotune_vertical_720p_uses_same_recovery_bitrate_as_landscape(self):
         from stream_control_hub import app
 
-        self.assertEqual(app.youtube_autotune_resolution_bitrate({"resolution": "720x1280", "fps": 30}), 2500)
-        self.assertEqual(app.youtube_autotune_resolution_bitrate({"resolution": "1280x720", "fps": 30}), 2500)
+        self.assertEqual(app.youtube_autotune_resolution_bitrate({"resolution": "720x1280", "fps": 30}), 4000)
+        self.assertEqual(app.youtube_autotune_resolution_bitrate({"resolution": "1280x720", "fps": 30}), 4000)
 
     def test_autotune_uses_agent_runtime_for_starvation_decisions(self):
         from stream_control_hub import app
@@ -929,10 +940,15 @@ class YouTubeAPIClientTests(unittest.TestCase):
             )
             state = {
                 "stream_log_offset": 0,
+                "stream_pid": 123,
                 "stream_config": {"video_bitrate": 2500, "audio_bitrate": 128},
             }
             with patch.object(headless_agent, "DATA_DIR", Path(tmp)), patch.object(
                 headless_agent.os, "cpu_count", return_value=1
+            ), patch.object(
+                headless_agent,
+                "ffmpeg_network_status",
+                return_value={"source": "ffmpeg-socket", "bytes_sent": 1000, "upload_bps": 320_000, "upload_kbps": 2560.0},
             ):
                 runtime = headless_agent.ffmpeg_runtime_status(
                     state,

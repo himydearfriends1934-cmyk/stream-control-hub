@@ -26,6 +26,7 @@ from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
 
 from .youtube_api import YouTubeAPIClient, YouTubeAPIError
+from .stream_tuning import initial_stream_recommendation, parse_fraction, source_copy_compatible
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +62,7 @@ TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_AGENT_TRUSTED_REMOTE_WRITES", "")
 TAILSCALE_PAIRING_ENABLED = os.environ.get("STREAM_AGENT_TAILSCALE_PAIRING", "1").strip().lower() in {"1", "true", "yes"}
 TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 FFMPEG_BIN = os.environ.get("STREAM_AGENT_FFMPEG_BIN", "ffmpeg")
+FFPROBE_BIN = os.environ.get("STREAM_AGENT_FFPROBE_BIN", "ffprobe")
 AGENT_SOURCE_REPO = os.environ.get(
     "STREAM_AGENT_SOURCE_REPO",
     "https://github.com/himydearfriends1934-cmyk/stream-control-hub.git",
@@ -95,6 +97,9 @@ STREAM_START_VERIFY_INTERVAL_SECONDS = max(
     0.1,
     float(os.environ.get("STREAM_AGENT_START_VERIFY_INTERVAL_SECONDS", "0.5")),
 )
+STREAM_PROGRESS_STALL_SECONDS = max(10, int(os.environ.get("STREAM_AGENT_PROGRESS_STALL_SECONDS", "20")))
+STREAM_PROGRESS_GRACE_SECONDS = max(5, int(os.environ.get("STREAM_AGENT_PROGRESS_GRACE_SECONDS", "15")))
+STREAM_EGRESS_CAPACITY_KBPS = max(0, int(os.environ.get("STREAM_AGENT_EGRESS_CAPACITY_KBPS", "0")))
 YOUTUBE_CREDENTIAL_FILE = Path(
     os.environ.get("YOUTUBE_CREDENTIAL_FILE", str(DATA_DIR / "youtube_credentials.json"))
 )
@@ -803,7 +808,8 @@ def ffmpeg_runtime_status(
     net: dict[str, Any],
     system_cpu_percent: float,
 ) -> dict[str, Any]:
-    speed = None
+    progress = read_ffmpeg_progress()
+    speed = progress.get("speed") if progress.get("available") else None
     log_path = DATA_DIR / "ffmpeg.log"
     try:
         size = log_path.stat().st_size
@@ -812,13 +818,17 @@ def ffmpeg_runtime_status(
             handle.seek(max(stream_offset, size - 65536))
             tail = handle.read().decode("utf-8", errors="replace")
         matches = re.findall(r"speed=\s*([0-9]+(?:\.[0-9]+)?)x", tail)
-        if matches:
+        if matches and speed is None:
             speed = float(matches[-1])
     except OSError:
         pass
     cpu_count = os.cpu_count() or 1
     ffmpeg_cpu = round(sum(float(item.get("cpu_percent") or 0) for item in processes), 2)
-    upload_kbps = round(max(0, int(net.get("current_upload_bps") or 0)) * 8 / 1000, 2)
+    pid = int(state.get("stream_pid") or 0)
+    stream_network = ffmpeg_network_status(pid, state) if pid else {
+        "source": "unavailable", "bytes_sent": None, "upload_bps": None, "upload_kbps": None
+    }
+    upload_kbps = stream_network.get("upload_kbps")
     stream_config = state.get("stream_config") or {}
     expected_kbps = max(
         0,
@@ -830,9 +840,11 @@ def ffmpeg_runtime_status(
         "system_cpu_percent": round(float(system_cpu_percent or 0), 2),
         "ffmpeg_cpu_percent": ffmpeg_cpu,
         "ffmpeg_cpu_normalized_percent": round(min(100.0, ffmpeg_cpu / cpu_count), 2),
+        "progress": progress,
+        "network": stream_network,
         "upload_kbps": upload_kbps,
         "expected_upload_kbps": expected_kbps,
-        "upload_ratio": round(upload_kbps / expected_kbps, 3) if expected_kbps and upload_kbps else None,
+        "upload_ratio": round(float(upload_kbps) / expected_kbps, 3) if expected_kbps and upload_kbps is not None else None,
     }
 
 
@@ -1045,8 +1057,180 @@ def resolve_media_path(value: str) -> Path:
     return media_by_name_or_path(value)
 
 
+def probe_media(video_path: Path) -> dict[str, Any]:
+    if not shutil.which(FFPROBE_BIN):
+        raise RuntimeError(f"{FFPROBE_BIN} is not installed")
+    result = subprocess.run(
+        [
+            FFPROBE_BIN,
+            "-v", "error",
+            "-show_streams",
+            "-show_format",
+            "-of", "json",
+            str(video_path),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    if result.returncode != 0:
+        raise ValueError((result.stderr or "ffprobe could not inspect the media").strip())
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except ValueError as exc:
+        raise ValueError("ffprobe returned invalid media metadata") from exc
+    streams = payload.get("streams") or []
+    video = next((item for item in streams if item.get("codec_type") == "video"), None)
+    audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
+    if not video:
+        raise ValueError("media has no video stream")
+    rotation = int(parse_fraction((video.get("tags") or {}).get("rotate"), 0))
+    for side_data in video.get("side_data_list") or []:
+        if side_data.get("rotation") is not None:
+            rotation = int(parse_fraction(side_data.get("rotation"), 0))
+            break
+    width = int(video.get("width") or 0)
+    height = int(video.get("height") or 0)
+    if abs(rotation) % 180 == 90:
+        width, height = height, width
+    metadata = {
+        "width": width,
+        "height": height,
+        "rotation": rotation,
+        "fps": round(parse_fraction(video.get("avg_frame_rate") or video.get("r_frame_rate"), 30.0), 3),
+        "video_codec": str(video.get("codec_name") or ""),
+        "pixel_format": str(video.get("pix_fmt") or ""),
+        "field_order": str(video.get("field_order") or ""),
+        "video_bitrate_kbps": int(parse_fraction(video.get("bit_rate"), 0) / 1000),
+        "has_audio": bool(audio),
+        "audio_codec": str((audio or {}).get("codec_name") or ""),
+        "audio_channels": int(parse_fraction((audio or {}).get("channels"), 0)),
+        "audio_sample_rate": int(parse_fraction((audio or {}).get("sample_rate"), 0)),
+        "duration_seconds": round(parse_fraction((payload.get("format") or {}).get("duration"), 0), 3),
+    }
+    metadata["copy_compatible"] = source_copy_compatible(metadata)
+    return metadata
+
+
+def stream_progress_path() -> Path:
+    return DATA_DIR / "ffmpeg-progress.log"
+
+
+def read_ffmpeg_progress(path: Path | None = None) -> dict[str, Any]:
+    target = path or stream_progress_path()
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+        modified_at = target.stat().st_mtime
+    except OSError:
+        return {"available": False}
+    current: dict[str, str] = {}
+    latest: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        if "=" not in raw_line:
+            continue
+        key, value = raw_line.split("=", 1)
+        current[key.strip()] = value.strip()
+        if key.strip() == "progress":
+            latest = current
+            current = {}
+    if current:
+        latest = current
+    speed_text = str(latest.get("speed") or "").rstrip("x")
+    try:
+        speed = float(speed_text)
+    except ValueError:
+        speed = None
+    return {
+        "available": bool(latest),
+        "frame": int(latest.get("frame") or 0),
+        "out_time_us": int(latest.get("out_time_us") or latest.get("out_time_ms") or 0),
+        "speed": speed,
+        "progress": str(latest.get("progress") or ""),
+        "updated_at": modified_at,
+    }
+
+
+def _socket_rate_kbps(value: str, unit: str) -> float:
+    multipliers = {"bps": 0.001, "kbps": 1.0, "mbps": 1000.0, "gbps": 1_000_000.0}
+    return float(value) * multipliers.get(unit.lower(), 0.0)
+
+
+def ffmpeg_socket_stats(pid: int) -> dict[str, Any]:
+    if pid <= 0 or not shutil.which("ss"):
+        return {"bytes_sent": None, "delivery_rate_kbps": None}
+    try:
+        result = subprocess.run(["ss", "-tinpH"], text=True, capture_output=True, timeout=5)
+    except Exception:
+        return {"bytes_sent": None, "delivery_rate_kbps": None}
+    if result.returncode != 0:
+        return {"bytes_sent": None, "delivery_rate_kbps": None}
+    blocks: list[str] = []
+    current = ""
+    for line in result.stdout.splitlines():
+        if line and not line[0].isspace():
+            if current:
+                blocks.append(current)
+            current = line
+        else:
+            current += " " + line.strip()
+    if current:
+        blocks.append(current)
+    total = 0
+    matched = False
+    delivery_rates: list[float] = []
+    for block in blocks:
+        if not re.search(rf"pid={pid}(?:,|\))", block):
+            continue
+        matched = True
+        values = [int(value) for value in re.findall(r"bytes_(?:sent|acked):(\d+)", block)]
+        if values:
+            total += max(values)
+        delivery_rates.extend(
+            _socket_rate_kbps(value, unit)
+            for value, unit in re.findall(r"delivery_rate\s+([0-9]+(?:\.[0-9]+)?)([KMG]?bps)", block, re.IGNORECASE)
+        )
+    return {
+        "bytes_sent": total if matched else None,
+        "delivery_rate_kbps": max(delivery_rates) if delivery_rates else None,
+    }
+
+
+def ffmpeg_network_status(pid: int, state: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+    current_time = time.time() if now is None else now
+    socket_stats = ffmpeg_socket_stats(pid)
+    sent_bytes = socket_stats.get("bytes_sent")
+    delivery_rate_kbps = socket_stats.get("delivery_rate_kbps")
+    previous = state.get("last_stream_net_sample") or {}
+    rate_bps: int | None = None
+    if sent_bytes is not None and int(previous.get("pid") or 0) == pid:
+        elapsed = current_time - float(previous.get("at") or current_time)
+        delta = sent_bytes - int(previous.get("bytes_sent") or sent_bytes)
+        if elapsed > 0 and delta >= 0:
+            rate_bps = int(delta / elapsed)
+    if sent_bytes is not None:
+        state["last_stream_net_sample"] = {
+            "pid": pid,
+            "at": current_time,
+            "bytes_sent": sent_bytes,
+        }
+    upload_kbps = round(rate_bps * 8 / 1000, 2) if rate_bps is not None else None
+    if delivery_rate_kbps and delivery_rate_kbps > 0:
+        samples = [float(value) for value in state.get("stream_egress_samples_kbps") or [] if float(value) > 0]
+        samples = (samples + [float(delivery_rate_kbps)])[-20:]
+        state["stream_egress_samples_kbps"] = samples
+        sorted_samples = sorted(samples)
+        state["stream_egress_capacity_kbps"] = int(sorted_samples[len(sorted_samples) // 2])
+    return {
+        "source": "ffmpeg-socket" if sent_bytes is not None else "unavailable",
+        "bytes_sent": sent_bytes,
+        "upload_bps": rate_bps,
+        "upload_kbps": upload_kbps,
+        "delivery_rate_kbps": round(float(delivery_rate_kbps), 2) if delivery_rate_kbps is not None else None,
+    }
+
+
 def stream_output_url(payload: dict[str, Any]) -> str:
-    stream_url = str(payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2").strip().rstrip("/")
+    stream_url = str(payload.get("stream_url") or "rtmps://a.rtmp.youtube.com/live2").strip().rstrip("/")
     stream_key = str(payload.get("stream_key") or "").strip()
     output_mode = str(payload.get("stream_output_mode") or "direct").strip().lower()
     if output_mode == "local_relay":
@@ -1065,6 +1249,9 @@ def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -
     if not shutil.which(FFMPEG_BIN):
         raise RuntimeError(f"{FFMPEG_BIN} is not installed")
     if bool(payload.get("copy_mode")):
+        source = probe_media(video_path)
+        if not source_copy_compatible(source):
+            raise ValueError("copy mode requires H.264 video with RTMP-compatible AAC/MP3 audio and a supported pixel format")
         return [
             FFMPEG_BIN,
             "-hide_banner",
@@ -1077,17 +1264,32 @@ def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -
             str(video_path),
             "-c",
             "copy",
+            "-progress",
+            str(stream_progress_path()),
+            "-stats_period",
+            "1",
             "-f",
             "flv",
             output_url,
         ]
     fps = max(15, min(60, int(payload.get("fps") or 30)))
     keyframe_seconds = max(1, min(4, int(payload.get("keyframe_seconds") or 2)))
-    video_bitrate = max(800, min(20000, int(payload.get("video_bitrate") or 4500)))
-    audio_bitrate = max(64, min(320, int(payload.get("audio_bitrate") or 192)))
-    resolution = str(payload.get("resolution") or "1280x720").strip() or "1280x720"
+    video_bitrate = max(800, min(40000, int(payload.get("video_bitrate") or 4000)))
+    audio_bitrate = max(64, min(384, int(payload.get("audio_bitrate") or 128)))
+    resolution = str(payload.get("resolution") or "1280x720").strip().lower() or "1280x720"
+    match = re.fullmatch(r"(\d{2,4})x(\d{2,4})", resolution)
+    if not match:
+        raise ValueError("resolution must use WIDTHxHEIGHT")
+    width, height = (int(value) for value in match.groups())
+    if width < 240 or height < 240 or width > 7680 or height > 7680:
+        raise ValueError("resolution is outside the supported 240-7680 pixel range")
+    width -= width % 2
+    height -= height % 2
+    resolution = f"{width}x{height}"
     preset = str(payload.get("preset") or "veryfast").strip() or "veryfast"
-    return [
+    source = probe_media(video_path)
+    has_audio = bool(source.get("has_audio"))
+    command = [
         FFMPEG_BIN,
         "-hide_banner",
         "-loglevel",
@@ -1097,11 +1299,19 @@ def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -
         "-1",
         "-i",
         str(video_path),
+    ]
+    if not has_audio:
+        command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"])
+    command.extend([
+        "-map", "0:v:0",
+        "-map", "0:a:0?" if has_audio else "1:a:0",
         "-c:v",
         "libx264",
         "-preset",
         preset,
         "-b:v",
+        f"{video_bitrate}k",
+        "-minrate",
         f"{video_bitrate}k",
         "-maxrate",
         f"{video_bitrate}k",
@@ -1109,10 +1319,18 @@ def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -
         f"{video_bitrate * 2}k",
         "-pix_fmt",
         "yuv420p",
+        "-profile:v",
+        "high",
+        "-bf",
+        "2",
+        "-refs",
+        "1",
+        "-x264-params",
+        "nal-hrd=cbr:force-cfr=1",
         "-r",
         str(fps),
-        "-s",
-        resolution,
+        "-vf",
+        f"scale={resolution.replace('x', ':')}:force_original_aspect_ratio=decrease,pad={resolution.replace('x', ':')}:(ow-iw)/2:(oh-ih)/2,setsar=1",
         "-g",
         str(fps * keyframe_seconds),
         "-c:a",
@@ -1121,10 +1339,15 @@ def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -
         f"{audio_bitrate}k",
         "-ar",
         "44100",
+        "-progress",
+        str(stream_progress_path()),
+        "-stats_period",
+        "1",
         "-f",
         "flv",
         output_url,
-    ]
+    ])
+    return command
 
 
 def redact_stream_log_line(line: str) -> str:
@@ -1159,6 +1382,9 @@ def launch_stream_process(
 
     log_path = DATA_DIR / "ffmpeg.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path = stream_progress_path()
+    progress_path.write_text("", encoding="utf-8")
+    progress_path.chmod(0o600)
     log_file = log_path.open("ab")
     log_offset = log_file.tell()
     log_path.chmod(0o600)
@@ -1218,11 +1444,13 @@ def launch_stream_process(
     state["stream_log_offset"] = log_offset
     state["stream_started_at_epoch"] = now
     state["stream_config"] = {
-        key: value for key, value in payload.items() if key != "stream_key" and not key.startswith("_")
+        key: value
+        for key, value in payload.items()
+        if key not in {"stream_key", "youtube_ingestion_url"} and not key.startswith("_")
     }
     state["stream_config"]["video_path"] = str(video_path)
     state["stream_config"]["stream_url"] = str(
-        payload.get("stream_url") or "rtmp://a.rtmp.youtube.com/live2"
+        payload.get("stream_url") or "rtmps://a.rtmp.youtube.com/live2"
     ).strip().rstrip("/")
     state["auto_restart"] = auto_restart
     state["last_started_at"] = auto_restart["last_started_at"]
@@ -1246,6 +1474,25 @@ def verify_stream_started(pid: int, log_path: Path) -> dict[str, Any]:
     return {"ok": True}
 
 
+def verify_launched_stream(result: dict[str, Any]) -> dict[str, Any]:
+    verification = verify_stream_started(int(result["pid"]), Path(str(result["log_path"])))
+    if verification.get("ok"):
+        return verification
+    stop_process(int(result["pid"]))
+    message = str(verification.get("message") or "ffmpeg exited immediately")
+    raise RuntimeError(message)
+
+
+def stream_progress_stalled(state: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+    current_time = time.time() if now is None else now
+    started_at = float(state.get("stream_started_at_epoch") or current_time)
+    progress = read_ffmpeg_progress()
+    updated_at = float(progress.get("updated_at") or started_at)
+    age = max(0.0, current_time - updated_at)
+    stalled = current_time - started_at >= STREAM_PROGRESS_GRACE_SECONDS and age >= STREAM_PROGRESS_STALL_SECONDS
+    return {**progress, "age_seconds": round(age, 2), "stalled": stalled}
+
+
 def stream_watchdog_tick() -> dict[str, Any]:
     if not STREAM_AUTO_RESTART_ENABLED:
         return {"ok": True, "skipped": True, "reason": "disabled"}
@@ -1258,17 +1505,38 @@ def stream_watchdog_tick() -> dict[str, Any]:
         pid = int(state.get("stream_pid") or 0)
         auto_restart = dict(state.get("auto_restart") or {})
         if stream_process_owned(pid):
-            started_at = float(state.get("stream_started_at_epoch") or now)
-            if now - started_at >= STREAM_RESTART_STABLE_SECONDS and int(auto_restart.get("consecutive_failures") or 0):
+            progress = stream_progress_stalled(state, now=now)
+            if progress.get("stalled"):
+                stop_result = stop_process(pid)
+                if not stop_result.get("ok"):
+                    auto_restart.update({
+                        "status": "blocked",
+                        "last_error": "FFmpeg progress stalled but the owned process could not be stopped",
+                    })
+                    state["auto_restart"] = auto_restart
+                    save_state(state)
+                    return {"ok": False, "message": auto_restart["last_error"], "stop": stop_result}
                 auto_restart.update({
-                    "status": "running",
-                    "consecutive_failures": 0,
-                    "next_retry_at": 0,
-                    "last_error": "",
+                    "status": "waiting",
+                    "next_retry_at": now,
+                    "last_error": f"FFmpeg progress stalled for {progress.get('age_seconds')} seconds",
+                    "last_failure_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
                 })
+                state["stream_pid"] = 0
                 state["auto_restart"] = auto_restart
                 save_state(state)
-            return {"ok": True, "running": True, "pid": pid}
+            else:
+                started_at = float(state.get("stream_started_at_epoch") or now)
+                if now - started_at >= STREAM_RESTART_STABLE_SECONDS and int(auto_restart.get("consecutive_failures") or 0):
+                    auto_restart.update({
+                        "status": "running",
+                        "consecutive_failures": 0,
+                        "next_retry_at": 0,
+                        "last_error": "",
+                    })
+                    state["auto_restart"] = auto_restart
+                    save_state(state)
+                return {"ok": True, "running": True, "pid": pid, "progress": progress}
 
         next_retry_at = float(auto_restart.get("next_retry_at") or 0)
         if now < next_retry_at:
@@ -1288,6 +1556,7 @@ def stream_watchdog_tick() -> dict[str, Any]:
 
         try:
             result = launch_stream_process(payload, reason="auto-recovery", persist_recovery=False)
+            verify_launched_stream(result)
             return {"ok": True, "restarted": True, **result}
         except Exception as exc:
             consecutive_failures = int(auto_restart.get("consecutive_failures") or 0) + 1
@@ -1375,7 +1644,6 @@ def api_status():
         auto_restart.setdefault("restart_count", 0)
         auto_restart.setdefault("consecutive_failures", 0)
         auto_restart.setdefault("last_error", "")
-        save_state(state)
     load_avg = list(os.getloadavg()) if hasattr(os, "getloadavg") else []
     memory = memory_status()
     boot_time = 0.0
@@ -1391,6 +1659,13 @@ def api_status():
     public_origin = discover_public_origin()
     cpu_percent = cpu_percent_sample()
     runtime = ffmpeg_runtime_status(state, processes, net, cpu_percent)
+    with STREAM_LIFECYCLE_LOCK:
+        latest_state = load_state()
+        for key in ("last_net_sample", "last_stream_net_sample", "stream_egress_samples_kbps", "stream_egress_capacity_kbps"):
+            if key in state:
+                latest_state[key] = state[key]
+        save_state(latest_state)
+        state = latest_state
     version_status = agent_version_status()
     role_host = platform.node() or "127.0.0.1"
     return jsonify({
@@ -1452,7 +1727,10 @@ def api_status():
         "stream_config": {
             "has_stream_key": bool(state.get("has_stream_key")) and STREAM_RESTART_FILE.exists(),
             "restart_ready": STREAM_RESTART_FILE.exists(),
-            **(state.get("stream_config") or {}),
+            **{
+                key: value for key, value in (state.get("stream_config") or {}).items()
+                if key not in {"stream_key", "youtube_ingestion_url"}
+            },
         },
         "youtube": YOUTUBE_CLIENT.local_status(),
         "transfer": upload_transfer_status(state),
@@ -1969,19 +2247,27 @@ def api_share_media():
 
 @APP.post("/api/stream/recommend")
 def api_stream_recommend():
-    return jsonify({
-        "ok": True,
-        "recommendation": {
-            "copy_mode": False,
-            "preset": "veryfast",
-            "video_bitrate": 4500,
-            "audio_bitrate": 192,
-            "fps": 30,
-            "resolution": "1280x720",
-            "keyframe_seconds": 2,
-        },
-        "analysis": {"score": 75, "warnings": ["basic headless recommendation"]},
+    payload = request.get_json(silent=True) or {}
+    try:
+        video_path = resolve_media_path(str(payload.get("video_path") or ""))
+        source = probe_media(video_path)
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    memory = memory_status()
+    state = load_state()
+    egress_capacity_kbps = STREAM_EGRESS_CAPACITY_KBPS or int(state.get("stream_egress_capacity_kbps") or 0)
+    result = initial_stream_recommendation(
+        source,
+        cpu_count=os.cpu_count() or 1,
+        memory_available_mb=int(memory.get("available") or 0) // (1024 * 1024),
+        egress_capacity_kbps=egress_capacity_kbps,
+    )
+    result["analysis"].update({
+        "cpu_percent": cpu_percent_sample(),
+        "ffmpeg_speed": read_ffmpeg_progress().get("speed"),
+        "current_stream_bitrate_kbps": int((state.get("stream_config") or {}).get("video_bitrate") or 0),
     })
+    return jsonify({"ok": True, **result})
 
 
 def youtube_error_response(exc: Exception):
@@ -2205,6 +2491,14 @@ def api_restart_stream():
             return jsonify({"ok": False, "message": "failed to stop current stream", "stop": stop_result}), 500
         try:
             result = launch_stream_process(payload, reason="manual-restart", persist_recovery=False)
+            verification = verify_stream_started(result["pid"], Path(result["log_path"]))
+            if not verification.get("ok"):
+                stop_process(result["pid"])
+                return jsonify({
+                    "ok": False,
+                    "message": verification.get("message") or "ffmpeg exited immediately",
+                    "log_tail": verification.get("log_tail") or [],
+                }), 502
         except Exception as exc:
             return jsonify({"ok": False, "message": str(exc)}), 500
     return jsonify({
