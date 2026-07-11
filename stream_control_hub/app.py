@@ -618,7 +618,6 @@ HTML = r"""
     .grid { display: grid; grid-template-columns: minmax(520px, 0.92fr) minmax(600px, 1.08fr); gap: 12px; margin-top: 10px; align-items: start; }
     .left-stack, .side-stack { display: grid; gap: 10px; align-content: start; min-width: 0; }
     .grid > .side-stack { align-self: start; grid-template-rows: auto; }
-    .media-workspace { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(520px, 0.92fr) minmax(600px, 1.08fr); gap: 12px; align-items: start; }
     .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 1.15fr 1.35fr; gap: 10px; }
     .card {
       border: 1px solid var(--line);
@@ -1454,11 +1453,10 @@ HTML = r"""
     .autotune-history-line strong { color: #d6fff0; }
     .autotune-history-line.error { color: #ff9eab; }
     .node-table-card { min-height: 0; overflow: hidden; }
-    .node-role-split { display: flex; flex-direction: column; height: var(--node-role-split-height, auto); min-height: 330px; font-size: 14px; overflow-y: auto; overflow-x: hidden; padding-right: 3px; }
+    .node-role-split { display: block; height: auto; min-height: 0; font-size: 14px; overflow: visible; }
     .node-role-pane { min-height: 0; display: block; }
     .node-role-pane .node-table { max-height: none; min-height: 0; overflow: visible; padding-right: 0; }
-    .agent-role-pane { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 240px; }
-    .agent-role-pane .node-table { flex: 1 1 auto; overflow-y: auto; }
+    .agent-role-pane { min-height: 0; }
     .hub-role-pane { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
     .hub-role-pane > summary { list-style: none; cursor: pointer; user-select: none; min-height: 38px; padding: 7px 9px; margin: 0; border: 1px solid rgba(49, 89, 76, .78); border-radius: 6px; background: rgba(7, 18, 14, .58); }
     .hub-role-pane > summary::-webkit-details-marker { display: none; }
@@ -1837,7 +1835,7 @@ HTML = r"""
       .media-window-head, .media-file-row { min-width: 520px; }
     }
     @media (max-width: 1080px) {
-      .grid, .split, .hero, .task-flow, .node-detail, .bottom-section, .media-workspace, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
+      .grid, .split, .hero, .task-flow, .node-detail, .bottom-section, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .bottom-section { grid-column: auto; }
       .monitor-card, .node-table-card { min-height: auto; }
       .node-monitor { min-height: 420px; }
@@ -2005,6 +2003,7 @@ HTML = r"""
     </section>
 
     <section class="grid">
+      <div class="left-stack">
       <div class="card monitor-card">
         <div class="monitor-heading">
           <div>
@@ -2017,31 +2016,6 @@ HTML = r"""
           <div class="empty-state">正在读取节点状态...</div>
         </div>
       </div>
-
-      <div class="side-stack">
-        <div class="card node-table-card">
-          <div class="node-table-toolbar">
-            <div>
-              <h2>VPS 节点表</h2>
-              <p>一屏预留约 10 台：在线、推流、重启推流、重启 VPS。</p>
-            </div>
-            <span class="pill warn">protected</span>
-          </div>
-          <div class="node-role-split" id="nodeRoleSplit">
-          <div class="role-group node-role-pane agent-role-pane">
-            <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
-            <div class="node-table" id="nodeList">加载中...</div>
-          </div>
-          <details class="role-group node-role-pane hub-role-pane" id="hubNodePane">
-            <summary class="role-group-title"><span>Hub 节点 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></summary>
-            <div class="node-table" id="hubNodeList">加载中...</div>
-          </details>
-          </div>
-        </div>
-
-      </div>
-
-      <div class="media-workspace">
         <div class="card resource-card">
           <div class="resource-header">
             <div>
@@ -2070,13 +2044,34 @@ HTML = r"""
             <div class="media-context-targets" id="mediaMoveTargets"></div>
           </div>
         </div>
+      </div>
 
-        <div class="upload-stack">
-          <div class="card node-space-card">
-            <h2>节点空间</h2>
-            <p>各 Agent 媒体磁盘的已用比例与剩余容量；双击节点可在左侧筛出它的视频。</p>
-            <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
+      <div class="side-stack">
+        <div class="card node-table-card">
+          <div class="node-table-toolbar">
+            <div>
+              <h2>VPS 节点表</h2>
+              <p>一屏预留约 10 台：在线、推流、重启推流、重启 VPS。</p>
+            </div>
+            <span class="pill warn">protected</span>
           </div>
+          <div class="node-role-split" id="nodeRoleSplit">
+          <div class="role-group node-role-pane agent-role-pane">
+            <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
+            <div class="node-table" id="nodeList">加载中...</div>
+          </div>
+          <details class="role-group node-role-pane hub-role-pane" id="hubNodePane">
+            <summary class="role-group-title"><span>Hub 节点 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></summary>
+            <div class="node-table" id="hubNodeList">加载中...</div>
+          </details>
+          </div>
+        </div>
+        <div class="card node-space-card">
+          <h2>节点空间</h2>
+          <p>各 Agent 媒体磁盘的已用比例与剩余容量；双击节点可在左侧筛出它的视频。</p>
+          <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
+        </div>
+        <div class="upload-stack">
           <div class="card upload-card">
             <h2>上传模块</h2>
             <p>上传保持在右侧：先选择目标 Agent，再把视频直传到该节点；资源归属由目标 Agent 的 Profile 决定。</p>
@@ -2507,8 +2502,6 @@ HTML = r"""
     let editingYouTubeProfileId = "";
     let youtubeProfileClickTimer = null;
 
-    const NODE_SPLIT_MIN_HEIGHT = 330;
-
     function uiMessage(message) {
       if (refs.flowStatus) refs.flowStatus.textContent = message;
     }
@@ -2590,42 +2583,6 @@ HTML = r"""
     function showDiagnostics(message, { scroll = true } = {}) {
       refs.updateBox.textContent = message;
       if (scroll) scrollToSelector(".log-card");
-    }
-
-    function naturalRolePaneHeight(pane) {
-      if (!pane) return 0;
-      const title = pane.querySelector(".role-group-title");
-      const table = pane.querySelector(".node-table");
-      const styles = getComputedStyle(pane);
-      const padding = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
-      const titleStyles = title ? getComputedStyle(title) : null;
-      const titleMargins = titleStyles ? parseFloat(titleStyles.marginTop) + parseFloat(titleStyles.marginBottom) : 0;
-      const tableHeight = pane instanceof HTMLDetailsElement && !pane.open ? 0 : (table?.scrollHeight || 0);
-      return Math.ceil((title?.offsetHeight || 0) + titleMargins + tableHeight + padding + 8);
-    }
-
-    function syncNodeRoleSplitHeight() {
-      const split = refs.nodeRoleSplit;
-      if (!split) return;
-      if (window.matchMedia("(max-width: 1080px)").matches) {
-        split.style.removeProperty("--node-role-split-height");
-        return;
-      }
-      const panes = split.querySelectorAll(".node-role-pane");
-      const naturalHeight = naturalRolePaneHeight(panes[0]) + naturalRolePaneHeight(panes[1]) + 10;
-      const splitTop = split.getBoundingClientRect().top;
-      const monitorBottom = document.querySelector(".monitor-card")?.getBoundingClientRect().bottom || 0;
-      const viewportBottom = window.innerHeight - 14;
-      const rowBottom = monitorBottom > splitTop ? monitorBottom : viewportBottom;
-      const availableHeight = Math.max(NODE_SPLIT_MIN_HEIGHT, Math.floor(rowBottom - splitTop));
-      const targetHeight = Math.max(NODE_SPLIT_MIN_HEIGHT, Math.min(naturalHeight, availableHeight));
-      split.style.setProperty("--node-role-split-height", `${targetHeight}px`);
-    }
-
-    function initHubNodeDisclosure() {
-      if (!refs.hubNodePane || !refs.nodeRoleSplit) return;
-      refs.hubNodePane.addEventListener("toggle", () => window.requestAnimationFrame(syncNodeRoleSplitHeight));
-      window.addEventListener("resize", syncNodeRoleSplitHeight);
     }
 
     renderTransfer({
@@ -3457,7 +3414,6 @@ HTML = r"""
         <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
         ${activeHubs.map((node) => renderHubRow(node)).join("")}
       ` : `<div class="empty-state">还没有已激活的 Hub。</div>`;
-      window.requestAnimationFrame(syncNodeRoleSplitHeight);
       updatePrimaryActionStates();
     }
 
@@ -6701,7 +6657,6 @@ HTML = r"""
     [refs.presetInput, refs.videoBitrateInput, refs.audioBitrateInput, refs.fpsInput, refs.resolutionInput, refs.keyframeInput].forEach((el) => {
       el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
     });
-    initHubNodeDisclosure();
     loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
     checkDailyGithubUpdates();
     window.setInterval(refreshRunningAgentParameters, AGENT_STREAM_REFRESH_MS);
