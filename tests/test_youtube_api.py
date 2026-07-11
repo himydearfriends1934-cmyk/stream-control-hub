@@ -4,7 +4,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from stream_control_hub.youtube_api import YouTubeAPIClient, youtube_health_recommendation
 
@@ -548,6 +548,74 @@ class YouTubeAPIClientTests(unittest.TestCase):
 
         self.assertEqual(result["severity"], "warning")
         self.assertLess(result["recommendation"]["video_bitrate"], 6000)
+
+    def test_autotune_history_records_api_problem_before_change_and_verified_after(self):
+        from stream_control_hub import app
+
+        stream_config = {
+            "stream_output_mode": "youtube_api",
+            "youtube_stream_id": "stream-a",
+            "youtube_profile_id": "account-a",
+            "youtube_ingestion_url": "rtmp://example.invalid/live",
+            "resolution": "1920x1080",
+            "fps": 30,
+            "video_bitrate": 6000,
+            "audio_bitrate": 192,
+            "preset": "veryfast",
+            "keyframe_seconds": 2,
+        }
+        health = {
+            "ok": True,
+            "severity": "warning",
+            "health": {"configuration_issues": [{"type": "videoBitrateIsHigh", "description": "bitrate is high"}]},
+            "analysis": {"reasons": ["Reduce bitrate"], "warnings": []},
+            "recommendation": {**stream_config, "video_bitrate": 4800},
+        }
+        client = MagicMock()
+        client.local_status.return_value = {"authorized": True}
+        client.stream_health.return_value = health
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "youtube_autotune_state.json"
+            state_file.write_text(json.dumps({
+                "entries": {
+                    "node-a:account-a:stream-a": {"consecutive_issues": 1, "last_check": 0, "last_adjusted": 0}
+                }
+            }), encoding="utf-8")
+            status = MagicMock(side_effect=[
+                {"ok": True, "stream": {"running": True}, "stream_config": stream_config},
+                {"ok": True, "stream_config": {**stream_config, "video_bitrate": 4800}},
+            ])
+            with patch.object(app, "YOUTUBE_AUTOTUNE_STATE_FILE", state_file), patch.object(
+                app, "load_youtube_profiles_config", return_value={
+                    "active_profile_id": "account-a",
+                    "profiles": [{
+                        "id": "account-a",
+                        "auto_tune_enabled": True,
+                        "auto_tune_interval_seconds": 300,
+                        "auto_tune_cooldown_seconds": 900,
+                        "auto_tune_min_bitrate": 800,
+                        "auto_tune_max_bitrate": 6000,
+                    }],
+                }
+            ), patch.object(app, "load_nodes", return_value=[{"id": "node-a", "name": "Node A", "enabled": True}]), patch.object(
+                app, "request_node_json", status
+            ), patch.object(app, "youtube_client_for_id", return_value=client), patch.object(
+                app, "post_node_json", return_value={"ok": True, "message": "stream restarted"}
+            ), patch.object(app.time, "time", return_value=10_000):
+                result = app.youtube_autotune_tick()
+
+            saved = json.loads(state_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["adjusted"], 1)
+        event = saved["history"][0]
+        self.assertEqual(event["outcome"], "adjusted")
+        self.assertEqual(event["before"]["video_bitrate"], 6000)
+        self.assertEqual(event["changes"]["video_bitrate"], 4800)
+        self.assertEqual(event["after"]["video_bitrate"], 4800)
+        self.assertTrue(any("videoBitrateIsHigh" in item for item in event["api_problems"]))
+        self.assertIn("Reduce bitrate", event["recommendation_reasons"])
+        self.assertNotIn("youtube_ingestion_url", json.dumps(event))
 
 
 if __name__ == "__main__":

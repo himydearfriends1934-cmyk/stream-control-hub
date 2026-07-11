@@ -84,6 +84,8 @@ YOUTUBE_CREDENTIAL_FILE = Path(
 YOUTUBE_PROFILES_FILE = DATA_DIR / "youtube_profiles.json"
 YOUTUBE_USAGE_FILE = DATA_DIR / "youtube_api_usage.json"
 YOUTUBE_AUTOTUNE_STATE_FILE = DATA_DIR / "youtube_autotune_state.json"
+YOUTUBE_AUTOTUNE_HISTORY_LIMIT = 50
+YOUTUBE_AUTOTUNE_HISTORY_TOTAL_LIMIT = 500
 YOUTUBE_PROFILE_CREDENTIALS_DIR = DATA_DIR / "youtube_profile_credentials"
 YOUTUBE_DEFAULT_PROFILE_ID = "default"
 YOUTUBE_PROFILE_LOCK = threading.RLock()
@@ -314,6 +316,48 @@ def youtube_autotune_payload_diff(current: dict[str, Any], recommendation: dict[
     return result
 
 
+def youtube_autotune_parameter_snapshot(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = payload or {}
+    keys = ("copy_mode", "adaptive_mode", "preset", "video_bitrate", "audio_bitrate", "fps", "resolution", "keyframe_seconds")
+    return {key: source.get(key) for key in keys if source.get(key) is not None}
+
+
+def youtube_autotune_problems(health: dict[str, Any]) -> list[str]:
+    analysis = health.get("analysis") or {}
+    problems: list[str] = []
+    for value in analysis.get("warnings") or []:
+        text = str(value or "").strip()
+        if text and text not in problems:
+            problems.append(text[:500])
+    configuration_issues = analysis.get("configuration_issues") or (health.get("health") or {}).get("configuration_issues") or []
+    for issue in configuration_issues:
+        if isinstance(issue, dict):
+            text = " / ".join(str(issue.get(key) or "").strip() for key in ("type", "severity", "reason", "description") if issue.get(key))
+        else:
+            text = str(issue or "").strip()
+        if text and text not in problems:
+            problems.append(text[:500])
+    return problems[:12]
+
+
+def append_youtube_autotune_history(state: dict[str, Any], event: dict[str, Any]) -> None:
+    history = state.setdefault("history", [])
+    event = dict(event)
+    event.setdefault("timestamp", time.time())
+    event.setdefault("time", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(event["timestamp"]))))
+    history.insert(0, event)
+    counts: dict[str, int] = {}
+    retained = []
+    for item in history:
+        node_id = str(item.get("node_id") or "")
+        counts[node_id] = counts.get(node_id, 0) + 1
+        if counts[node_id] <= YOUTUBE_AUTOTUNE_HISTORY_LIMIT:
+            retained.append(item)
+        if len(retained) >= YOUTUBE_AUTOTUNE_HISTORY_TOTAL_LIMIT:
+            break
+    state["history"] = retained
+
+
 def youtube_autotune_tick() -> dict[str, Any]:
     with YOUTUBE_AUTOTUNE_LOCK:
         now = time.time()
@@ -347,26 +391,44 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 continue
             entry["last_check"] = now
             checked += 1
+            event = {
+                "node_id": str(node.get("id") or ""),
+                "node_name": str(node.get("name") or node.get("id") or ""),
+                "profile_id": profile_id,
+                "stream_id": str(stream_config.get("youtube_stream_id") or ""),
+                "before": youtube_autotune_parameter_snapshot(stream_config),
+            }
             try:
                 client = youtube_client_for_id(profile_id)
                 if not client.local_status().get("authorized"):
                     entry["last_error"] = "profile is not authorized"
+                    append_youtube_autotune_history(state, {**event, "outcome": "error", "error": entry["last_error"]})
                     continue
                 health = client.stream_health(str(stream_config.get("youtube_stream_id") or ""), stream_config)
                 recommendation = health.get("recommendation") or {}
                 diff = youtube_autotune_payload_diff(stream_config, recommendation, profile)
                 severity = str(health.get("severity") or "").lower()
+                event.update({
+                    "severity": severity or "unknown",
+                    "api_problems": youtube_autotune_problems(health),
+                    "recommendation_reasons": [str(value)[:500] for value in (health.get("analysis") or {}).get("reasons") or []][:12],
+                    "recommended": youtube_autotune_parameter_snapshot(recommendation),
+                    "changes": youtube_autotune_parameter_snapshot(diff),
+                })
                 entry["last_health"] = health.get("health") or {}
                 entry["last_analysis"] = health.get("analysis") or {}
                 if not diff or severity not in {"warning", "critical"}:
                     entry["consecutive_issues"] = 0
                     entry["last_error"] = ""
+                    append_youtube_autotune_history(state, {**event, "outcome": "no_change", "after": event["before"]})
                     continue
                 entry["consecutive_issues"] = int(entry.get("consecutive_issues") or 0) + 1
                 entry["pending_diff"] = diff
                 if entry["consecutive_issues"] < 2:
+                    append_youtube_autotune_history(state, {**event, "outcome": "pending", "after": event["before"]})
                     continue
                 if now - float(entry.get("last_adjusted") or 0) < cooldown:
+                    append_youtube_autotune_history(state, {**event, "outcome": "cooldown", "after": event["before"]})
                     continue
                 payload = dict(stream_config)
                 payload.update(diff)
@@ -381,10 +443,30 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     adjusted += 1
                     entry["consecutive_issues"] = 0
                     entry["last_error"] = ""
+                    verified_status = request_node_json(node, "/api/status", timeout=8)
+                    verified_config = verified_status.get("stream_config") or payload
+                    append_youtube_autotune_history(state, {
+                        **event,
+                        "outcome": "adjusted",
+                        "after": youtube_autotune_parameter_snapshot(verified_config),
+                        "agent_message": str(result.get("message") or "Agent parameters updated")[:500],
+                    })
                 else:
                     entry["last_error"] = result.get("message") or "auto tune restart failed"
+                    append_youtube_autotune_history(state, {
+                        **event,
+                        "outcome": "failed",
+                        "after": event["before"],
+                        "error": str(entry["last_error"])[:500],
+                    })
             except Exception as exc:
                 entry["last_error"] = str(exc)
+                append_youtube_autotune_history(state, {
+                    **event,
+                    "outcome": "error",
+                    "after": event["before"],
+                    "error": str(exc)[:500],
+                })
         save_youtube_autotune_state(state)
         return {"ok": True, "checked": checked, "adjusted": adjusted}
 
@@ -689,7 +771,7 @@ HTML = r"""
     .media-window-head,
     .media-file-row {
       display: grid;
-      grid-template-columns: minmax(78px, .8fr) minmax(45px, .42fr) minmax(58px, .5fr) minmax(96px, .9fr) minmax(137px, 1.35fr) minmax(90px, .9fr);
+      grid-template-columns: minmax(86px, .75fr) minmax(88px, .6fr) minmax(108px, .75fr) minmax(96px, .8fr) minmax(126px, 1fr);
       gap: 4px;
       align-items: center;
     }
@@ -1361,13 +1443,30 @@ HTML = r"""
       background: rgba(9, 17, 14, 0.58);
     }
     .monitor-panel h4 { margin: 0 0 5px; font-size: 13px; color: #d6fff0; }
+    .autotune-history-panel { margin-top: 8px; }
+    .autotune-history { display: grid; max-height: 320px; overflow-y: auto; }
+    .autotune-history-row { display: grid; gap: 5px; padding: 8px 0; border-top: 1px solid rgba(49, 89, 76, .55); }
+    .autotune-history-row:first-child { border-top: 0; padding-top: 2px; }
+    .autotune-history-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .autotune-history-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .autotune-history-head time { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .autotune-history-line { color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+    .autotune-history-line strong { color: #d6fff0; }
+    .autotune-history-line.error { color: #ff9eab; }
     .node-table-card { min-height: 0; overflow: hidden; }
-    .node-role-split { display: block; height: var(--node-role-split-height, auto); min-height: 330px; font-size: 14px; overflow-y: auto; overflow-x: hidden; padding-right: 3px; }
+    .node-role-split { display: flex; flex-direction: column; height: var(--node-role-split-height, auto); min-height: 330px; font-size: 14px; overflow-y: auto; overflow-x: hidden; padding-right: 3px; }
     .node-role-pane { min-height: 0; display: block; }
     .node-role-pane .node-table { max-height: none; min-height: 0; overflow: visible; padding-right: 0; }
-    .node-role-splitter { position: relative; height: 12px; cursor: default; touch-action: none; user-select: none; pointer-events: none; }
-    .node-role-splitter::before { content: ""; position: absolute; left: 0; right: 0; top: 5px; height: 2px; border-radius: 2px; background: var(--line); }
-    .node-role-splitter:hover::before, .node-role-splitter.dragging::before { height: 4px; top: 4px; background: var(--accent); box-shadow: 0 0 8px rgba(54,211,153,.45); }
+    .agent-role-pane { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 240px; }
+    .agent-role-pane .node-table { flex: 1 1 auto; overflow-y: auto; }
+    .hub-role-pane { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+    .hub-role-pane > summary { list-style: none; cursor: pointer; user-select: none; min-height: 38px; padding: 7px 9px; margin: 0; border: 1px solid rgba(49, 89, 76, .78); border-radius: 6px; background: rgba(7, 18, 14, .58); }
+    .hub-role-pane > summary::-webkit-details-marker { display: none; }
+    .hub-role-pane > summary::after { content: ""; width: 7px; height: 7px; flex: 0 0 7px; margin-left: 10px; border-right: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: rotate(45deg); transition: transform .16s ease; }
+    .hub-role-pane:not([open]) > .node-table { display: none; }
+    .hub-role-pane[open] > summary { margin-bottom: 6px; border-color: var(--accent); background: rgba(54, 211, 153, .08); }
+    .hub-role-pane[open] > summary::after { transform: rotate(225deg); }
+    .hub-role-pane > summary small { margin-left: auto; }
     .node-table-toolbar {
       display: flex;
       justify-content: space-between;
@@ -1732,7 +1831,11 @@ HTML = r"""
       color: #c9f7e7;
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    @media (max-width: 760px) { .node-space-rings { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @media (max-width: 760px) {
+      .node-space-rings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .media-window { overflow-x: auto; }
+      .media-window-head, .media-file-row { min-width: 520px; }
+    }
     @media (max-width: 1080px) {
       .grid, .split, .hero, .task-flow, .node-detail, .bottom-section, .media-workspace, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .bottom-section { grid-column: auto; }
@@ -1925,15 +2028,14 @@ HTML = r"""
             <span class="pill warn">protected</span>
           </div>
           <div class="node-role-split" id="nodeRoleSplit">
-          <div class="role-group node-role-pane">
+          <div class="role-group node-role-pane agent-role-pane">
             <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
             <div class="node-table" id="nodeList">加载中...</div>
           </div>
-          <div class="node-role-splitter" id="nodeRoleSplitter" aria-hidden="true"></div>
-          <div class="role-group node-role-pane">
-            <h3 class="role-group-title"><span>Hub 节点 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></h3>
+          <details class="role-group node-role-pane hub-role-pane" id="hubNodePane">
+            <summary class="role-group-title"><span>Hub 节点 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></summary>
             <div class="node-table" id="hubNodeList">加载中...</div>
-          </div>
+          </details>
           </div>
         </div>
 
@@ -2260,7 +2362,7 @@ HTML = r"""
       nodeList: document.getElementById("nodeList"),
       hubNodeList: document.getElementById("hubNodeList"),
       nodeRoleSplit: document.getElementById("nodeRoleSplit"),
-      nodeRoleSplitter: document.getElementById("nodeRoleSplitter"),
+      hubNodePane: document.getElementById("hubNodePane"),
       agentNodeCount: document.getElementById("agentNodeCount"),
       hubNodeCount: document.getElementById("hubNodeCount"),
       roleSettingsModal: document.getElementById("roleSettingsModal"),
@@ -2380,7 +2482,7 @@ HTML = r"""
     let nodes = [];
     let mediaLibrary = { resources: [], nodes: [], duplicate_retention: [] };
     let openResourceNodeId = "";
-    let resourceTableFilters = { name: "", size: "", age: "", profile: "", copyNode: "", ownerNode: "" };
+    let resourceTableFilters = { name: "", size: "", age: "", profile: "", ownerNode: "" };
     let resourceNameFilterTimer = null;
     const PROFILE_FILTER_VISIBLE_SLOTS = 6;
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
@@ -2405,9 +2507,6 @@ HTML = r"""
     let editingYouTubeProfileId = "";
     let youtubeProfileClickTimer = null;
 
-    const HUB_HEIGHT_STORAGE_KEY = "streamHubHubPanelHeight";
-    const HUB_PANEL_MIN_HEIGHT = 96;
-    const AGENT_PANEL_MIN_HEIGHT = 120;
     const NODE_SPLIT_MIN_HEIGHT = 330;
 
     function uiMessage(message) {
@@ -2501,7 +2600,8 @@ HTML = r"""
       const padding = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
       const titleStyles = title ? getComputedStyle(title) : null;
       const titleMargins = titleStyles ? parseFloat(titleStyles.marginTop) + parseFloat(titleStyles.marginBottom) : 0;
-      return Math.ceil((title?.offsetHeight || 0) + titleMargins + (table?.scrollHeight || 0) + padding + 8);
+      const tableHeight = pane instanceof HTMLDetailsElement && !pane.open ? 0 : (table?.scrollHeight || 0);
+      return Math.ceil((title?.offsetHeight || 0) + titleMargins + tableHeight + padding + 8);
     }
 
     function syncNodeRoleSplitHeight() {
@@ -2509,12 +2609,10 @@ HTML = r"""
       if (!split) return;
       if (window.matchMedia("(max-width: 1080px)").matches) {
         split.style.removeProperty("--node-role-split-height");
-        clampHubPanelHeight();
         return;
       }
       const panes = split.querySelectorAll(".node-role-pane");
-      const splitterHeight = refs.nodeRoleSplitter?.offsetHeight || 12;
-      const naturalHeight = naturalRolePaneHeight(panes[0]) + splitterHeight + naturalRolePaneHeight(panes[1]);
+      const naturalHeight = naturalRolePaneHeight(panes[0]) + naturalRolePaneHeight(panes[1]) + 10;
       const splitTop = split.getBoundingClientRect().top;
       const monitorBottom = document.querySelector(".monitor-card")?.getBoundingClientRect().bottom || 0;
       const viewportBottom = window.innerHeight - 14;
@@ -2522,58 +2620,11 @@ HTML = r"""
       const availableHeight = Math.max(NODE_SPLIT_MIN_HEIGHT, Math.floor(rowBottom - splitTop));
       const targetHeight = Math.max(NODE_SPLIT_MIN_HEIGHT, Math.min(naturalHeight, availableHeight));
       split.style.setProperty("--node-role-split-height", `${targetHeight}px`);
-      clampHubPanelHeight();
     }
 
-    function setHubPanelHeight(height) {
-      const split = refs.nodeRoleSplit;
-      if (!split) return;
-      const available = Math.max(HUB_PANEL_MIN_HEIGHT + AGENT_PANEL_MIN_HEIGHT, split.getBoundingClientRect().height - 12);
-      const value = Math.max(HUB_PANEL_MIN_HEIGHT, Math.min(available - AGENT_PANEL_MIN_HEIGHT, Number(height) || 150));
-      split.style.setProperty("--hub-panel-height", `${value}px`);
-      refs.nodeRoleSplitter?.setAttribute("aria-valuenow", String(Math.round(value)));
-      refs.nodeRoleSplitter?.setAttribute("aria-valuemin", String(HUB_PANEL_MIN_HEIGHT));
-      refs.nodeRoleSplitter?.setAttribute("aria-valuemax", String(Math.round(available - AGENT_PANEL_MIN_HEIGHT)));
-      localStorage.setItem(HUB_HEIGHT_STORAGE_KEY, String(Math.round(value)));
-    }
-
-    function clampHubPanelHeight() {
-      const current = parseFloat(getComputedStyle(refs.nodeRoleSplit).getPropertyValue("--hub-panel-height"))
-        || Number(localStorage.getItem(HUB_HEIGHT_STORAGE_KEY))
-        || 150;
-      setHubPanelHeight(current);
-    }
-
-    function initNodeRoleSplitter() {
-      if (!refs.nodeRoleSplitter || !refs.nodeRoleSplit) return;
-      setHubPanelHeight(localStorage.getItem(HUB_HEIGHT_STORAGE_KEY) || 150);
-      let dragging = false;
-      const move = (event) => {
-        if (!dragging) return;
-        const bounds = refs.nodeRoleSplit.getBoundingClientRect();
-        setHubPanelHeight(bounds.bottom - event.clientY);
-      };
-      const stop = () => {
-        dragging = false;
-        refs.nodeRoleSplitter.classList.remove("dragging");
-        document.body.style.cursor = "";
-      };
-      refs.nodeRoleSplitter.addEventListener("pointerdown", (event) => {
-        dragging = true;
-        refs.nodeRoleSplitter.classList.add("dragging");
-        refs.nodeRoleSplitter.setPointerCapture(event.pointerId);
-        document.body.style.cursor = "ns-resize";
-        event.preventDefault();
-      });
-      refs.nodeRoleSplitter.addEventListener("pointermove", move);
-      refs.nodeRoleSplitter.addEventListener("pointerup", stop);
-      refs.nodeRoleSplitter.addEventListener("pointercancel", stop);
-      refs.nodeRoleSplitter.addEventListener("keydown", (event) => {
-        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-        const current = parseFloat(getComputedStyle(refs.nodeRoleSplit).getPropertyValue("--hub-panel-height")) || 150;
-        setHubPanelHeight(current + (event.key === "ArrowUp" ? 20 : -20));
-        event.preventDefault();
-      });
+    function initHubNodeDisclosure() {
+      if (!refs.hubNodePane || !refs.nodeRoleSplit) return;
+      refs.hubNodePane.addEventListener("toggle", () => window.requestAnimationFrame(syncNodeRoleSplitHeight));
       window.addEventListener("resize", syncNodeRoleSplitHeight);
     }
 
@@ -3101,6 +3152,56 @@ HTML = r"""
       return nodes.find((node) => String(node.id) === String(selectedNodeId)) || nodes[0] || null;
     }
 
+    function autotuneParameterText(parameters = {}) {
+      const labels = {
+        copy_mode: "Copy",
+        adaptive_mode: "模式",
+        preset: "编码",
+        video_bitrate: "视频码率",
+        audio_bitrate: "音频码率",
+        fps: "帧率",
+        resolution: "分辨率",
+        keyframe_seconds: "关键帧",
+      };
+      const suffixes = { video_bitrate: "kbps", audio_bitrate: "kbps", fps: "fps", keyframe_seconds: "s" };
+      const parts = Object.entries(labels).flatMap(([key, label]) => (
+        parameters[key] === undefined ? [] : [`${label} ${parameters[key]}${suffixes[key] || ""}`]
+      ));
+      return parts.join(" · ") || "无变化";
+    }
+
+    function renderAutotuneHistory(history = []) {
+      const outcomeLabels = {
+        no_change: "无需修改",
+        pending: "等待复核",
+        cooldown: "冷却等待",
+        adjusted: "已修改 Agent",
+        failed: "Agent 修改失败",
+        error: "检查错误",
+      };
+      if (!history.length) return `<div class="empty-state">暂无智能调参记录。开播并启用 YouTube 智能后，每次 API 检查会记录在这里。</div>`;
+      return `<div class="autotune-history">${history.slice(0, 8).map((event) => {
+        const problems = (event.api_problems || []).join("；") || "API 未报告问题";
+        const reasons = (event.recommendation_reasons || []).join("；") || "维持现有参数";
+        const severity = String(event.severity || "unknown").toLowerCase();
+        const severityClass = severity === "critical" ? "bad" : severity === "warning" ? "warn" : "";
+        return `<div class="autotune-history-row">
+          <div class="autotune-history-head">
+            <span class="pill ${severityClass}">${escapeHtml(severity)}</span>
+            <strong>${escapeHtml(outcomeLabels[event.outcome] || event.outcome || "检查")}</strong>
+            <time>${escapeHtml(shortDateTime(event.time || event.timestamp))}</time>
+          </div>
+          <div class="autotune-history-line"><strong>API 问题：</strong>${escapeHtml(problems)}</div>
+          <div class="autotune-history-line"><strong>调参判断：</strong>${escapeHtml(reasons)}</div>
+          <div class="autotune-history-line"><strong>更改前：</strong>${escapeHtml(autotuneParameterText(event.before))}</div>
+          <div class="autotune-history-line"><strong>更改 Agent：</strong>${escapeHtml(autotuneParameterText(event.changes))}</div>
+          <div class="autotune-history-line"><strong>更改后：</strong>${escapeHtml(autotuneParameterText(event.after))}</div>
+          ${event.error ? `<div class="autotune-history-line error"><strong>错误：</strong>${escapeHtml(event.error)}</div>` : ""}
+          ${event.agent_message ? `<div class="autotune-history-line"><strong>Agent 返回：</strong>${escapeHtml(event.agent_message)}</div>` : ""}
+        </div>`;
+      }).join("")}</div>`;
+    }
+
     function renderMonitor(node) {
       if (!node) {
         return `
@@ -3130,6 +3231,20 @@ HTML = r"""
       const transfer = h.transfer || {};
       const publicUpload = h.public_upload || {};
       const videos = h.videos || [];
+      const profileId = nodeRowProfileId(node);
+      const youtubeProfile = youtubeProfiles.find((item) => String(item.id) === String(profileId)) || {};
+      const youtubeSmartTuneEnabled = Boolean(youtubeProfile.auto_tune_enabled);
+      const parameterStateLabel = stream.running ? "当前" : "最后";
+      const streamVideoParameters = [
+        config.resolution || "--",
+        config.fps ? `${config.fps}fps` : "--fps",
+        config.video_bitrate ? `${config.video_bitrate}kbps` : "--kbps",
+      ].join(" / ");
+      const streamEncodingParameters = [
+        config.copy_mode ? "copy" : (config.preset || "--"),
+        config.audio_bitrate ? `音频 ${config.audio_bitrate}kbps` : "音频 --",
+        config.keyframe_seconds ? `关键帧 ${config.keyframe_seconds}s` : "关键帧 --",
+      ].join(" / ");
       const loadText = Array.isArray(h.load_avg) && h.load_avg.length ? h.load_avg.join(" / ") : (h.load_avg || "--");
       const bitrate = stream.current_bitrate_label || (stream.current_bitrate_kbps ? `${stream.current_bitrate_kbps} Kbps` : "未知");
       const processText = stream.processes?.length ? `${stream.processes.length} 个进程` : "未检测到";
@@ -3201,8 +3316,11 @@ HTML = r"""
               ${metric("推流目标", config.stream_output_mode === "youtube_api" ? "YouTube API" : (config.has_stream_key ? "直播码" : "未配置"))}
             </div>
             <div class="mini-table" style="margin-top: 10px;">
-              ${miniRow("自动重启", autoRestart.enabled ? `开启 · ${autoRestart.last_error || "正常"}` : "关闭")}
-              ${miniRow("智能调参", adaptive.enabled ? `${adaptive.status || "idle"} · ${adaptive.last_error || "正常"}` : "关闭")}
+              ${miniRow(`${parameterStateLabel}视频参数`, streamVideoParameters)}
+              ${miniRow(`${parameterStateLabel}编码参数`, streamEncodingParameters)}
+              ${miniRow("YouTube 智能调参", youtubeSmartTuneEnabled ? `开启 · 检查 ${youtubeProfile.auto_tune_interval_seconds || 300}s · 冷却 ${youtubeProfile.auto_tune_cooldown_seconds || 900}s · 上限 ${youtubeProfile.auto_tune_max_bitrate || 6000}kbps` : "关闭")}
+              ${miniRow("Agent 自适应模式", `${config.adaptive_mode || "--"} · ${adaptive.enabled ? `${adaptive.status || "idle"} / ${adaptive.last_error || "正常"}` : "运行时关闭"}`)}
+              ${miniRow("Agent 自动重启", autoRestart.enabled ? `开启 · ${autoRestart.last_error || "正常"}` : "关闭")}
               ${miniRow("本地中继", relay.enabled ? `${relay.mode || "relay"} · ${relay.reachable ? "可达" : "不可达"}` : relay.message || "关闭")}
               ${miniRow("FIFO 缓冲", tuning.fifo_enabled ? `${tuning.fifo_timeshift_seconds || 0}s / queue ${tuning.fifo_queue_size || 0}` : "关闭")}
               ${miniRowHtml("FFmpeg PID", `<span class="mono">${processList}</span>`)}
@@ -3218,6 +3336,10 @@ HTML = r"""
               ${miniRowHtml("服务器视频", `<span class="mono">${videoList}</span>`)}
             </div>
           </div>
+        </div>
+        <div class="monitor-panel autotune-history-panel">
+          <h4>智能调参记录</h4>
+          ${renderAutotuneHistory(node.autotune_history || [])}
         </div>
       `;
     }
@@ -3422,7 +3544,6 @@ HTML = r"""
       const name = String(item.name || "").toLowerCase();
       if (filters.name && !name.includes(filters.name.toLowerCase())) return false;
       if (filters.profile && !resourceProfileIds(item).includes(filters.profile)) return false;
-      if (filters.copyNode && !copies.some((copy) => String(copy.node_id || "") === String(filters.copyNode))) return false;
       if (filters.ownerNode && String(owner.node_id || "") !== String(filters.ownerNode)) return false;
       const size = Number(item.size || 0);
       if (filters.size === "small" && size >= 500 * 1024 * 1024) return false;
@@ -3437,7 +3558,7 @@ HTML = r"""
     }
 
     function clearResourceFilters() {
-      resourceTableFilters = { name: "", size: "", age: "", profile: "", copyNode: "", ownerNode: "" };
+      resourceTableFilters = { name: "", size: "", age: "", profile: "", ownerNode: "" };
       openResourceNodeId = "";
       refs.mediaProfileFilter.value = "";
       renderMedia();
@@ -3462,7 +3583,6 @@ HTML = r"""
       const nodeOptions = `<option value="">全部节点</option>`
         + nodeDisks.map((item) => `<option value="${escapeHtml(item.node_id)}">${escapeHtml(item.node_name)}</option>`).join("");
       const selectedProfileOptions = profileFilterOptions(resourceTableFilters.profile);
-      const selectedCopyNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.copyNode) + '"', 'value="' + escapeHtml(resourceTableFilters.copyNode) + '" selected');
       const selectedOwnerNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.ownerNode) + '"', 'value="' + escapeHtml(resourceTableFilters.ownerNode) + '" selected');
       const resourceNameOptions = allResources.map((item) => `<option value="${escapeHtml(item.name || "")}"></option>`).join("");
       refs.mediaList.innerHTML = `
@@ -3476,8 +3596,7 @@ HTML = r"""
             <label>大小<select data-resource-filter="size"><option value="">全部</option><option value="small" ${resourceTableFilters.size === "small" ? "selected" : ""}>小于500M</option><option value="medium" ${resourceTableFilters.size === "medium" ? "selected" : ""}>500M-2G</option><option value="large" ${resourceTableFilters.size === "large" ? "selected" : ""}>大于2G</option></select></label>
             <label>上传时间<select data-resource-filter="age"><option value="">全部</option><option value="7" ${resourceTableFilters.age === "7" ? "selected" : ""}>近7天</option><option value="30" ${resourceTableFilters.age === "30" ? "selected" : ""}>近30天</option><option value="90" ${resourceTableFilters.age === "90" ? "selected" : ""}>近90天</option></select></label>
             <label>Profile<select data-resource-filter="profile">${selectedProfileOptions}</select></label>
-            <label>副本节点<select data-resource-filter="copyNode">${selectedCopyNodeOptions}</select></label>
-            <label>归属节点<select data-resource-filter="ownerNode">${selectedOwnerNodeOptions}</select></label>
+            <label>归属节点 / 副本数<select data-resource-filter="ownerNode">${selectedOwnerNodeOptions}</select></label>
           </div>
           <datalist id="resourceNameOptions">${resourceNameOptions}</datalist>
           ${entries.length ? entries.map((item) => {
@@ -3499,8 +3618,7 @@ HTML = r"""
                 <span class="muted">${escapeHtml(fmtBytes(item.size || 0))}</span>
                 <span class="muted">${escapeHtml(item.modified_label || "--")}</span>
                 <span>${escapeHtml(resourceProfileLabel(item))}</span>
-                <span title="${escapeHtml(copyNames)}">${copies.length} 副本：${escapeHtml(copyNames || "--")}</span>
-                <span>${escapeHtml(copy.node_name || copy.node_id || "--")}</span>
+                <span title="副本节点：${escapeHtml(copyNames || "--")}">${escapeHtml(copy.node_name || copy.node_id || "--")} · ${copies.length} 副本</span>
                 <input data-media-check type="radio" name="media" value="${escapeHtml(name)}" data-node-id="${escapeHtml(nodeId)}" data-video-path="${escapeHtml(videoPath)}" ${selected ? "checked" : ""} hidden>
               </div>
             `;
@@ -3701,6 +3819,7 @@ HTML = r"""
       if (refs.youtubeUsageInput) {
         refs.youtubeUsageInput.value = `${usage.calls || 0} calls / ${usage.estimated_units || 0} units`;
       }
+      if (refs.nodeMonitor) refs.nodeMonitor.innerHTML = renderMonitor(selectedNode());
     }
 
     function renderYouTubeProfiles(profiles = [], activeId = "") {
@@ -6582,7 +6701,7 @@ HTML = r"""
     [refs.presetInput, refs.videoBitrateInput, refs.audioBitrateInput, refs.fpsInput, refs.resolutionInput, refs.keyframeInput].forEach((el) => {
       el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
     });
-    initNodeRoleSplitter();
+    initHubNodeDisclosure();
     loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
     checkDailyGithubUpdates();
     window.setInterval(refreshRunningAgentParameters, AGENT_STREAM_REFRESH_MS);
@@ -8378,6 +8497,8 @@ def api_nodes():
     result = []
     profile_map = node_youtube_profile_map()
     stream_locks = node_stream_lock_map()
+    with YOUTUBE_AUTOTUNE_LOCK:
+        autotune_history = list(load_youtube_autotune_state().get("history") or [])
     profiles = {profile["id"]: public_youtube_profile(profile) for profile in load_youtube_profiles_config()["profiles"]}
     default_profile = active_youtube_profile_id()
     for node in load_nodes():
@@ -8388,6 +8509,10 @@ def api_nodes():
         profile = profiles.get(profile_id) or profiles.get(default_profile) or {}
         node_view["youtube_profile_id"] = profile_id
         node_view["youtube_profile_name"] = str(profile.get("name") or profile_id)
+        node_view["autotune_history"] = [
+            event for event in autotune_history
+            if str(event.get("node_id") or "") == str(node.get("id") or "")
+        ][:20]
         node_view["health"] = request_node_json(node, "/api/status") if node.get("enabled", True) else {"ok": False}
         lock = dict(stream_locks.get(str(node.get("id") or ""), {}))
         stream_config = node_view["health"].get("stream_config") or {}
