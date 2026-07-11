@@ -5323,7 +5323,15 @@ HTML = r"""
           Object.assign(startPayload, lastTuneRecommendation.recommendation);
         }
         const data = await postNodeAction("/api/nodes/stream/start", startPayload);
-        if (data.ok) refs.streamKeyInput.value = "";
+        if (!data.ok) {
+          const message = data.message || "Agent 未能启动推流";
+          refs.tuneBox.textContent = streamStartFailureText(data);
+          renderTransfer({ status: "failed", badge: "失败", title: "Smart Start 未启动", message });
+          log(`Smart Start 失败：${message}`);
+          await refreshAll();
+          return;
+        }
+        refs.streamKeyInput.value = "";
         refs.tuneBox.textContent = JSON.stringify({
           ok: data.ok,
           node_id: data.node_id,
@@ -5351,6 +5359,22 @@ HTML = r"""
       renderStreamControls();
       renderYouTubeAgentList();
       await smartStart();
+    }
+
+    function streamStartFailureText(data = {}) {
+      const lines = [
+        `Smart Start 失败：${data.message || "Agent 未能启动推流"}`,
+        "",
+      ];
+      const tail = data.log_tail || data.result?.log_tail || [];
+      if (Array.isArray(tail) && tail.length) {
+        lines.push("FFmpeg 日志尾部：");
+        tail.slice(-10).forEach((line) => lines.push(`- ${line}`));
+        lines.push("");
+      }
+      lines.push("原始返回：");
+      lines.push(JSON.stringify(data, null, 2));
+      return lines.join("\n");
     }
 
     async function postNodeAction(path, payload) {
