@@ -172,6 +172,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("function clearResourceFilters", app.HTML)
         self.assertIn("function ensureSmartStartMedia", app.HTML)
         self.assertIn('postJson("/api/media/share"', app.HTML)
+        self.assertIn('same_node: true', app.HTML)
         self.assertIn("复制完成后会自动启动推流", app.HTML)
         self.assertIn("Smart Start 失败：", app.HTML)
         self.assertIn('data-media-local="${localCopy ? "1" : "0"}"', app.HTML)

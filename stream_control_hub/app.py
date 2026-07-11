@@ -5245,6 +5245,7 @@ HTML = r"""
 
     async function ensureSmartStartMedia(payload) {
       if (!payload.library_media_name || payload.media_local) return { ok: true, copied: false };
+      if (String(payload.source_node_id || "") === String(payload.node_id || "")) return { ok: true, copied: false, same_node: true };
       if (!payload.source_node_id) throw new Error(`媒体库没有可用源副本：${payload.library_media_name}`);
       const copySourceLabel = nodes.find((item) => String(item.id) === String(payload.source_node_id))?.name || payload.source_node_id;
       refs.tuneBox.textContent = `目标节点没有 ${payload.library_media_name}，正在创建自动复制任务...`;
