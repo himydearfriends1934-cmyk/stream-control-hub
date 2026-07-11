@@ -257,6 +257,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('class="github-update-menu"', app.HTML)
         self.assertIn('githubUpdateMore: document.getElementById("githubUpdateMore")', app.HTML)
         self.assertIn('refs.githubUpdateMore.addEventListener("click"', app.HTML)
+        self.assertIn("grid-template-columns: 0.9fr 1.15fr 1.35fr", app.HTML)
         self.assertIn('id="hubNodeList"', app.HTML)
         self.assertIn('id="agentNodeCount"', app.HTML)
         self.assertIn('id="hubNodeCount"', app.HTML)

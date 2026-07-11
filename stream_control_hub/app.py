@@ -537,7 +537,7 @@ HTML = r"""
     .left-stack, .side-stack { display: grid; gap: 10px; align-content: start; min-width: 0; }
     .grid > .side-stack { align-self: start; grid-template-rows: auto; }
     .media-workspace { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(520px, 0.92fr) minmax(600px, 1.08fr); gap: 12px; align-items: start; }
-    .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 0.9fr 1.15fr 1.35fr; gap: 10px; }
+    .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 1.15fr 1.35fr; gap: 10px; }
     .card {
       border: 1px solid var(--line);
       border-radius: 12px;
@@ -1835,6 +1835,7 @@ HTML = r"""
         </div>
         <div class="command-actions">
           <button id="previewTuneBtn">预览调优</button>
+          <button id="youtubeWizardBtn">YouTube API</button>
           <button class="primary" id="smartStartBtn">Smart Start</button>
         </div>
         <details class="command-advanced" id="commandAdvanced">
@@ -1979,14 +1980,6 @@ HTML = r"""
                 <button id="copyAgentInstallQuickBtn">复制 Agent 命令</button>
               </div>
             </details>
-          </div>
-        </div>
-        <div class="card compact-card">
-          <h2>YouTube API</h2>
-          <p>Hub 统一保存 YouTube 授权；可上传 Google OAuth JSON，自动填入 Client ID / Secret。</p>
-          <div class="actions">
-            <button class="primary" id="youtubeWizardBtn">打开 YouTube 向导</button>
-            <button id="youtubeImportJsonBtn">上传 API JSON</button>
           </div>
         </div>
         <div class="card compact-card">
@@ -6459,7 +6452,7 @@ HTML = r"""
       if (event.target === refs.tailscaleWizardModal) setTailscaleWizardOpen(false);
     });
     refs.youtubeWizardBtn.addEventListener("click", () => setYouTubeModalOpen(true));
-    refs.youtubeImportJsonBtn.addEventListener("click", openYouTubeJsonImport);
+    if (refs.youtubeImportJsonBtn) refs.youtubeImportJsonBtn.addEventListener("click", openYouTubeJsonImport);
     refs.youtubeWizardClose.addEventListener("click", () => setYouTubeModalOpen(false));
     refs.youtubeWizardModal.addEventListener("click", (event) => {
       if (event.target === refs.youtubeWizardModal) event.preventDefault();
