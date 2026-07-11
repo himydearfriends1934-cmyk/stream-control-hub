@@ -716,12 +716,11 @@ HTML = r"""
     .node-space-card { padding-bottom: 10px; }
     .node-space-card h2 { margin-bottom: 2px; }
     .node-space-card p { margin: 0 0 5px; font-size: 12px; line-height: 1.35; }
-    .node-space-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); grid-auto-rows: 88px; gap: 7px; max-height: 88px; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
-    .node-space-ring-item { min-width: 0; min-height: 0; height: 88px; display: grid; justify-items: center; align-content: center; gap: 2px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; cursor: pointer; }
+    .node-space-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); grid-auto-rows: minmax(116px, auto); gap: 8px; max-height: 248px; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; padding-right: 2px; }
+    .node-space-ring-item { min-width: 0; min-height: 116px; height: auto; display: grid; justify-items: center; align-content: center; gap: 4px; padding: 7px 6px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; cursor: pointer; }
     .node-space-ring-item:hover, .node-space-ring-item.open { border-color: var(--accent); background: rgba(54,211,153,.09); }
-    .node-space-ring-item strong { font-size: 11px; line-height: 1.15; }
-    .node-space-ring-item strong, .node-space-ring-item small { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .node-space-ring-item small { color: var(--muted); font-size: 10px; }
+    .node-space-ring-item strong { width: 100%; min-height: 27px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; font-size: 11px; line-height: 1.22; }
+    .node-space-ring-item small { width: 100%; min-width: 0; color: var(--muted); font-size: 10px; line-height: 1.25; white-space: normal; overflow: hidden; text-overflow: ellipsis; }
     .node-space-ring { width: clamp(48px, 4vw, 54px); height: clamp(48px, 4vw, 54px); display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--accent) calc(var(--disk-percent) * 1%), rgba(255,255,255,.09) 0); }
     .node-space-ring::before { content: ""; grid-area: 1 / 1; width: 74%; height: 74%; border-radius: 50%; background: var(--panel); }
     .node-space-ring span { grid-area: 1 / 1; z-index: 1; font-size: 12px; font-weight: 900; }
@@ -3326,7 +3325,7 @@ HTML = r"""
         return `<div class="node-space-ring-item ${open ? "open" : ""} ${online ? "" : "offline-node"}" role="button" tabindex="0" data-space-node-id="${escapeHtml(item.node_id || "")}" title="双击在资源管理模块查看 ${escapeHtml(item.node_name)} 的视频；删除/取消角色请打开后面的设置；已用 ${escapeHtml(fmtBytes(item.used))} / ${escapeHtml(fmtBytes(item.total))}">
           <div class="node-space-ring ${online ? "" : "offline"}" style="--disk-percent:${percent.toFixed(1)}"><span>${online ? `${percent.toFixed(0)}%` : "离线"}</span></div>
           <strong>${escapeHtml(item.node_name)}</strong>
-          <small>${online ? `剩余 ${escapeHtml(fmtBytes(item.free))}` : "无法读取空间"}</small>
+          <small>${online ? `剩余 ${escapeHtml(fmtBytes(item.free))} · 已用 ${escapeHtml(fmtBytes(item.used))}/${escapeHtml(fmtBytes(item.total))}` : "无法读取空间"}</small>
         </div>`;
       }).join("");
     }
