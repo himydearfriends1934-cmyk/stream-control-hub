@@ -2207,17 +2207,6 @@ HTML = r"""
           <label>Client Secret（可选）</label>
           <input id="youtubeClientSecretInput" type="password" autocomplete="off" placeholder="部分 OAuth 客户端没有 secret">
         </div>
-        <div class="wizard-field">
-          <label>可见范围 / 计划时间</label>
-          <div class="command-pair">
-            <select id="youtubePrivacyInput">
-              <option value="private">私享</option>
-              <option value="unlisted">不公开</option>
-              <option value="public">公开</option>
-            </select>
-            <input id="youtubeScheduleInput" type="datetime-local">
-          </div>
-        </div>
       </div>
       <div class="wizard-actions">
         <button id="youtubeSaveConfigBtn">保存 API 配置</button>
@@ -2375,8 +2364,6 @@ HTML = r"""
       youtubeJsonPickBtn: document.getElementById("youtubeJsonPickBtn"),
       youtubeJsonFileInput: document.getElementById("youtubeJsonFileInput"),
       youtubeJsonInput: document.getElementById("youtubeJsonInput"),
-      youtubePrivacyInput: document.getElementById("youtubePrivacyInput"),
-      youtubeScheduleInput: document.getElementById("youtubeScheduleInput"),
       youtubeRefreshBtn: document.getElementById("youtubeRefreshBtn"),
       youtubeSaveConfigBtn: document.getElementById("youtubeSaveConfigBtn"),
       youtubeAuthorizeBtn: document.getElementById("youtubeAuthorizeBtn"),
@@ -3541,11 +3528,6 @@ HTML = r"""
         const node = ensureSelectedNodeForProfile();
         refs.youtubeNodeInput.value = node ? `${node.name || node.id} (${node.id})` : "先选择 Agent";
         renderYouTubeAgentList();
-        if (!refs.youtubeScheduleInput.value) {
-          const planned = new Date(Date.now() + 5 * 60 * 1000);
-          const local = new Date(planned.getTime() - planned.getTimezoneOffset() * 60 * 1000);
-          refs.youtubeScheduleInput.value = local.toISOString().slice(0, 16);
-        }
         loadYouTubeProfiles().then(() => refreshYouTubeResources()).catch(() => refreshYouTubeResources());
       }
     }
@@ -4215,15 +4197,12 @@ HTML = r"""
       refs.youtubePrepareBtn.disabled = true;
       try {
         const resolutionMatch = refs.resolutionInput.value.match(/x(\d+)$/i);
-        const scheduled = refs.youtubeScheduleInput.value
-          ? new Date(refs.youtubeScheduleInput.value).toISOString()
-          : "";
         const data = await postNodeAction("/api/nodes/youtube/prepare", {
           node_id: node.id,
           profile_id: selectedYouTubeProfileId(),
           title,
-          privacy_status: refs.youtubePrivacyInput.value,
-          scheduled_start_time: scheduled,
+          privacy_status: "private",
+          scheduled_start_time: "",
           stream_id: refs.youtubePrepareStreamSelect.value,
           resolution: resolutionMatch ? `${resolutionMatch[1]}p` : "720p",
           frame_rate: Number(refs.fpsInput.value || 30) >= 50 ? "60fps" : "30fps",
