@@ -2334,6 +2334,8 @@ HTML = r"""
     let youtubeStreamsByProfile = {};
     let youtubeStreamLoadState = {};
     const YOUTUBE_PROFILE_VISIBLE_SLOTS = 6;
+    const AGENT_STREAM_REFRESH_MS = 5 * 60 * 1000;
+    let agentStreamRefreshInFlight = false;
     let editingYouTubeProfileId = "";
     let youtubeProfileClickTimer = null;
 
@@ -2876,7 +2878,8 @@ HTML = r"""
 
     function nodeRowProfileId(node) {
       const config = nodeStreamConfig(node);
-      return String(nodeStreaming(node) && config.youtube_profile_id ? config.youtube_profile_id : nodeProfileId(node));
+      if (nodeStreaming(node) && config.youtube_profile_id) return String(config.youtube_profile_id);
+      return nodeProfileId(node);
     }
 
     function nodeRowStreamLock(node) {
@@ -2917,6 +2920,10 @@ HTML = r"""
         config.keyframe_seconds ? `关键帧${config.keyframe_seconds}s` : "",
       ].filter(Boolean);
       return `${prefix}：${parts.join(" · ")}`;
+    }
+
+    function hasStreamingAgentRows() {
+      return nodes.some((node) => Boolean(node.roles?.agent?.enabled) && nodeStreaming(node));
     }
 
     function lockedYoutubeStreamId(node) {
@@ -4337,6 +4344,28 @@ HTML = r"""
         log("状态已刷新");
       } finally {
         refs.refreshBtn.disabled = false;
+      }
+    }
+
+    async function refreshRunningAgentParameters() {
+      if (agentStreamRefreshInFlight || !nodes.length) return;
+      agentStreamRefreshInFlight = true;
+      try {
+        const hadStreamingAgents = hasStreamingAgentRows();
+        const nodeResp = await fetch("/api/nodes");
+        if (!nodeResp.ok) throw new Error(nodeResp.statusText || "Agent 参数刷新失败");
+        nodes = await nodeResp.json();
+        if (!hadStreamingAgents && !hasStreamingAgentRows()) return;
+        renderNodes();
+        renderStreamControls();
+        renderYouTubeAgentList();
+        renderTailscaleNodeOptions();
+        preloadNodeYouTubeStreams();
+        log("运行中的 Agent 参数已自动刷新");
+      } catch (error) {
+        log(friendlyError(error, "运行中的 Agent 参数刷新失败"));
+      } finally {
+        agentStreamRefreshInFlight = false;
       }
     }
 
@@ -6291,6 +6320,7 @@ HTML = r"""
     initNodeRoleSplitter();
     loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
     checkDailyGithubUpdates();
+    window.setInterval(refreshRunningAgentParameters, AGENT_STREAM_REFRESH_MS);
     window.setInterval(checkDailyGithubUpdates, 60 * 60 * 1000);
   </script>
 </body>
@@ -9076,6 +9106,9 @@ def api_nodes_stream_start():
         if not ensured.get("ok"):
             return jsonify({"ok": False, "message": ensured.get("message") or "开播媒体自动复制失败"}), 502
         node_payload["video_path"] = str(ensured.get("video_path") or library_media_name)
+    node_payload["library_media_name"] = library_media_name
+    node_payload["media_local"] = bool(payload.get("media_local"))
+    node_payload["source_node_id"] = str(payload.get("source_node_id") or "").strip()
     if not node_payload["video_path"]:
         return jsonify({"ok": False, "message": "missing node video_path"}), 400
     if node_payload["stream_output_mode"] == "direct" and not node_payload["stream_key"]:
@@ -9088,6 +9121,17 @@ def api_nodes_stream_start():
         except Exception as exc:
             return youtube_error_response(exc)
     result = post_node_json(node, "/api/start-stream", node_payload, timeout=60)
+    if result.get("ok"):
+        with suppress(Exception):
+            set_node_youtube_profile(node_id, str(node_payload.get("youtube_profile_id") or ""))
+        with suppress(Exception):
+            set_node_stream_lock(node_id, {
+                "youtube_stream_id": node_payload.get("youtube_stream_id") if node_payload.get("stream_output_mode") == "youtube_api" else "",
+                "video_path": node_payload.get("video_path"),
+                "library_media_name": library_media_name,
+                "media_local": node_payload.get("media_local"),
+                "source_node_id": node_payload.get("source_node_id"),
+            })
     status_code = 200 if result.get("ok") else 502
     return jsonify({
         "node_id": node_id,

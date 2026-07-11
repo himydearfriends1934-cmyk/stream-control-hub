@@ -259,8 +259,13 @@ class YouTubeAPIClientTests(unittest.TestCase):
         node = {"id": "node-a", "base_url": "http://100.64.0.10:8787", "enabled": True}
         with tempfile.TemporaryDirectory() as tmp:
             nodes_file = Path(tmp) / "nodes.json"
+            settings_file = Path(tmp) / "hub-settings.json"
             nodes_file.write_text(json.dumps([node]), encoding="utf-8")
             with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app,
+                "HUB_SETTINGS_FILE",
+                settings_file,
+            ), patch.object(
                 app.YOUTUBE_CLIENT,
                 "ingestion_target",
                 return_value="rtmp://example.test/live2/private-stream-name",
@@ -278,12 +283,16 @@ class YouTubeAPIClientTests(unittest.TestCase):
                         "youtube_stream_id": "stream-1",
                     },
                 )
+            settings = json.loads(settings_file.read_text(encoding="utf-8"))
 
         self.assertEqual(response.status_code, 200)
         forwarded = post.call_args.args[2]
         self.assertEqual(forwarded["youtube_stream_id"], "stream-1")
         self.assertEqual(forwarded["youtube_ingestion_url"], "rtmp://example.test/live2/private-stream-name")
         self.assertEqual(forwarded["stream_key"], "")
+        self.assertEqual(settings["node_youtube_profiles"]["node-a"], "default")
+        self.assertEqual(settings["node_stream_locks"]["node-a"]["youtube_stream_id"], "stream-1")
+        self.assertEqual(settings["node_stream_locks"]["node-a"]["video_path"], "video.mp4")
 
     def test_agent_saves_youtube_config_and_reloads_client(self):
         from stream_control_hub import headless_agent
