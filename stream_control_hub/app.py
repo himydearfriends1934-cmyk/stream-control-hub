@@ -5909,7 +5909,11 @@ HTML = r"""
         const enabled = Boolean(info.enabled);
         const label = role === "hub" ? "Hub" : "Agent";
         return `<div class="role-settings-item">
-          <span><strong>${label}</strong><small>当前状态：${enabled ? `已激活 · 版本 ${escapeHtml(info.version || "未识别")}` : "未激活"}</small></span>
+          <span><strong>${label}</strong><small>当前状态：${enabled
+            ? `已激活 · 版本 ${escapeHtml(info.version || "未识别")}`
+            : info.prepared
+              ? `已准备 · 未激活 · 版本 ${escapeHtml(info.version || "未识别")}`
+              : "未激活"}</small></span>
           <span class="actions">
             <button class="${enabled ? "" : "primary"}" data-settings-role="${role}" data-role-action="${enabled ? "upgrade-role" : "activate-role"}">${enabled ? `GitHub 升级 ${label}` : `激活 ${label}`}</button>
             ${enabled ? `<button class="danger" data-settings-role="${role}" data-role-action="deactivate-role">取消 ${label}</button>` : ""}
@@ -5962,7 +5966,11 @@ HTML = r"""
       const activating = action === "activate-role";
       const deactivating = action === "deactivate-role";
       const roleInfo = node?.roles?.[role] || {};
-      const currentStatus = roleInfo.enabled ? `已激活，当前版本 ${roleInfo.version || "未识别"}` : "未激活";
+        const currentStatus = roleInfo.enabled
+          ? `已激活，当前版本 ${roleInfo.version || "未识别"}`
+          : roleInfo.prepared
+            ? `已准备、未激活，备用版本 ${roleInfo.version || "未识别"}`
+            : "未激活";
       let migrateBeforeDeactivate = false;
       let directDeactivate = false;
       if (deactivating) {
@@ -5989,8 +5997,8 @@ HTML = r"""
       const warning = deactivating
         ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认取消 ${roleLabel} 功能？\n\n系统会停止并卸载该角色服务，默认保留配置/视频/节点数据；另一个角色不会被停止。`
         : activating
-        ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认激活 ${roleLabel}？\n\n安全提示：将新增并启用独立 systemd 服务，开放 Tailscale ${role === "hub" ? "8788" : "8787"} 端口。现有 ${role === "hub" ? "Agent" : "Hub"} 会继续运行，配置与视频不会删除。`
-        : `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认升级 ${roleLabel}？\n\n系统会从 GitHub main 拉取最新版，只重启该角色，不停止另一个角色。`;
+        ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认激活 ${roleLabel}？\n\n安全提示：将启用已准备的独立 systemd 服务，开放 Tailscale ${role === "hub" ? "8788" : "8787"} 端口。现有 ${role === "hub" ? "Agent" : "Hub"} 会继续运行，配置与视频不会删除。`
+        : `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认升级 ${roleLabel}？\n\nHub 与 Agent 共用一份 Git 代码；更新后，同机所有已激活角色都会重启到相同版本，未激活角色保持关闭。`;
       if (!deactivating && !confirm(warning)) return;
       setRoleSettingsOpen(false);
       if (sourceButton) sourceButton.disabled = true;
@@ -7587,19 +7595,65 @@ def request_hub_role_status(node: dict[str, Any]) -> dict[str, Any]:
     try:
         response = requests.get(f"{hub_url}/api/role-status", timeout=3)
         data = response.json()
-        hub = (data.get("roles") or {}).get("hub") or {}
-        return {"ok": response.ok, "enabled": response.ok and bool(hub.get("enabled", True)), "url": hub_url, **hub}
+        roles = data.get("roles") or {}
+        hub = roles.get("hub") or {}
+        return {
+            "ok": response.ok,
+            "enabled": response.ok and bool(hub.get("enabled", True)),
+            "url": hub_url,
+            "_prepared_agent": roles.get("agent") or {},
+            **hub,
+        }
     except Exception as exc:
         return {"ok": False, "enabled": False, "url": hub_url, "message": str(exc)}
 
 
-def schedule_agent_role_activation(control_hub_url: str) -> dict[str, Any]:
+def update_private_env_file(path: Path, updates: dict[str, str]) -> None:
+    values = {str(key): str(value).replace("\r", "").replace("\n", "") for key, value in updates.items() if value is not None}
+    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    retained = []
+    written = set()
+    for line in existing:
+        key = line.split("=", 1)[0].strip() if "=" in line else ""
+        if key in values:
+            retained.append(f"{key}={values[key]}")
+            written.add(key)
+        else:
+            retained.append(line)
+    retained.extend(f"{key}={value}" for key, value in values.items() if key not in written)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(retained) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def schedule_agent_role_activation(
+    control_hub_url: str,
+    *,
+    agent_name: str = "",
+    agent_token: str = "",
+) -> dict[str, Any]:
     if not shutil.which("systemd-run"):
         raise RuntimeError("systemd-run is required to activate the Agent role")
     unit = f"stream-control-agent-activate-{int(time.time())}"
     root = shlex.quote(str(ROOT))
     control_hub = shlex.quote(control_hub_url)
-    script = f"set -eu; sleep 2; env STREAM_AGENT_CONTROL_HUB={control_hub} CHOICE=1 sh {root}/scripts/install-agent.sh"
+    env_updates = {
+        "STREAM_AGENT_CONTROL_HUB": control_hub_url,
+        "STREAM_AGENT_NAME": (
+            agent_name
+            or os.environ.get("STREAM_AGENT_NAME", "")
+            or os.environ.get("HOSTNAME", "")
+            or os.environ.get("COMPUTERNAME", "")
+            or "stream-agent"
+        ),
+    }
+    if agent_token:
+        env_updates["STREAM_AGENT_CONTROL_TOKEN"] = agent_token
+    update_private_env_file(ROOT / ".agent.env", env_updates)
+    script = (
+        f"set -eu; sleep 2; env INSTALL_DIR={root} STREAM_AGENT_CONTROL_HUB={control_hub} "
+        f"CHOICE=1 sh {root}/scripts/install-agent.sh"
+    )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
         text=True,
@@ -8687,13 +8741,18 @@ def api_nodes():
         urls = node_role_urls(node)
         agent_health = node_view["health"]
         agent_info = agent_health.get("agent") or {}
+        hub_role = request_hub_role_status(node)
+        prepared_agent = dict(hub_role.pop("_prepared_agent", {}) or {})
+        agent_role_status = (agent_health.get("roles") or {}).get("agent") or {}
+        prepared_hub = (agent_health.get("roles") or {}).get("hub") or {}
         node_view["roles"] = {
             "agent": {
                 "enabled": bool(agent_health.get("ok")),
-                "version": str(agent_info.get("version") or "unrecognized"),
+                "prepared": bool(agent_role_status.get("prepared") or prepared_agent.get("prepared")),
+                "version": str(agent_info.get("version") or prepared_agent.get("version") or "unrecognized"),
                 "url": urls["agent"],
             },
-            "hub": request_hub_role_status(node),
+            "hub": hub_role if hub_role.get("enabled") else {**prepared_hub, **hub_role},
         }
         result.append(node_view)
     return jsonify(result)
@@ -8967,7 +9026,12 @@ def api_hub_role_status():
         "ok": True,
         "roles": {
             "hub": {"enabled": True, "version": local_git_version(), "url": f"http://{host}:{PORT}"},
-            "agent": {"enabled": service_active("stream-control-headless-agent.service"), "url": f"http://{host}:8787"},
+            "agent": {
+                "enabled": service_active("stream-control-headless-agent.service"),
+                "prepared": (ROOT / "scripts" / "install-agent.sh").exists(),
+                "version": local_git_version(),
+                "url": f"http://{host}:8787",
+            },
         },
     })
 
@@ -8980,7 +9044,11 @@ def api_activate_agent_role():
     if not parsed.hostname or not is_private_or_loopback_host(parsed.hostname):
         return jsonify({"ok": False, "message": "control_hub_url must use a private or Tailscale address"}), 400
     try:
-        result = schedule_agent_role_activation(control_hub_url)
+        result = schedule_agent_role_activation(
+            control_hub_url,
+            agent_name=str(payload.get("agent_name") or "").strip(),
+            agent_token=str(payload.get("agent_token") or "").strip(),
+        )
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
     return jsonify({"ok": True, "accepted": True, "message": "Agent activation scheduled; Hub remains active", "result": result}), 202
@@ -10232,7 +10300,11 @@ def api_activate_node_role(role: str):
             return jsonify({"ok": False, "node_id": node_id, "message": "Hub role is unavailable; SSH bootstrap is required"}), 409
         result = post_url_json(
             f"{hub_url}/api/roles/agent/activate",
-            {"control_hub_url": request.host_url.rstrip("/")},
+            {
+                "control_hub_url": request.host_url.rstrip("/"),
+                "agent_name": str(node.get("name") or node.get("id") or ""),
+                "agent_token": str(node.get("token") or ""),
+            },
             timeout=30,
         )
     status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)

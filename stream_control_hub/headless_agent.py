@@ -206,8 +206,6 @@ def schedule_hub_activation(seed_nodes: list[dict[str, Any]] | None = None) -> d
         raise RuntimeError("a Tailscale IPv4 address is required before activating the Hub role")
     unit = f"stream-control-hub-activate-{int(time.time())}"
     root = shlex.quote(str(ROOT))
-    repo = shlex.quote(AGENT_SOURCE_REPO)
-    branch = shlex.quote(AGENT_SOURCE_BRANCH)
     host = shlex.quote(tailscale_ip)
     seed_count = 0
     seed_file = DATA_DIR / "hub-seed-nodes.json"
@@ -219,15 +217,14 @@ def schedule_hub_activation(seed_nodes: list[dict[str, Any]] | None = None) -> d
         seed_file.chmod(0o600)
     seed_path = shlex.quote(str(seed_file))
     script = (
-        "set -eu; sleep 2; tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT; "
-        f"git clone --quiet --depth 1 --branch {branch} {repo} \"$tmp/repo\"; "
-        f"env INSTALL_DIR=/opt/stream-control-hub STREAM_HUB_HOST={host} "
+        "set -eu; sleep 2; "
+        f"env INSTALL_DIR={root} STREAM_HUB_HOST={host} "
         "STREAM_HUB_TRUSTED_REMOTE_WRITES=1 STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 "
-        "CHOICE=1 sh \"$tmp/repo/scripts/install-hub.sh\"; "
+        f"CHOICE=1 sh {root}/scripts/install-hub.sh; "
         f"if [ -s {seed_path} ]; then "
-        "mkdir -p /opt/stream-control-hub/data; "
-        f"cp {seed_path} /opt/stream-control-hub/data/nodes.local.json; "
-        "chmod 600 /opt/stream-control-hub/data/nodes.local.json; "
+        f"mkdir -p {root}/data; "
+        f"cp {seed_path} {root}/data/nodes.local.json; "
+        f"chmod 600 {root}/data/nodes.local.json; "
         "systemctl restart stream-control-hub.service >/dev/null 2>&1 || true; "
         "fi"
     )
@@ -246,10 +243,11 @@ def schedule_hub_deactivation() -> dict[str, Any]:
     if not shutil.which("systemd-run"):
         raise RuntimeError("systemd-run is required to deactivate the Hub role")
     unit = f"stream-control-hub-deactivate-{int(time.time())}"
+    root = shlex.quote(str(ROOT))
     script = (
         "set -eu; sleep 2; "
-        "if [ -x /opt/stream-control-hub/scripts/install-hub.sh ]; then "
-        "ACTION=uninstall REMOVE_DATA=0 sh /opt/stream-control-hub/scripts/install-hub.sh; "
+        f"if [ -x {root}/scripts/install-hub.sh ]; then "
+        f"ACTION=uninstall REMOVE_DATA=0 INSTALL_DIR={root} sh {root}/scripts/install-hub.sh; "
         "else systemctl disable --now stream-control-hub.service >/dev/null 2>&1 || true; fi"
     )
     result = subprocess.run(
@@ -1393,6 +1391,8 @@ def api_status():
     public_origin = discover_public_origin()
     cpu_percent = cpu_percent_sample()
     runtime = ffmpeg_runtime_status(state, processes, net, cpu_percent)
+    version_status = agent_version_status()
+    role_host = platform.node() or "127.0.0.1"
     return jsonify({
         "ok": True,
         "hostname": platform.node(),
@@ -1415,7 +1415,21 @@ def api_status():
             "mode": "headless-agent",
             "headless": True,
             "control_hub": CONTROL_HUB,
-            **agent_version_status(),
+            **version_status,
+        },
+        "roles": {
+            "agent": {
+                "enabled": True,
+                "prepared": True,
+                "version": version_status["version"],
+                "url": f"http://{role_host}:{PORT}",
+            },
+            "hub": {
+                "enabled": systemd_service_active("stream-control-hub.service"),
+                "prepared": (ROOT / "scripts" / "install-hub.sh").exists(),
+                "version": version_status["version"],
+                "url": f"http://{role_host}:8788",
+            },
         },
         "disk": {
             "total": usage.total,
@@ -2221,7 +2235,12 @@ def api_role_status():
         "ok": True,
         "roles": {
             "agent": {"enabled": True, "version": version["version"], "url": f"http://{request.host.split(':')[0]}:{PORT}"},
-            "hub": {"enabled": systemd_service_active("stream-control-hub.service"), "url": f"http://{request.host.split(':')[0]}:8788"},
+            "hub": {
+                "enabled": systemd_service_active("stream-control-hub.service"),
+                "prepared": (ROOT / "scripts" / "install-hub.sh").exists(),
+                "version": version["version"],
+                "url": f"http://{request.host.split(':')[0]}:8788",
+            },
         },
     })
 

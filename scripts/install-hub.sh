@@ -163,8 +163,15 @@ if [ -d "$INSTALL_DIR/.git" ]; then
   git -C "$INSTALL_DIR" checkout "$BRANCH"
   git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"
 elif [ -e "$INSTALL_DIR" ]; then
-  echo "INSTALL_DIR exists but is not a git checkout: $INSTALL_DIR" >&2
-  exit 1
+  echo "Adopting existing Hub data directory without deleting local data or env: $INSTALL_DIR"
+  git -C "$INSTALL_DIR" init
+  if git -C "$INSTALL_DIR" remote get-url origin >/dev/null 2>&1; then
+    git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
+  else
+    git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
+  fi
+  git -C "$INSTALL_DIR" fetch origin "$BRANCH"
+  git -C "$INSTALL_DIR" checkout -B "$BRANCH" FETCH_HEAD
 else
   git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
 fi
@@ -286,6 +293,10 @@ done
 if [ "$HEALTHY" != "1" ]; then
   echo "Hub health check failed at $PROBE_HOST:$STREAM_HUB_PORT." >&2
   exit 1
+fi
+
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet stream-control-headless-agent.service; then
+  systemctl restart stream-control-headless-agent.service
 fi
 
 echo "Stream Control Hub installed."

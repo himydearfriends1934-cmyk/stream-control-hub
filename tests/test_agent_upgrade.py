@@ -8,6 +8,100 @@ from unittest.mock import patch
 
 
 class AgentUpgradeTests(unittest.TestCase):
+    def test_agent_installer_ignores_activation_job_and_adopts_existing_data(self):
+        scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+        script = (scripts_dir / "install-agent.sh").read_text(encoding="utf-8")
+        hub_script = (scripts_dir / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn("stream-control-agent-upgrade-*.service) continue", script)
+        self.assertIn("stream-control-agent-activate-*.service) continue", script)
+        self.assertIn('git -C "$INSTALL_DIR" init', script)
+        self.assertIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" FETCH_HEAD', script)
+        self.assertIn("systemctl restart stream-control-hub.service", script)
+        self.assertIn('git -C "$INSTALL_DIR" init', hub_script)
+        self.assertIn("systemctl restart stream-control-headless-agent.service", hub_script)
+        self.assertNotIn('INSTALL_DIR exists but is not a git checkout', script)
+        self.assertNotIn('INSTALL_DIR exists but is not a git checkout', hub_script)
+
+    def test_hub_activates_agent_from_shared_checkout_without_exposing_token(self):
+        from stream_control_hub import app
+
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "install-agent.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            with patch.object(app, "ROOT", root), patch.object(
+                app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(app.subprocess, "run", return_value=completed) as run:
+                result = app.schedule_agent_role_activation(
+                    "http://100.64.0.1:8788",
+                    agent_name="node-a",
+                    agent_token="private-token",
+                )
+
+            saved_env = (root / ".agent.env").read_text(encoding="utf-8")
+
+        command = run.call_args.args[0][-1]
+        self.assertEqual(result["role"], "agent")
+        self.assertIn(str(root), command)
+        self.assertIn("INSTALL_DIR=", command)
+        self.assertNotIn("private-token", command)
+        self.assertIn("STREAM_AGENT_NAME=node-a", saved_env)
+        self.assertIn("STREAM_AGENT_CONTROL_TOKEN=private-token", saved_env)
+
+    def test_agent_activates_hub_from_shared_checkout(self):
+        from stream_control_hub import headless_agent
+
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "agent_data"
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", data_dir
+            ), patch.object(
+                headless_agent, "tailscale_status", return_value={"self": {"tailscale_ips": ["100.64.0.2"]}}
+            ), patch.object(
+                headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(headless_agent.subprocess, "run", return_value=completed) as run:
+                result = headless_agent.schedule_hub_activation()
+
+        command = run.call_args.args[0][-1]
+        self.assertEqual(result["role"], "hub")
+        self.assertIn(str(root), command)
+        self.assertIn("INSTALL_DIR=", command)
+        self.assertNotIn("INSTALL_DIR=/opt/stream-control-hub ", command)
+
+    def test_role_status_reports_inactive_counterpart_as_prepared(self):
+        from stream_control_hub import app, headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "install-agent.sh").write_text("", encoding="utf-8")
+            (root / "scripts" / "install-hub.sh").write_text("", encoding="utf-8")
+            with patch.object(app, "ROOT", root), patch.object(
+                app, "service_active", return_value=False
+            ), patch.object(app, "local_git_version", return_value="abc1234"):
+                hub_data = app.APP.test_client().get("/api/role-status").get_json()
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "CONTROL_TOKEN", ""
+            ), patch.object(
+                headless_agent, "systemd_service_active", return_value=False
+            ), patch.object(
+                headless_agent, "agent_version_status", return_value={"version": "abc1234"}
+            ):
+                agent_data = headless_agent.APP.test_client().get(
+                    "/api/role-status", environ_base={"REMOTE_ADDR": "127.0.0.1"}
+                ).get_json()
+
+        self.assertTrue(hub_data["roles"]["agent"]["prepared"])
+        self.assertFalse(hub_data["roles"]["agent"]["enabled"])
+        self.assertEqual(hub_data["roles"]["agent"]["version"], "abc1234")
+        self.assertTrue(agent_data["roles"]["hub"]["prepared"])
+        self.assertFalse(agent_data["roles"]["hub"]["enabled"])
+        self.assertEqual(agent_data["roles"]["hub"]["version"], "abc1234")
+
     def test_agent_reports_git_revision(self):
         from stream_control_hub import headless_agent
 

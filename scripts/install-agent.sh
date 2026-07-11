@@ -140,6 +140,7 @@ remove_legacy_conflicts() {
     [ "$service" = "stream-control-headless-agent.service" ] && continue
     case "$service" in
       stream-control-agent-upgrade-*.service) continue ;;
+      stream-control-agent-activate-*.service) continue ;;
     esac
     case " $legacy_services " in
       *" $service "*) ;;
@@ -316,8 +317,15 @@ if [ -d "$INSTALL_DIR/.git" ]; then
   git -C "$INSTALL_DIR" checkout "$BRANCH"
   git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"
 elif [ -e "$INSTALL_DIR" ]; then
-  echo "INSTALL_DIR exists but is not a git checkout: $INSTALL_DIR" >&2
-  exit 1
+  echo "Adopting existing Agent data directory without deleting local media or env: $INSTALL_DIR"
+  git -C "$INSTALL_DIR" init
+  if git -C "$INSTALL_DIR" remote get-url origin >/dev/null 2>&1; then
+    git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
+  else
+    git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
+  fi
+  git -C "$INSTALL_DIR" fetch origin "$BRANCH"
+  git -C "$INSTALL_DIR" checkout -B "$BRANCH" FETCH_HEAD
 else
   git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
 fi
@@ -445,6 +453,10 @@ if [ "$HEALTHY" != "1" ]; then
   systemctl status stream-control-headless-agent.service --no-pager -l >&2 || true
   journalctl -u stream-control-headless-agent.service -n 40 --no-pager >&2 || true
   exit 6
+fi
+
+if systemctl is-active --quiet stream-control-hub.service; then
+  systemctl restart stream-control-hub.service
 fi
 
 NODE_IP="$(tailscale_ip)"
