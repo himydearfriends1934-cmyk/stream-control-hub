@@ -424,7 +424,8 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     continue
                 entry["consecutive_issues"] = int(entry.get("consecutive_issues") or 0) + 1
                 entry["pending_diff"] = diff
-                if entry["consecutive_issues"] < 2:
+                required_checks = 1 if severity == "critical" else 2
+                if entry["consecutive_issues"] < required_checks:
                     append_youtube_autotune_history(state, {**event, "outcome": "pending", "after": event["before"]})
                     continue
                 if now - float(entry.get("last_adjusted") or 0) < cooldown:

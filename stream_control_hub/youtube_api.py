@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import threading
 import time
@@ -27,32 +28,65 @@ def youtube_health_recommendation(
     status = str(health.get("health_status") or health.get("status") or "").strip().lower()
     stream_status = str(health.get("stream_status") or "").strip().lower()
     issues = health.get("configuration_issues") or []
+    issue_records = []
+    for issue in issues:
+        if isinstance(issue, dict):
+            issue_type = re.sub(r"[^a-z0-9]", "", str(issue.get("type") or "").lower())
+            text = " ".join(str(issue.get(key) or "") for key in ("type", "severity", "reason", "description")).lower()
+            issue_level = str(issue.get("severity") or "").strip().lower()
+        else:
+            issue_type = ""
+            text = str(issue).lower()
+            issue_level = ""
+        issue_records.append({"type": issue_type, "text": text, "severity": issue_level})
     issue_text = " ".join(
-        " ".join(str(issue.get(key) or "") for key in ("type", "severity", "reason", "description"))
-        if isinstance(issue, dict)
-        else str(issue)
-        for issue in issues
-    ).lower()
+        str(record["text"]) for record in issue_records
+    )
+    issue_types = {str(record["type"]) for record in issue_records if record["type"]}
     video_bitrate = max(800, min(20000, int(current.get("video_bitrate") or 4500)))
     audio_bitrate = max(64, min(320, int(current.get("audio_bitrate") or 192)))
     fps = max(15, min(60, int(current.get("fps") or 30)))
     resolution = str(current.get("resolution") or "1280x720")
     keyframe_seconds = max(1, min(4, int(current.get("keyframe_seconds") or 2)))
     preset = str(current.get("preset") or "veryfast") or "veryfast"
+    copy_mode = bool(current.get("copy_mode"))
 
     actions: list[str] = []
     warnings: list[str] = []
     severity = "ok"
 
     def reduce_bitrate(percent: float, reason: str) -> None:
-        nonlocal video_bitrate, severity
+        nonlocal video_bitrate, severity, copy_mode
         video_bitrate = max(800, int(video_bitrate * (1.0 - percent)))
-        severity = "warning"
+        copy_mode = False
+        if severity != "critical":
+            severity = "warning"
         actions.append(reason)
 
     def increase_bitrate(percent: float, reason: str) -> None:
-        nonlocal video_bitrate
+        nonlocal video_bitrate, severity, copy_mode
         video_bitrate = min(20000, int(video_bitrate * (1.0 + percent)))
+        copy_mode = False
+        if severity != "critical":
+            severity = "warning"
+        actions.append(reason)
+
+    def expected_bitrate(issue_type_names: set[str]) -> int | None:
+        values = []
+        for record in issue_records:
+            if record["type"] not in issue_type_names:
+                continue
+            values.extend(
+                float(match.group(1))
+                for match in re.finditer(r"recommend[^.]{0,160}?bitrate(?:\s+of|\s*:)?\s*([0-9]+(?:\.[0-9]+)?)\s*kbps", str(record["text"]))
+            )
+        return int(min(values)) if values else None
+
+    def mark_action(reason: str) -> None:
+        nonlocal severity, copy_mode
+        copy_mode = False
+        if severity != "critical":
+            severity = "warning"
         actions.append(reason)
 
     if stream_status and stream_status not in {"active", "ready"}:
@@ -64,30 +98,96 @@ def youtube_health_recommendation(
         severity = "ok"
     elif status:
         severity = "warning"
+    issue_levels = {str(record["severity"]) for record in issue_records}
+    if "error" in issue_levels:
+        severity = "critical"
+    elif "warning" in issue_levels and severity == "ok":
+        severity = "warning"
 
-    high_tokens = ("bitrateishigh", "bitrate is high", "high bitrate", "too high")
-    low_tokens = ("bitrateislow", "bitrate is low", "low bitrate", "too low")
-    frame_tokens = ("framerate", "frame rate", "fps")
-    keyframe_tokens = ("keyframe", "key frame", "gop")
-    resolution_tokens = ("resolution",)
-
-    if any(token in issue_text for token in high_tokens):
-        reduce_bitrate(0.20, "YouTube reports bitrate is too high; reduce video bitrate by about 20%.")
-    if any(token in issue_text for token in low_tokens):
-        increase_bitrate(0.15, "YouTube reports bitrate is too low; increase video bitrate by about 15% if the Agent is stable.")
-    if any(token in issue_text for token in frame_tokens):
-        fps = 30 if fps > 30 else fps
-        actions.append("YouTube reports frame-rate mismatch; keep FPS at 30 unless the stream was created for 60fps.")
-    if any(token in issue_text for token in keyframe_tokens):
-        keyframe_seconds = 2
-        actions.append("YouTube reports keyframe/GOP issue; use 2 second keyframes.")
-    if any(token in issue_text for token in resolution_tokens):
-        if resolution in {"1920x1080", "2560x1440", "3840x2160"}:
-            resolution = "1280x720"
-            fps = min(fps, 30)
-            reduce_bitrate(0.10, "YouTube reports resolution mismatch; fall back to 720p/30fps.")
+    video_high_types = {"bitratehigh"}
+    video_low_types = {"bitratelow"}
+    audio_high_types = {"audiobitratehigh"}
+    audio_low_types = {"audiobitratelow"}
+    frame_types = {"frameratehigh", "frameratemismatch"}
+    keyframe_types = {"gopmismatch", "gopsizelong", "gopsizeover", "gopsizeshort", "opengop"}
+    resolution_types = {"resolutionmismatch", "videoresolutionsuboptimal", "videoresolutionunsupported"}
+    transcode_types = {
+        "audiocodec", "audiosamplerate", "audiostereomismatch", "audiotoomanychannels",
+        "badcontainer", "videocodec", "videoprofilemismatch",
+    }
+    starvation_issue = "videoingestionstarved" in issue_types or any(
+        token in issue_text for token in ("ingestion starved", "not receiving enough video", "video output low")
+    )
+    high_bitrate_issue = bool(issue_types & video_high_types) or any(
+        token in issue_text for token in ("bitrateishigh", "bitrate is high", "high bitrate", "too high")
+    )
+    low_bitrate_issue = bool(issue_types & video_low_types) or any(
+        token in issue_text for token in ("bitrateislow", "bitrate is low", "low bitrate", "too low")
+    )
+    recommended_bitrate = expected_bitrate(video_high_types)
+    if high_bitrate_issue and recommended_bitrate:
+        recommended_bitrate = max(800, min(20000, recommended_bitrate))
+        if recommended_bitrate < video_bitrate:
+            video_bitrate = recommended_bitrate
+            copy_mode = False
+            if severity != "critical":
+                severity = "warning"
+            actions.append(f"YouTube recommends {recommended_bitrate} Kbps; use that video bitrate.")
         else:
-            actions.append("YouTube reports resolution mismatch; match the YouTube stream resolution and the encoder output.")
+            reduce_bitrate(0.20, "YouTube reports bitrate is too high; reduce video bitrate by about 20%.")
+    elif high_bitrate_issue:
+        reduce_bitrate(0.20, "YouTube reports bitrate is too high; reduce video bitrate by about 20%.")
+    recommended_low_bitrate = expected_bitrate(video_low_types)
+    if low_bitrate_issue and recommended_low_bitrate and recommended_low_bitrate > video_bitrate:
+        video_bitrate = max(800, min(20000, recommended_low_bitrate))
+        mark_action(f"YouTube recommends {video_bitrate} Kbps; use that video bitrate.")
+    elif low_bitrate_issue:
+        increase_bitrate(0.15, "YouTube reports bitrate is too low; increase video bitrate by about 15% if the Agent is stable.")
+    recommended_audio_bitrate = expected_bitrate(audio_high_types)
+    if issue_types & audio_high_types:
+        if recommended_audio_bitrate:
+            audio_bitrate = max(64, min(320, recommended_audio_bitrate))
+            mark_action(f"YouTube recommends {audio_bitrate} Kbps audio; use that audio bitrate.")
+        else:
+            audio_bitrate = max(64, int(audio_bitrate * 0.8))
+            mark_action("YouTube reports audio bitrate is too high; reduce audio bitrate by about 20%.")
+    recommended_low_audio_bitrate = expected_bitrate(audio_low_types)
+    if issue_types & audio_low_types:
+        audio_bitrate = (
+            max(64, min(320, recommended_low_audio_bitrate))
+            if recommended_low_audio_bitrate and recommended_low_audio_bitrate > audio_bitrate
+            else min(320, int(audio_bitrate * 1.15))
+        )
+        mark_action(f"YouTube reports audio bitrate is too low; use {audio_bitrate} Kbps audio.")
+    if starvation_issue:
+        if not high_bitrate_issue:
+            reduce_bitrate(0.20, "YouTube reports video ingestion starvation; reduce bitrate to lower encoder and network load.")
+        else:
+            actions.append("YouTube also reports video ingestion starvation; the lower bitrate should reduce encoder and network load.")
+        if preset not in {"ultrafast", "superfast"}:
+            preset = "superfast"
+            mark_action("Use the faster superfast encoder preset while ingestion is starved.")
+    if issue_types & frame_types or any(token in issue_text for token in ("frame rate", "framerate", "fps")):
+        fps = min(fps, 30)
+        mark_action("YouTube reports a frame-rate issue; use 30 FPS.")
+    if issue_types & keyframe_types or any(token in issue_text for token in ("keyframe", "key frame", "gop")):
+        keyframe_seconds = 2
+        mark_action("YouTube reports a keyframe/GOP issue; use 2-second keyframes.")
+    if issue_types & resolution_types or "resolution" in issue_text:
+        resolution = "1280x720"
+        fps = min(fps, 30)
+        video_bitrate = min(video_bitrate, 4500)
+        mark_action("YouTube reports a resolution issue; use 1280x720 at no more than 30 FPS.")
+    if issue_types & transcode_types:
+        preset = "veryfast" if preset in {"copy", ""} else preset
+        mark_action("YouTube reports a codec, container, profile, or audio-format issue; force H.264/AAC transcoding.")
+    handled_types = video_high_types | video_low_types | audio_high_types | audio_low_types | frame_types | keyframe_types | resolution_types | transcode_types | {"videoingestionstarved"}
+    unsupported_types = sorted(issue_types - handled_types)
+    if unsupported_types:
+        warnings.append(
+            "YouTube issue(s) require source or primary/backup stream changes and were not auto-applied: "
+            + ", ".join(unsupported_types)
+        )
     if not actions and not warnings:
         actions.append("YouTube health is acceptable; keep the current encoder settings.")
 
@@ -95,7 +195,7 @@ def youtube_health_recommendation(
         "ok": True,
         "severity": severity,
         "recommendation": {
-            "copy_mode": False,
+            "copy_mode": copy_mode,
             "preset": preset,
             "video_bitrate": video_bitrate,
             "audio_bitrate": audio_bitrate,

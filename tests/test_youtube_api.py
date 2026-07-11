@@ -608,8 +608,93 @@ class YouTubeAPIClientTests(unittest.TestCase):
             {"video_bitrate": 6000, "fps": 60, "resolution": "1920x1080"},
         )
 
-        self.assertEqual(result["severity"], "warning")
+        self.assertEqual(result["severity"], "critical")
         self.assertLess(result["recommendation"]["video_bitrate"], 6000)
+
+    def test_youtube_health_handles_kiana_bitrate_and_starvation_issues(self):
+        result = youtube_health_recommendation(
+            {
+                "stream_status": "active",
+                "health_status": "good",
+                "configuration_issues": [
+                    {
+                        "type": "bitrateHigh",
+                        "severity": "info",
+                        "reason": "Check video settings",
+                        "description": "The stream's current bitrate (5256.74 Kbps) is higher than the recommended bitrate. We recommend that you use a stream bitrate of 2500 Kbps.",
+                    },
+                    {
+                        "type": "videoIngestionStarved",
+                        "severity": "error",
+                        "reason": "Video output low",
+                        "description": "YouTube is not receiving enough video to maintain smooth streaming.",
+                    },
+                ],
+            },
+            {"video_bitrate": 4500, "fps": 30, "resolution": "1280x720"},
+        )
+
+        self.assertEqual(result["severity"], "critical")
+        self.assertEqual(result["recommendation"]["video_bitrate"], 2500)
+        self.assertEqual(result["recommendation"]["preset"], "superfast")
+        self.assertTrue(any("ingestion starvation" in reason for reason in result["analysis"]["reasons"]))
+
+    def test_youtube_health_keeps_critical_severity_when_reducing_bitrate(self):
+        result = youtube_health_recommendation(
+            {
+                "stream_status": "active",
+                "health_status": "bad",
+                "configuration_issues": [{"type": "videoIngestionStarved", "description": "Video output low"}],
+            },
+            {"video_bitrate": 4500},
+        )
+
+        self.assertEqual(result["severity"], "critical")
+        self.assertLess(result["recommendation"]["video_bitrate"], 4500)
+
+    def test_youtube_health_maps_structured_encoder_issue_categories(self):
+        cases = [
+            ("audioBitrateHigh", {"description": "We recommend that you use an audio stream bitrate of 128 Kbps."}, {"audio_bitrate": 192}, "audio_bitrate", 128),
+            ("frameRateHigh", {}, {"fps": 60}, "fps", 30),
+            ("gopSizeLong", {}, {"keyframe_seconds": 4}, "keyframe_seconds", 2),
+            ("videoResolutionUnsupported", {}, {"resolution": "1920x1080", "fps": 60}, "resolution", "1280x720"),
+            ("videoCodec", {}, {"copy_mode": True}, "copy_mode", False),
+        ]
+        for issue_type, issue_data, current, parameter, expected in cases:
+            with self.subTest(issue_type=issue_type):
+                result = youtube_health_recommendation(
+                    {
+                        "stream_status": "active",
+                        "health_status": "good",
+                        "configuration_issues": [{"type": issue_type, "severity": "warning", **issue_data}],
+                    },
+                    current,
+                )
+                self.assertIn(result["severity"], {"warning", "critical"})
+                self.assertEqual(result["recommendation"][parameter], expected)
+
+    def test_youtube_health_records_unknown_issue_without_guessing_parameter_change(self):
+        current = {
+            "copy_mode": False,
+            "video_bitrate": 4500,
+            "audio_bitrate": 192,
+            "fps": 30,
+            "resolution": "1280x720",
+            "keyframe_seconds": 2,
+            "preset": "veryfast",
+        }
+        result = youtube_health_recommendation(
+            {
+                "stream_status": "active",
+                "health_status": "good",
+                "configuration_issues": [{"type": "futureUnknownIssue", "severity": "warning"}],
+            },
+            current,
+        )
+
+        for key, value in current.items():
+            self.assertEqual(result["recommendation"][key], value)
+        self.assertTrue(any("futureunknownissue" in warning for warning in result["analysis"]["warnings"]))
 
     def test_autotune_history_records_api_problem_before_change_and_verified_after(self):
         from stream_control_hub import app
@@ -628,7 +713,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
         }
         health = {
             "ok": True,
-            "severity": "warning",
+            "severity": "critical",
             "health": {"configuration_issues": [{"type": "videoBitrateIsHigh", "description": "bitrate is high"}]},
             "analysis": {"reasons": ["Reduce bitrate"], "warnings": []},
             "recommendation": {**stream_config, "video_bitrate": 4800},
@@ -641,7 +726,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
             state_file = Path(tmp) / "youtube_autotune_state.json"
             state_file.write_text(json.dumps({
                 "entries": {
-                    "node-a:account-a:stream-a": {"consecutive_issues": 1, "last_check": 0, "last_adjusted": 0}
+                    "node-a:account-a:stream-a": {"consecutive_issues": 0, "last_check": 0, "last_adjusted": 0}
                 }
             }), encoding="utf-8")
             status = MagicMock(side_effect=[
