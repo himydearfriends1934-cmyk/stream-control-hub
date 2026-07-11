@@ -1394,7 +1394,7 @@ HTML = r"""
     }
     .node-table-head.agent-table-head,
     .node-row.agent-row {
-      grid-template-columns: 34px minmax(0, 1fr) 64px 112px minmax(118px, .42fr);
+      grid-template-columns: 34px minmax(0, 1fr) 64px 142px minmax(118px, .42fr);
     }
     .node-table-head {
       position: sticky;
@@ -1512,7 +1512,7 @@ HTML = r"""
     .node-row.agent-row .node-state { grid-area: online; }
     .stream-switch {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 2px;
       padding: 3px;
       border: 1px solid rgba(54, 211, 153, .34);
@@ -1541,6 +1541,11 @@ HTML = r"""
       color: #fff7f8;
       background: #ff3b4f;
       box-shadow: 0 0 12px rgba(255, 59, 79, .42);
+    }
+    .stream-switch button.smart-active {
+      color: #06120f;
+      background: #fbbf24;
+      box-shadow: 0 0 12px rgba(251, 191, 36, .34);
     }
     .dot { width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid rgba(255,255,255,0.2); border-radius: 999px; background: #fbbf24; box-shadow: inset 0 0 3px rgba(255,255,255,0.5), 0 0 10px rgba(251, 191, 36, 0.65); }
     .dot.ok { background: #28e39f; box-shadow: inset 0 0 3px rgba(255,255,255,0.65), 0 0 12px rgba(40, 227, 159, 0.85); }
@@ -2982,6 +2987,11 @@ HTML = r"""
       return String(lock.youtube_stream_id || config.youtube_stream_id || "");
     }
 
+    function youtubeProfileAutoTuneEnabled(profileId) {
+      const profile = youtubeProfiles.find((item) => String(item.id) === String(profileId));
+      return Boolean(profile?.auto_tune_enabled);
+    }
+
     function nodeStreamModeLabel(config) {
       if (config.stream_output_mode === "youtube_api") return "YouTube API";
       if (config.stream_output_mode === "local_relay") return "本地中继";
@@ -3220,6 +3230,11 @@ HTML = r"""
       const parameterSummary = nodeStreamParameterSummary(node);
       const lockHint = streaming ? "正在推流，停止后才能修改" : "停止状态，可调整下次推流参数";
       const lockAttr = streaming ? "disabled aria-disabled=\"true\"" : "";
+      const smartTuneActive = youtubeProfileAutoTuneEnabled(rowProfileId);
+      const smartTuneDisabled = rowStreamId ? "" : "disabled";
+      const smartTuneTitle = rowStreamId
+        ? `${smartTuneActive ? "智能调参已开启" : "开启智能调参"}：${currentProfileName} / ${currentStreamName}`
+        : "请先选择 YouTube API 直播流";
       const agentVersion = h.agent?.version || "未识别";
       return `
         <div class="node-row agent-row ${streaming ? "running" : ""} ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="点击选中；删除/取消角色请打开后面的设置">
@@ -3234,6 +3249,7 @@ HTML = r"""
           <span class="stream-switch ${streaming ? "running" : ""}" data-stream-switch data-node-id="${escapeHtml(node.id)}" title="左边开播（Smart Start），右边关闭推流">
             <button type="button" class="${streaming ? "active" : ""}" data-stream-toggle-action="start" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>${streaming ? "推流中" : "开"}</button>
             <button type="button" class="${streaming ? "" : "active"}" data-stream-toggle-action="stop" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>${streaming ? "关" : "未推流"}</button>
+            <button type="button" class="${smartTuneActive ? "smart-active" : ""}" data-node-smart-tune data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(smartTuneTitle)}" ${smartTuneDisabled}>智能</button>
           </span>
           <span class="row-actions">
             <button class="tiny settings-button" data-role-settings data-node-id="${escapeHtml(node.id)}" title="节点角色设置" aria-label="节点角色设置">⚙</button>
@@ -5924,6 +5940,56 @@ HTML = r"""
       }
     }
 
+    async function enableNodeSmartTune(button) {
+      const nodeId = button?.dataset?.nodeId || "";
+      const node = nodes.find((item) => String(item.id) === String(nodeId));
+      if (!node) return;
+      const profileId = nodeRowProfileId(node);
+      const rowLock = nodeRowStreamLock(node);
+      const streamId = nodeRowYoutubeStreamId(node, rowLock);
+      if (!profileId || !streamId) {
+        alert("请先在这个 AGENT 行选择 Profile 和 YouTube API 直播流。");
+        return;
+      }
+      button.disabled = true;
+      button.dataset.busy = "1";
+      const previousText = button.textContent;
+      button.textContent = "开启中";
+      try {
+        if (!youtubeProfiles.length) await loadYouTubeProfiles();
+        const profile = youtubeProfiles.find((item) => String(item.id) === String(profileId)) || {};
+        const data = await youtubeProfileApi("/api/youtube/profiles", {
+          profile_id: profileId,
+          name: profile.name || profileId,
+          client_id: profile.client_id || "",
+          auto_tune_enabled: true,
+          auto_tune_interval_seconds: profile.auto_tune_interval_seconds || 300,
+          auto_tune_cooldown_seconds: profile.auto_tune_cooldown_seconds || 900,
+          auto_tune_min_bitrate: profile.auto_tune_min_bitrate || 800,
+          auto_tune_max_bitrate: profile.auto_tune_max_bitrate || 6000,
+        });
+        if (!data.ok) throw new Error(data.message || "智能调参开启失败");
+        rememberSelectedNode(nodeId);
+        renderYouTubeProfiles(data.profiles || [], profileId);
+        await youtubeProfileApi("/api/youtube/profiles/select", { profile_id: profileId });
+        ensureYouTubeStreamsForProfile(profileId, nodeId);
+        renderStreamControls();
+        renderMedia();
+        const streamName = lockedYoutubeStreamLabel(node, streamId, profileId);
+        uiMessage(`智能调参已开启：${profileName(profileId)} / ${streamName}`);
+        refs.youtubeWizardLog.textContent = `Auto Tune State 已开启：${profileName(profileId)} / ${streamName}`;
+        log(`智能调参已开启：${node.name || node.id} / ${streamName}`);
+      } catch (error) {
+        const message = friendlyError(error, "智能调参开启失败");
+        alert(message);
+        uiMessage(message);
+      } finally {
+        delete button.dataset.busy;
+        button.textContent = previousText || "智能";
+        button.disabled = false;
+      }
+    }
+
     async function saveNodeStreamLock(nodeId, updates, sourceEl = null) {
       nodeId = String(nodeId || "");
       if (!nodeId) return null;
@@ -6008,6 +6074,13 @@ HTML = r"""
     });
 
     refs.nodeList.addEventListener("click", async (event) => {
+      const smartTuneButton = event.target.closest("[data-node-smart-tune]");
+      if (smartTuneButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        await enableNodeSmartTune(smartTuneButton);
+        return;
+      }
       const streamToggleButton = event.target.closest("[data-stream-toggle-action]");
       if (streamToggleButton) {
         event.preventDefault();
