@@ -47,10 +47,12 @@ class StreamRecoveryTests(unittest.TestCase):
                         "video_path": str(video),
                         "stream_key": "private-stream-key",
                         "youtube_profile_id": "account-a",
+                        "youtube_ingestion_url": "rtmps://example.test/live/private-stream-name",
                     },
                 )
                 recovery_file = headless_agent.STREAM_RESTART_FILE
                 saved = json.loads(recovery_file.read_text(encoding="utf-8"))
+                runtime_state = headless_agent.load_state()
                 mode = stat.S_IMODE(recovery_file.stat().st_mode)
                 restart = client.post("/api/restart-stream")
                 stopped = client.post("/api/stop-stream")
@@ -59,6 +61,7 @@ class StreamRecoveryTests(unittest.TestCase):
         self.assertEqual(start.status_code, 200)
         self.assertEqual(saved["stream_key"], "private-stream-key")
         self.assertEqual(saved["youtube_profile_id"], "account-a")
+        self.assertNotIn("youtube_ingestion_url", runtime_state["stream_config"])
         if os.name != "nt":
             self.assertEqual(mode, 0o600)
         self.assertEqual(restart.status_code, 200)
@@ -77,7 +80,9 @@ class StreamRecoveryTests(unittest.TestCase):
                 headless_agent,
                 "launch_stream_process",
                 return_value={"pid": 4201, "log_path": "ffmpeg.log", "video_path": "video.mp4"},
-            ) as launch:
+            ) as launch, patch.object(
+                headless_agent, "verify_launched_stream", return_value={"ok": True}
+            ):
                 headless_agent.save_state({"stream_desired": True, "stream_pid": 4101})
                 headless_agent.write_private_json(
                     headless_agent.STREAM_RESTART_FILE,
@@ -88,6 +93,29 @@ class StreamRecoveryTests(unittest.TestCase):
         self.assertTrue(result["restarted"])
         launch.assert_called_once()
         self.assertEqual(launch.call_args.kwargs["reason"], "auto-recovery")
+
+    def test_watchdog_restarts_owned_process_when_progress_stalls(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self.recovery_paths(headless_agent, tmp)
+            with patches[0], patches[1], patches[2], patches[3], patch.object(
+                headless_agent, "STREAM_AUTO_RESTART_ENABLED", True
+            ), patch.object(headless_agent, "stream_process_owned", return_value=True), patch.object(
+                headless_agent, "stream_progress_stalled", return_value={"stalled": True, "age_seconds": 30}
+            ), patch.object(headless_agent, "stop_process", return_value={"ok": True}) as stop, patch.object(
+                headless_agent, "launch_stream_process",
+                return_value={"pid": 4202, "log_path": "ffmpeg.log", "video_path": "video.mp4"},
+            ), patch.object(headless_agent, "verify_launched_stream", return_value={"ok": True}):
+                headless_agent.save_state({"stream_desired": True, "stream_pid": 4101})
+                headless_agent.write_private_json(
+                    headless_agent.STREAM_RESTART_FILE,
+                    {"video_path": "video.mp4", "stream_key": "private-stream-key"},
+                )
+                result = headless_agent.stream_watchdog_tick()
+
+        self.assertTrue(result["restarted"])
+        stop.assert_called_once_with(4101)
 
     def test_start_stream_reports_immediate_ffmpeg_exit(self):
         from stream_control_hub import headless_agent
@@ -134,13 +162,24 @@ class StreamRecoveryTests(unittest.TestCase):
             ), patch.object(headless_agent, "discover_public_origin", return_value=""):
                 headless_agent.write_private_json(
                     headless_agent.STREAM_RESTART_FILE,
-                    {"video_path": "video.mp4", "stream_key": "private-stream-key"},
+                    {
+                        "video_path": "video.mp4",
+                        "stream_key": "private-stream-key",
+                        "youtube_ingestion_url": "rtmps://example.test/live/private-stream-name",
+                    },
                 )
+                headless_agent.save_state({
+                    "stream_config": {
+                        "video_path": "video.mp4",
+                        "youtube_ingestion_url": "rtmps://example.test/live/private-stream-name",
+                    }
+                })
                 response = headless_agent.APP.test_client().get("/api/status")
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["stream_config"]["restart_ready"])
         self.assertNotIn("private-stream-key", response.get_data(as_text=True))
+        self.assertNotIn("private-stream-name", response.get_data(as_text=True))
 
     def test_stop_process_refuses_pid_not_owned_by_agent(self):
         from stream_control_hub import headless_agent

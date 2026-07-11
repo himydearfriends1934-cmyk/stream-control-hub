@@ -153,6 +153,10 @@ The Agent automatically discovers its public IPv4 during install and update. It 
 
 Active streams are supervised by the Headless Agent. While a stream is desired, the Agent stores a mode `600` recovery payload in its private data directory, restarts an unexpectedly exited FFmpeg process with bounded exponential backoff, and exposes restart status in monitoring. A manual stop disables recovery and immediately removes the recovery payload. Stream keys are never returned by the API or written to the general runtime state file.
 
+Smart Tune probes the selected media with `ffprobe`, preserves its aspect ratio, and chooses a guarded H.264/AAC starting point from the current [YouTube Live encoder recommendations](https://support.google.com/youtube/answer/2853702): 4 Mbps for 720p30, 6 Mbps for 720p60, 10 Mbps for 1080p30, 12 Mbps for 1080p60, 15/24 Mbps for 1440p30/60, and 30/35 Mbps for 2160p30/60. CPU, available memory, and the median TCP delivery rate previously observed on the Agent-owned FFmpeg socket can lower that starting point; 20% network headroom is retained. Set `STREAM_AGENT_EGRESS_CAPACITY_KBPS` to a trusted upload speed-test result when no prior socket estimate exists.
+
+FFmpeg writes machine-readable progress every second. The watchdog treats a live process with no progress for 20 seconds (after a 15-second startup grace period) as stalled and runs it through the same verified recovery path as an exited process. Override these thresholds with `STREAM_AGENT_PROGRESS_STALL_SECONDS` and `STREAM_AGENT_PROGRESS_GRACE_SECONDS`. YouTube auto-tuning uses a five-sample runtime window, requires two matching critical checks or three matching warning checks, and keeps the configured cooldown between controlled restarts.
+
 ## YouTube Live API
 
 The Headless Agent supports the official YouTube Live Streaming API through OAuth 2.0 device authorization. The Hub only coordinates with YouTube stream and broadcast IDs. The Google refresh token and the RTMP stream name stay on the Agent; neither is returned to the Hub. Automatic FFmpeg recovery resolves the ingestion target again from the saved YouTube stream ID, so no YouTube stream key is needed in the recovery payload.
@@ -368,6 +372,10 @@ Linux Hub 和 Headless Agent 一键安装脚本在传入 `TAILSCALE_AUTH_KEY=...
 Agent 间复制完成后会比较源文件和新副本的 SHA-256 与大小；只有完全一致才进入重复副本保留规则。两份副本共存 72 小时，到期后系统再次确认两份完整且哈希一致，才删除旧副本。自动清理和批量“清理视频”只能删除这种已验证重复副本，绝不会删除唯一文件；唯一文件只能人工逐个删除。Agent 还会记录最后开播使用时间，资源管理器按每 3 天一档降低长期未使用文件名亮度，最长档用虚线标记为人工评估候选。
 
 Headless Agent 支持接收浏览器直传的视频，也支持把已有视频直接共享到其他 Agent，并用 FFmpeg 启动推流。Smart Start 支持手动填写 YouTube Stream Key，也支持从 YouTube API 向导选择已授权的直播流后一键启动。
+
+Smart Tune 会先用 `ffprobe` 读取源视频，再以 YouTube Live 当前 H.264 建议值作为初始基线：720p30/60 为 4000/6000 Kbps、1080p30/60 为 10000/12000 Kbps、1440p30/60 为 15000/24000 Kbps、2160p30/60 为 30000/35000 Kbps。算法会结合 CPU、可用内存和 FFmpeg 专属 TCP 连接测得的历史 delivery rate 保守下调，并预留 20% 上行余量；没有历史样本时可通过 `STREAM_AGENT_EGRESS_CAPACITY_KBPS` 填入可信测速结果。
+
+FFmpeg 每秒写入结构化进度。进程存活但默认连续 20 秒无进度时，Watchdog 会按卡死处理并走统一的验证恢复流程。YouTube 自动调参使用最多五个运行样本，严重问题连续两次、警告连续三次才允许在冷却期后受控重启，减少短时告警造成的反复断流。
 
 手动直播码不会写入 Hub 的仓库配置；推流期间只保存在 Agent 的 `0600` 恢复文件中，停止推流立即删除。YouTube API 模式下，refresh token 和 RTMP stream name 只留在 Agent，Hub 只传递 stream ID。建议只在本机、Tailscale 或可信内网里使用。
 

@@ -43,8 +43,8 @@ def youtube_health_recommendation(
         str(record["text"]) for record in issue_records
     )
     issue_types = {str(record["type"]) for record in issue_records if record["type"]}
-    video_bitrate = max(800, min(20000, int(current.get("video_bitrate") or 4500)))
-    audio_bitrate = max(64, min(320, int(current.get("audio_bitrate") or 192)))
+    video_bitrate = max(800, min(40000, int(current.get("video_bitrate") or 4000)))
+    audio_bitrate = max(64, min(384, int(current.get("audio_bitrate") or 128)))
     fps = max(15, min(60, int(current.get("fps") or 30)))
     resolution = str(current.get("resolution") or "1280x720")
     keyframe_seconds = max(1, min(4, int(current.get("keyframe_seconds") or 2)))
@@ -65,7 +65,7 @@ def youtube_health_recommendation(
 
     def increase_bitrate(percent: float, reason: str) -> None:
         nonlocal video_bitrate, severity, copy_mode
-        video_bitrate = min(20000, int(video_bitrate * (1.0 + percent)))
+        video_bitrate = min(40000, int(video_bitrate * (1.0 + percent)))
         copy_mode = False
         if severity != "critical":
             severity = "warning"
@@ -126,7 +126,7 @@ def youtube_health_recommendation(
     )
     recommended_bitrate = expected_bitrate(video_high_types)
     if high_bitrate_issue and recommended_bitrate:
-        recommended_bitrate = max(800, min(20000, recommended_bitrate))
+        recommended_bitrate = max(800, min(40000, recommended_bitrate))
         if recommended_bitrate < video_bitrate:
             video_bitrate = recommended_bitrate
             copy_mode = False
@@ -139,14 +139,14 @@ def youtube_health_recommendation(
         reduce_bitrate(0.20, "YouTube reports bitrate is too high; reduce video bitrate by about 20%.")
     recommended_low_bitrate = expected_bitrate(video_low_types)
     if low_bitrate_issue and recommended_low_bitrate and recommended_low_bitrate > video_bitrate:
-        video_bitrate = max(800, min(20000, recommended_low_bitrate))
+        video_bitrate = max(800, min(40000, recommended_low_bitrate))
         mark_action(f"YouTube recommends {video_bitrate} Kbps; use that video bitrate.")
     elif low_bitrate_issue:
         increase_bitrate(0.15, "YouTube reports bitrate is too low; increase video bitrate by about 15% if the Agent is stable.")
     recommended_audio_bitrate = expected_bitrate(audio_high_types)
     if issue_types & audio_high_types:
         if recommended_audio_bitrate:
-            audio_bitrate = max(64, min(320, recommended_audio_bitrate))
+            audio_bitrate = max(64, min(384, recommended_audio_bitrate))
             mark_action(f"YouTube recommends {audio_bitrate} Kbps audio; use that audio bitrate.")
         else:
             audio_bitrate = max(64, int(audio_bitrate * 0.8))
@@ -154,9 +154,9 @@ def youtube_health_recommendation(
     recommended_low_audio_bitrate = expected_bitrate(audio_low_types)
     if issue_types & audio_low_types:
         audio_bitrate = (
-            max(64, min(320, recommended_low_audio_bitrate))
+            max(64, min(384, recommended_low_audio_bitrate))
             if recommended_low_audio_bitrate and recommended_low_audio_bitrate > audio_bitrate
-            else min(320, int(audio_bitrate * 1.15))
+            else min(384, int(audio_bitrate * 1.15))
         )
         mark_action(f"YouTube reports audio bitrate is too low; use {audio_bitrate} Kbps audio.")
     if starvation_issue:
@@ -176,7 +176,7 @@ def youtube_health_recommendation(
     if issue_types & resolution_types or "resolution" in issue_text:
         resolution = "1280x720"
         fps = min(fps, 30)
-        video_bitrate = min(video_bitrate, 4500)
+        video_bitrate = min(video_bitrate, 4000)
         mark_action("YouTube reports a resolution issue; use 1280x720 at no more than 30 FPS.")
     if issue_types & transcode_types:
         preset = "veryfast" if preset in {"copy", ""} else preset
