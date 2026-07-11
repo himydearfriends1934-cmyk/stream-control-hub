@@ -1394,7 +1394,7 @@ HTML = r"""
     }
     .node-table-head.agent-table-head,
     .node-row.agent-row {
-      grid-template-columns: 34px minmax(0, 1fr) 64px 142px minmax(118px, .42fr);
+      grid-template-columns: 34px minmax(0, 1fr) 64px 176px minmax(102px, .36fr);
     }
     .node-table-head {
       position: sticky;
@@ -1512,14 +1512,21 @@ HTML = r"""
     .node-row.agent-row .node-state { grid-area: online; }
     .stream-switch {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: 1fr 1fr;
       gap: 2px;
       padding: 3px;
       border: 1px solid rgba(54, 211, 153, .34);
       border-radius: 999px;
       background: rgba(7,18,14,.64);
     }
-    .node-row.agent-row .stream-switch { grid-area: stream; }
+    .node-stream-controls {
+      grid-area: stream;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 54px;
+      gap: 5px;
+      align-items: center;
+      min-width: 0;
+    }
     .stream-switch button {
       min-width: 0;
       min-height: 28px;
@@ -1542,10 +1549,29 @@ HTML = r"""
       background: #ff3b4f;
       box-shadow: 0 0 12px rgba(255, 59, 79, .42);
     }
-    .stream-switch button.smart-active {
-      color: #06120f;
-      background: #fbbf24;
-      box-shadow: 0 0 12px rgba(251, 191, 36, .34);
+    .smart-tune-button {
+      min-width: 0;
+      min-height: 34px;
+      padding: 5px 7px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.08);
+      color: #c9d7d1;
+      background: #52615c;
+      font-size: 11px;
+      font-weight: 950;
+      line-height: 1;
+      box-shadow: inset 0 -1px 0 rgba(0,0,0,.28);
+    }
+    .smart-tune-button.active {
+      color: #fff7f8;
+      border-color: rgba(255, 59, 79, .72);
+      background: #ff3b4f;
+      box-shadow: 0 0 12px rgba(255, 59, 79, .42);
+    }
+    .smart-tune-button:disabled {
+      opacity: .52;
+      cursor: not-allowed;
+      box-shadow: none;
     }
     .dot { width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid rgba(255,255,255,0.2); border-radius: 999px; background: #fbbf24; box-shadow: inset 0 0 3px rgba(255,255,255,0.5), 0 0 10px rgba(251, 191, 36, 0.65); }
     .dot.ok { background: #28e39f; box-shadow: inset 0 0 3px rgba(255,255,255,0.65), 0 0 12px rgba(40, 227, 159, 0.85); }
@@ -3239,10 +3265,12 @@ HTML = r"""
             </span>
           </span>
           <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
-          <span class="stream-switch ${streaming ? "running" : ""}" data-stream-switch data-node-id="${escapeHtml(node.id)}" title="左边开播（Smart Start），右边关闭推流">
-            <button type="button" class="${streaming ? "active" : ""}" data-stream-toggle-action="start" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>${streaming ? "推流中" : "开"}</button>
-            <button type="button" class="${streaming ? "" : "active"}" data-stream-toggle-action="stop" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>${streaming ? "关" : "未推流"}</button>
-            <button type="button" class="${smartTuneActive ? "smart-active" : ""}" data-node-smart-tune data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(smartTuneTitle)}" ${smartTuneDisabled}>智能</button>
+          <span class="node-stream-controls" data-node-stream-controls data-node-id="${escapeHtml(node.id)}">
+            <span class="stream-switch ${streaming ? "running" : ""}" data-stream-switch data-node-id="${escapeHtml(node.id)}" title="左边开播（Smart Start），右边关闭推流">
+              <button type="button" class="${streaming ? "active" : ""}" data-stream-toggle-action="start" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>${streaming ? "推流中" : "开"}</button>
+              <button type="button" class="${streaming ? "" : "active"}" data-stream-toggle-action="stop" data-node-id="${escapeHtml(node.id)}" ${online ? "" : "disabled"}>${streaming ? "关" : "未推流"}</button>
+            </span>
+            <button type="button" class="smart-tune-button ${smartTuneActive ? "active" : ""}" data-node-smart-tune data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(smartTuneTitle)}" ${smartTuneDisabled}>智能</button>
           </span>
           <span class="row-actions">
             <button class="tiny settings-button" data-role-settings data-node-id="${escapeHtml(node.id)}" title="节点角色设置" aria-label="节点角色设置">⚙</button>
@@ -5248,6 +5276,14 @@ HTML = r"""
       if (String(payload.source_node_id || "") === String(payload.node_id || "")) return { ok: true, copied: false, same_node: true };
       if (!payload.source_node_id) throw new Error(`媒体库没有可用源副本：${payload.library_media_name}`);
       const copySourceLabel = nodes.find((item) => String(item.id) === String(payload.source_node_id))?.name || payload.source_node_id;
+      const copyTargetLabel = selectedNode()?.name || payload.node_id;
+      const confirmed = window.confirm([
+        `目标 Agent「${copyTargetLabel}」没有视频：${payload.library_media_name}`,
+        `需要先从「${copySourceLabel}」复制到目标 Agent。`,
+        "",
+        "点击“确定”开始复制，复制完成后会自动继续 Smart Start。",
+      ].join("\n"));
+      if (!confirmed) return { ok: false, copied: false, canceled: true };
       refs.tuneBox.textContent = `目标节点没有 ${payload.library_media_name}，正在创建自动复制任务...`;
       const task = await postJson("/api/media/share", {
         source_node_id: payload.source_node_id,
@@ -5308,6 +5344,13 @@ HTML = r"""
       refs.tuneBox.textContent = "正在启动 Smart Start：会在选中节点停止重复推流，并启动一个干净 FFmpeg。";
       try {
         const mediaResult = await ensureSmartStartMedia(payload);
+        if (mediaResult.canceled) {
+          const message = "已取消视频复制，Smart Start 未启动。";
+          refs.tuneBox.textContent = message;
+          renderTransfer({ status: "failed", badge: "取消", title: "Smart Start 未启动", message });
+          log(message);
+          return;
+        }
         if (mediaResult.copied) {
           refs.tuneBox.textContent = "媒体复制完成，正在刷新节点并启动 FFmpeg...";
           await refreshAll();
@@ -5969,24 +6012,25 @@ HTML = r"""
         alert("请先在这个 AGENT 行选择 Profile 和 YouTube API 直播流。");
         return;
       }
+      if (!youtubeProfiles.length) await loadYouTubeProfiles();
+      const profile = youtubeProfiles.find((item) => String(item.id) === String(profileId)) || {};
+      const nextSmartTuneEnabled = !Boolean(profile.auto_tune_enabled);
       button.disabled = true;
       button.dataset.busy = "1";
       const previousText = button.textContent;
-      button.textContent = "开启中";
+      button.textContent = nextSmartTuneEnabled ? "打开中" : "关闭中";
       try {
-        if (!youtubeProfiles.length) await loadYouTubeProfiles();
-        const profile = youtubeProfiles.find((item) => String(item.id) === String(profileId)) || {};
         const data = await youtubeProfileApi("/api/youtube/profiles", {
           profile_id: profileId,
           name: profile.name || profileId,
           client_id: profile.client_id || "",
-          auto_tune_enabled: true,
+          auto_tune_enabled: nextSmartTuneEnabled,
           auto_tune_interval_seconds: profile.auto_tune_interval_seconds || 300,
           auto_tune_cooldown_seconds: profile.auto_tune_cooldown_seconds || 900,
           auto_tune_min_bitrate: profile.auto_tune_min_bitrate || 800,
           auto_tune_max_bitrate: profile.auto_tune_max_bitrate || 6000,
         });
-        if (!data.ok) throw new Error(data.message || "智能调参开启失败");
+        if (!data.ok) throw new Error(data.message || "智能调参保存失败");
         rememberSelectedNode(nodeId);
         renderYouTubeProfiles(data.profiles || [], profileId);
         await youtubeProfileApi("/api/youtube/profiles/select", { profile_id: profileId });
@@ -5994,11 +6038,12 @@ HTML = r"""
         renderStreamControls();
         renderMedia();
         const streamName = lockedYoutubeStreamLabel(node, streamId, profileId);
-        uiMessage(`智能调参已开启：${profileName(profileId)} / ${streamName}`);
-        refs.youtubeWizardLog.textContent = `Auto Tune State 已开启：${profileName(profileId)} / ${streamName}`;
-        log(`智能调参已开启：${node.name || node.id} / ${streamName}`);
+        const stateText = nextSmartTuneEnabled ? "已打开" : "已关闭";
+        uiMessage(`智能调参${stateText}：${profileName(profileId)} / ${streamName}`);
+        refs.youtubeWizardLog.textContent = `Auto Tune State ${nextSmartTuneEnabled ? "ON" : "OFF"}：${profileName(profileId)} / ${streamName}`;
+        log(`智能调参${stateText}：${node.name || node.id} / ${streamName}`);
       } catch (error) {
-        const message = friendlyError(error, "智能调参开启失败");
+        const message = friendlyError(error, "智能调参保存失败");
         alert(message);
         uiMessage(message);
       } finally {
