@@ -547,6 +547,56 @@ HTML = r"""
     }
     .card h2 { margin: 0 0 8px; font-size: 16px; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .github-update-actions { align-items: flex-start; }
+    .github-update-actions > button { min-width: 128px; }
+    .github-update-more { position: relative; min-width: 96px; }
+    .github-update-more summary {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-2);
+      color: var(--text);
+      font-weight: 900;
+      cursor: pointer;
+      user-select: none;
+    }
+    .github-update-more summary::-webkit-details-marker { display: none; }
+    .github-update-more summary::after {
+      content: "v";
+      font-size: 11px;
+      line-height: 1;
+      color: var(--muted);
+    }
+    .github-update-more[open] summary {
+      border-color: var(--accent);
+      filter: brightness(1.08);
+    }
+    .github-update-menu {
+      position: absolute;
+      left: 0;
+      top: calc(100% + 6px);
+      z-index: 35;
+      display: grid;
+      gap: 5px;
+      width: min(220px, 72vw);
+      padding: 7px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel);
+      box-shadow: 0 12px 28px rgba(0,0,0,.35);
+    }
+    .github-update-menu button {
+      width: 100%;
+      min-height: 36px;
+      padding: 8px 10px;
+      text-align: left;
+      border-radius: 8px;
+    }
     .appearance-controls { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
     .appearance-controls label { color: var(--muted); font-size: 12px; font-weight: 800; }
     .appearance-controls select { padding: 7px 9px; min-width: 110px; }
@@ -1914,11 +1964,16 @@ HTML = r"""
         <div class="card compact-card">
           <h2>GitHub 更新</h2>
           <p>每天首次打开自动检查；有新版本会弹窗确认。也可复制 GitHub 一键安装/升级命令。</p>
-          <div class="actions">
+          <div class="actions github-update-actions">
             <button id="checkUpdatesBtn">检查并更新</button>
-            <button id="showInstallCommandsBtn">显示安装命令</button>
-            <button id="copyHubInstallBtn">复制 Hub 命令</button>
-            <button id="copyAgentInstallQuickBtn">复制 Agent 命令</button>
+            <details class="github-update-more" id="githubUpdateMore">
+              <summary>功能</summary>
+              <div class="github-update-menu">
+                <button id="showInstallCommandsBtn">显示安装命令</button>
+                <button id="copyHubInstallBtn">复制 Hub 命令</button>
+                <button id="copyAgentInstallQuickBtn">复制 Agent 命令</button>
+              </div>
+            </details>
           </div>
         </div>
         <div class="card compact-card">
@@ -2235,6 +2290,7 @@ HTML = r"""
       resourceFilterChip: document.getElementById("resourceFilterChip"),
       refreshBtn: document.getElementById("refreshBtn"),
       checkUpdatesBtn: document.getElementById("checkUpdatesBtn"),
+      githubUpdateMore: document.getElementById("githubUpdateMore"),
       showInstallCommandsBtn: document.getElementById("showInstallCommandsBtn"),
       copyHubInstallBtn: document.getElementById("copyHubInstallBtn"),
       copyAgentInstallQuickBtn: document.getElementById("copyAgentInstallQuickBtn"),
@@ -6318,6 +6374,10 @@ HTML = r"""
     refs.showInstallCommandsBtn.addEventListener("click", showInstallCommands);
     refs.copyHubInstallBtn.addEventListener("click", () => copyInstallCommand("hub"));
     refs.copyAgentInstallQuickBtn.addEventListener("click", () => copyInstallCommand("agent"));
+    refs.githubUpdateMore.addEventListener("click", (event) => {
+      const button = event.target.closest(".github-update-menu button");
+      if (button) window.setTimeout(() => { refs.githubUpdateMore.open = false; }, 0);
+    });
     refs.policyBtn.addEventListener("click", showPolicy);
     refs.auditBtn.addEventListener("click", showAudit);
     refs.tailscaleWizardBtn.addEventListener("click", () => setTailscaleWizardOpen(true));
