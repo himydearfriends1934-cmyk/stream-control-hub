@@ -9590,6 +9590,37 @@ def api_youtube_profiles():
     })
 
 
+@APP.post("/api/youtube/profiles/access-token")
+def api_youtube_profile_access_token():
+    payload = request.get_json(silent=True) or {}
+    purpose = str(payload.get("purpose") or "").strip()
+    requester = str(payload.get("requester") or "").strip()
+    if purpose != "youtube-video-upload":
+        return jsonify({"ok": False, "message": "purpose must be youtube-video-upload"}), 400
+    if requester != "video-loop-manager":
+        return jsonify({"ok": False, "message": "requester must be video-loop-manager"}), 400
+    profile_id = safe_youtube_profile_id(str(payload.get("profile_id") or ""))
+    try:
+        profile = youtube_profile_by_id(profile_id)
+        client = youtube_client_for_id(profile_id)
+        status = client.local_status()
+        if not status.get("configured"):
+            raise YouTubeAPIError("YouTube profile is not configured", status_code=409, reason="profile_not_configured")
+        if not status.get("authorized"):
+            raise YouTubeAPIError("YouTube profile is not authorized", status_code=409, reason="profile_not_authorized")
+        delegated = client.delegated_access_token()
+    except Exception as exc:
+        return youtube_error_response(exc)
+    response = jsonify({
+        "ok": True,
+        "profile_id": str(profile.get("id") or profile_id),
+        **delegated,
+    })
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @APP.post("/api/youtube/profiles")
 def api_youtube_profile_save():
     payload = request.get_json(silent=True) or {}

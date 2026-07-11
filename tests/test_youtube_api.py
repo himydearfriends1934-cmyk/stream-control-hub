@@ -76,6 +76,24 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertIn("limited to internal organization users", message)
         self.assertIn("OAuth consent screen", message)
 
+    def test_delegated_access_token_does_not_expose_refresh_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            credential_path = Path(tmp) / "credentials.json"
+            credential_path.write_text(json.dumps({
+                "refresh_token": "private-refresh-token",
+                "scope": "https://www.googleapis.com/auth/youtube",
+            }), encoding="utf-8")
+            client = YouTubeAPIClient(client_id="client-id", credential_path=credential_path)
+            client._access_token_expires_at = 5000
+            with patch.object(client, "_access_token_value", return_value="short-lived-access-token"), patch(
+                "stream_control_hub.youtube_api.time.time", return_value=1401
+            ):
+                delegated = client.delegated_access_token()
+
+        self.assertEqual(delegated["access_token"], "short-lived-access-token")
+        self.assertEqual(delegated["expires_in"], 3599)
+        self.assertNotIn("refresh_token", delegated)
+
     def test_stream_list_redacts_ingestion_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = YouTubeAPIClient(client_id="client-id", credential_path=Path(tmp) / "credentials.json")
@@ -490,6 +508,50 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(profile["auto_tune_max_bitrate"], 5500)
         self.assertIn("account-a", [item["id"] for item in listed.get_json()["profiles"]])
         self.assertEqual(deleted.status_code, 200)
+
+    def test_hub_delegates_only_short_lived_access_token_for_video_upload(self):
+        from stream_control_hub import app
+
+        client = MagicMock()
+        client.local_status.return_value = {"configured": True, "authorized": True}
+        client.delegated_access_token.return_value = {
+            "access_token": "short-lived-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3599,
+            "scope": "https://www.googleapis.com/auth/youtube",
+        }
+        profile = {"id": "account-a", "client_secret": "must-not-leak"}
+        with patch.object(app, "youtube_profile_by_id", return_value=profile), patch.object(
+            app, "youtube_client_for_id", return_value=client
+        ):
+            response = app.APP.test_client().post(
+                "/api/youtube/profiles/access-token",
+                json={
+                    "profile_id": "account-a",
+                    "purpose": "youtube-video-upload",
+                    "requester": "video-loop-manager",
+                },
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["profile_id"], "account-a")
+        self.assertEqual(data["access_token"], "short-lived-access-token")
+        self.assertNotIn("refresh_token", data)
+        self.assertNotIn("client_secret", data)
+        self.assertIn("no-store", response.headers["Cache-Control"])
+
+    def test_hub_rejects_access_token_delegation_for_other_purposes(self):
+        from stream_control_hub import app
+
+        with patch.object(app, "youtube_client_for_id") as client:
+            response = app.APP.test_client().post(
+                "/api/youtube/profiles/access-token",
+                json={"profile_id": "account-a", "purpose": "other", "requester": "video-loop-manager"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        client.assert_not_called()
 
     def test_youtube_profile_panel_layout_supports_rename_and_scroll(self):
         from stream_control_hub import app

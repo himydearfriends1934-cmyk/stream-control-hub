@@ -332,6 +332,18 @@ class YouTubeAPIClient:
             self._access_token_expires_at = time.time() + max(60, int(payload.get("expires_in") or 3600))
             return access_token
 
+    def delegated_access_token(self) -> dict[str, Any]:
+        access_token = self._access_token_value()
+        with self._lock:
+            expires_in = max(1, int(self._access_token_expires_at - time.time()))
+            scope = str(self._load_credentials().get("scope") or YOUTUBE_SCOPE)
+        return {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": expires_in,
+            "scope": scope,
+        }
+
     def _request(
         self,
         method: str,
