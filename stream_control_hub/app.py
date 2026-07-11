@@ -340,6 +340,58 @@ def youtube_autotune_problems(health: dict[str, Any]) -> list[str]:
     return problems[:12]
 
 
+def youtube_autotune_issue_fingerprint(health: dict[str, Any]) -> str:
+    analysis = health.get("analysis") or {}
+    issues = analysis.get("configuration_issues") or (health.get("health") or {}).get("configuration_issues") or []
+    issue_types = []
+    for issue in issues:
+        value = issue.get("type") if isinstance(issue, dict) else ""
+        normalized = "".join(character for character in str(value or "").lower() if character.isalnum())
+        if normalized and normalized not in issue_types:
+            issue_types.append(normalized)
+    # Bitrate warnings commonly disappear after the first change while starvation remains.
+    # Treat that sequence as one starvation episode instead of resetting its safety counter.
+    if "videoingestionstarved" in issue_types:
+        return "videoingestionstarved"
+    return "|".join(sorted(issue_types))
+
+
+def youtube_autotune_resolution_bitrate(payload: dict[str, Any]) -> int:
+    resolution = str(payload.get("resolution") or "1280x720").lower().replace("×", "x")
+    try:
+        width, height = (int(value.strip()) for value in resolution.split("x", 1))
+    except (TypeError, ValueError):
+        width, height = 1280, 720
+    short_side, long_side = sorted((max(1, width), max(1, height)))
+    fps = int(payload.get("fps") or 30)
+    if short_side <= 720 and long_side <= 1280:
+        return 4000 if fps > 30 else 2500
+    if short_side <= 1080 and long_side <= 1920:
+        return 6000 if fps > 30 else 4500
+    if short_side <= 1440 and long_side <= 2560:
+        return 9000
+    return 13000
+
+
+def youtube_autotune_history_adjustments(
+    state: dict[str, Any], event: dict[str, Any], issue_fingerprint: str
+) -> int:
+    count = 0
+    for item in state.get("history") or []:
+        if any(str(item.get(key) or "") != str(event.get(key) or "") for key in ("node_id", "profile_id", "stream_id")):
+            continue
+        if str(item.get("severity") or "").lower() not in {"warning", "critical"}:
+            break
+        problem_text = "".join(character for character in " ".join(item.get("api_problems") or []).lower() if character.isalnum())
+        if issue_fingerprint == "videoingestionstarved" and "videoingestionstarved" not in problem_text:
+            break
+        if str(item.get("outcome") or "") == "adjusted":
+            count += 1
+            if count >= 2:
+                break
+    return count
+
+
 def append_youtube_autotune_history(state: dict[str, Any], event: dict[str, Any]) -> None:
     history = state.setdefault("history", [])
     event = dict(event)
@@ -408,6 +460,21 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 recommendation = health.get("recommendation") or {}
                 diff = youtube_autotune_payload_diff(stream_config, recommendation, profile)
                 severity = str(health.get("severity") or "").lower()
+                issue_fingerprint = youtube_autotune_issue_fingerprint(health)
+                previous_fingerprint = str(entry.get("active_issue_fingerprint") or "")
+                legacy_entry = "active_issue_fingerprint" not in entry
+                if issue_fingerprint != previous_fingerprint:
+                    entry["active_issue_fingerprint"] = issue_fingerprint
+                    entry["episode_adjustments"] = (
+                        youtube_autotune_history_adjustments(state, event, issue_fingerprint)
+                        if legacy_entry and issue_fingerprint
+                        else 0
+                    )
+                    entry["recovery_applied"] = False
+                    entry["consecutive_issues"] = 0
+                explicit_bitrate = int((health.get("analysis") or {}).get("recommended_video_bitrate") or 0)
+                if explicit_bitrate:
+                    entry["youtube_recommended_bitrate"] = explicit_bitrate
                 event.update({
                     "severity": severity or "unknown",
                     "api_problems": youtube_autotune_problems(health),
@@ -417,9 +484,19 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 })
                 entry["last_health"] = health.get("health") or {}
                 entry["last_analysis"] = health.get("analysis") or {}
-                if not diff or severity not in {"warning", "critical"}:
+                issue_active = severity in {"warning", "critical"} and bool(issue_fingerprint)
+                if not issue_active:
                     entry["consecutive_issues"] = 0
+                    entry["active_issue_fingerprint"] = ""
+                    entry["episode_adjustments"] = 0
+                    entry["recovery_applied"] = False
                     entry["last_error"] = ""
+                    append_youtube_autotune_history(state, {**event, "outcome": "no_change", "after": event["before"]})
+                    continue
+                if entry.get("recovery_applied"):
+                    append_youtube_autotune_history(state, {**event, "outcome": "observing", "after": event["before"]})
+                    continue
+                if not diff:
                     append_youtube_autotune_history(state, {**event, "outcome": "no_change", "after": event["before"]})
                     continue
                 entry["consecutive_issues"] = int(entry.get("consecutive_issues") or 0) + 1
@@ -431,6 +508,22 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 if now - float(entry.get("last_adjusted") or 0) < cooldown:
                     append_youtube_autotune_history(state, {**event, "outcome": "cooldown", "after": event["before"]})
                     continue
+                recovery_action = int(entry.get("episode_adjustments") or 0) >= 2
+                if recovery_action:
+                    recovery_bitrate = int(entry.get("youtube_recommended_bitrate") or 0) or youtube_autotune_resolution_bitrate(stream_config)
+                    recovery_recommendation = dict(recommendation)
+                    recovery_recommendation["video_bitrate"] = recovery_bitrate
+                    diff = youtube_autotune_payload_diff(stream_config, recovery_recommendation, profile)
+                    event["recommended"] = youtube_autotune_parameter_snapshot(recovery_recommendation)
+                    event["changes"] = youtube_autotune_parameter_snapshot(diff)
+                    event["recommendation_reasons"] = list(event["recommendation_reasons"]) + [
+                        f"The same YouTube problem remained after two changes; restore the recommended {recovery_bitrate} Kbps on the third change."
+                    ]
+                    entry["pending_diff"] = diff
+                    if not diff:
+                        entry["recovery_applied"] = True
+                        append_youtube_autotune_history(state, {**event, "outcome": "observing", "after": event["before"]})
+                        continue
                 payload = dict(stream_config)
                 payload.update(diff)
                 payload["stream_key"] = ""
@@ -442,6 +535,8 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 entry["last_result"] = redacted_stream_result(result)
                 if result.get("ok"):
                     adjusted += 1
+                    entry["episode_adjustments"] = 3 if recovery_action else int(entry.get("episode_adjustments") or 0) + 1
+                    entry["recovery_applied"] = recovery_action
                     entry["consecutive_issues"] = 0
                     entry["last_error"] = ""
                     verified_status = request_node_json(node, "/api/status", timeout=8)
@@ -3133,6 +3228,7 @@ HTML = r"""
         no_change: "无需修改",
         pending: "等待复核",
         cooldown: "冷却等待",
+        observing: "已恢复推荐值，持续观察",
         adjusted: "已修改 Agent",
         failed: "Agent 修改失败",
         error: "检查错误",

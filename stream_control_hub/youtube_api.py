@@ -208,6 +208,7 @@ def youtube_health_recommendation(
             "youtube_health_status": status,
             "youtube_stream_status": stream_status,
             "configuration_issues": issues,
+            "recommended_video_bitrate": recommended_bitrate or recommended_low_bitrate,
             "reasons": actions,
             "warnings": warnings,
         },
