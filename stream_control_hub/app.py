@@ -639,7 +639,7 @@ HTML = r"""
     .media-window-head,
     .media-file-row {
       display: grid;
-      grid-template-columns: minmax(0, 1.7fr) minmax(52px, .55fr) minmax(70px, .72fr) minmax(60px, .65fr) minmax(82px, 1fr) minmax(72px, .82fr);
+      grid-template-columns: minmax(78px, .8fr) minmax(45px, .42fr) minmax(58px, .5fr) minmax(96px, .9fr) minmax(137px, 1.35fr) minmax(90px, .9fr);
       gap: 4px;
       align-items: center;
     }
@@ -677,6 +677,8 @@ HTML = r"""
       box-shadow: inset 3px 0 0 rgba(54, 211, 153, 0.9);
     }
     .media-file-row.cleanup-candidate span:first-child { text-decoration: underline dashed; text-underline-offset: 4px; }
+    .media-name-cell { cursor: text; }
+    .media-name-cell:hover { color: #fff; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
     .media-file-row span {
       overflow: hidden;
       text-overflow: ellipsis;
@@ -1343,7 +1345,7 @@ HTML = r"""
     }
     .node-table-head.agent-table-head,
     .node-row.agent-row {
-      grid-template-columns: minmax(0, 1fr) 64px 112px minmax(118px, .42fr);
+      grid-template-columns: 34px minmax(0, 1fr) 64px 112px minmax(118px, .42fr);
     }
     .node-table-head {
       position: sticky;
@@ -1358,9 +1360,10 @@ HTML = r"""
     .node-role-split .node-table-head { position: static; }
     .node-row.agent-row {
       grid-template-areas:
-        "identity online stream actions"
-        "locks locks locks locks";
-      min-height: 96px;
+        "index identity online stream actions"
+        "locks locks locks locks locks"
+        "params params params params params";
+      min-height: 118px;
     }
     .node-row {
       min-height: 76px;
@@ -1389,6 +1392,14 @@ HTML = r"""
     .node-row.control-hub .node-state { color: var(--text); }
     .node-row.offline-node, .node-space-ring-item.offline-node { opacity: .68; }
     .node-row.offline-node:hover, .node-space-ring-item.offline-node:hover { opacity: .9; }
+    .node-index {
+      grid-area: index;
+      justify-self: center;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 950;
+      font-variant-numeric: tabular-nums;
+    }
     .node-name { min-width: 0; display: grid; gap: 3px; align-content: center; }
     .node-row.agent-row .node-name { grid-area: identity; }
     .node-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1405,6 +1416,17 @@ HTML = r"""
       min-width: 0;
     }
     .node-row.agent-row .node-live-locks { grid-area: locks; }
+    .node-param-summary {
+      grid-area: params;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .node-row.agent-row.running .node-param-summary { color: #ffd1d7; }
     .node-live-field {
       display: grid;
       grid-template-columns: auto minmax(0, 1fr);
@@ -1650,11 +1672,13 @@ HTML = r"""
       .node-row.agent-row {
         grid-template-columns: minmax(0, 1fr);
         grid-template-areas:
+          "index"
           "identity"
           "online"
           "stream"
           "actions"
-          "locks";
+          "locks"
+          "params";
       }
       .node-agent-line { grid-template-columns: 1fr; }
       .node-live-locks { grid-template-columns: 1fr; }
@@ -2827,6 +2851,10 @@ HTML = r"""
       return Boolean(node.health?.stream?.running);
     }
 
+    function nodeStreamConfig(node) {
+      return node?.health?.stream_config || {};
+    }
+
     function profileName(profileId) {
       const profile = youtubeProfiles.find((item) => String(item.id) === String(profileId));
       return profile?.name || profileId || "Default";
@@ -2846,6 +2874,51 @@ HTML = r"""
       return node?.stream_lock || {};
     }
 
+    function nodeRowProfileId(node) {
+      const config = nodeStreamConfig(node);
+      return String(nodeStreaming(node) && config.youtube_profile_id ? config.youtube_profile_id : nodeProfileId(node));
+    }
+
+    function nodeRowStreamLock(node) {
+      const lock = { ...nodeStreamLock(node) };
+      if (!nodeStreaming(node)) return lock;
+      const config = nodeStreamConfig(node);
+      if (config.stream_output_mode === "youtube_api" && config.youtube_stream_id) {
+        lock.youtube_stream_id = String(config.youtube_stream_id || "");
+      } else {
+        lock.youtube_stream_id = "";
+      }
+      if (config.video_path) lock.video_path = String(config.video_path || "");
+      if (config.library_media_name) lock.library_media_name = String(config.library_media_name || "");
+      if (config.media_local !== undefined) lock.media_local = Boolean(config.media_local);
+      if (config.source_node_id) lock.source_node_id = String(config.source_node_id || "");
+      return lock;
+    }
+
+    function nodeStreamModeLabel(config) {
+      if (config.stream_output_mode === "youtube_api") return "YouTube API";
+      if (config.stream_output_mode === "local_relay") return "本地中继";
+      if (config.has_stream_key || config.stream_url) return "手动直播码";
+      return "未配置目标";
+    }
+
+    function nodeStreamParameterSummary(node) {
+      const config = nodeStreamConfig(node);
+      const hasConfig = Boolean(config.video_path || config.youtube_stream_id || config.stream_url || config.resolution || config.video_bitrate || config.fps || config.preset);
+      const prefix = nodeStreaming(node) ? "运行参数" : "最后参数";
+      if (!hasConfig) return `${prefix}：暂无`;
+      const parts = [
+        nodeStreamModeLabel(config),
+        config.resolution || "",
+        config.fps ? `${config.fps}fps` : "",
+        config.video_bitrate ? `${config.video_bitrate}kbps` : "",
+        config.audio_bitrate ? `音频${config.audio_bitrate}kbps` : "",
+        config.preset || "",
+        config.keyframe_seconds ? `关键帧${config.keyframe_seconds}s` : "",
+      ].filter(Boolean);
+      return `${prefix}：${parts.join(" · ")}`;
+    }
+
     function lockedYoutubeStreamId(node) {
       return String(nodeStreamLock(node).youtube_stream_id || node?.health?.stream_config?.youtube_stream_id || "");
     }
@@ -2854,15 +2927,14 @@ HTML = r"""
       return String(value || "").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "";
     }
 
-    function lockedYoutubeStreamLabel(node) {
-      const streamId = lockedYoutubeStreamId(node);
+    function lockedYoutubeStreamLabel(node, selectedStreamId = lockedYoutubeStreamId(node), profileId = nodeProfileId(node)) {
+      const streamId = String(selectedStreamId || "");
       if (!streamId) return "未选择直播流";
-      const stream = (youtubeStreamsByProfile[nodeProfileId(node)] || []).find((item) => String(item.id) === String(streamId));
+      const stream = (youtubeStreamsByProfile[profileId] || []).find((item) => String(item.id) === String(streamId));
       return stream?.title || streamId;
     }
 
-    function lockedVideoLabel(node) {
-      const lock = nodeStreamLock(node);
+    function lockedVideoLabel(node, lock = nodeStreamLock(node)) {
       const video = String(lock.library_media_name || pathFileName(lock.video_path) || pathFileName(node?.health?.stream_config?.video_path) || "");
       return video || "未选择视频";
     }
@@ -2873,9 +2945,8 @@ HTML = r"""
       youtubeStreamLoadState[key] = "done";
     }
 
-    function nodeYoutubeStreamOptions(node) {
-      const profileId = nodeProfileId(node);
-      const selected = lockedYoutubeStreamId(node);
+    function nodeYoutubeStreamOptions(node, selectedStreamId = lockedYoutubeStreamId(node), profileId = nodeProfileId(node)) {
+      const selected = String(selectedStreamId || "");
       const streams = youtubeStreamsByProfile[profileId] || [];
       const hasSelected = selected && streams.some((item) => String(item.id) === selected);
       const options = [`<option value="">选择直播流</option>`];
@@ -2892,8 +2963,7 @@ HTML = r"""
       return options.join("");
     }
 
-    function nodeVideoOptions(node) {
-      const lock = nodeStreamLock(node);
+    function nodeVideoOptions(node, lock = nodeStreamLock(node)) {
       const selectedLibrary = String(lock.library_media_name || "");
       const selectedVideo = String(lock.video_path || node?.health?.stream_config?.video_path || "");
       const resources = mediaLibrary.resources || [];
@@ -3045,17 +3115,24 @@ HTML = r"""
       `;
     }
 
-    function renderNodeRow(node) {
+    function renderNodeRow(node, rowIndex) {
       const h = node.health || {};
       const online = Boolean(node.roles?.agent?.enabled ?? nodeOnline(node));
       const streaming = nodeStreaming(node);
       const selected = String(node.id) === String(selectedNodeId);
-      const currentProfileName = profileName(nodeProfileId(node));
-      const currentStreamName = lockedYoutubeStreamLabel(node);
-      const currentVideoName = lockedVideoLabel(node);
+      const rowProfileId = nodeRowProfileId(node);
+      const rowLock = nodeRowStreamLock(node);
+      const rowStreamId = String(rowLock.youtube_stream_id || "");
+      const currentProfileName = profileName(rowProfileId);
+      const currentStreamName = lockedYoutubeStreamLabel(node, rowStreamId, rowProfileId);
+      const currentVideoName = lockedVideoLabel(node, rowLock);
+      const parameterSummary = nodeStreamParameterSummary(node);
+      const lockHint = streaming ? "正在推流，停止后才能修改" : "停止状态，可调整下次推流参数";
+      const lockAttr = streaming ? "disabled aria-disabled=\"true\"" : "";
       const agentVersion = h.agent?.version || "未识别";
       return `
-        <div class="node-row agent-row ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="点击选中；删除/取消角色请打开后面的设置">
+        <div class="node-row agent-row ${streaming ? "running" : ""} ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="点击选中；删除/取消角色请打开后面的设置">
+          <span class="node-index">${rowIndex + 1}</span>
           <span class="node-name">
             <span class="node-agent-line">
               <strong class="node-name-edit" data-node-name-edit data-node-id="${escapeHtml(node.id)}" title="双击修改 Agent 名称">${escapeHtml(node.name || node.id)}</strong>
@@ -3072,16 +3149,17 @@ HTML = r"""
             <span class="node-version-pill" title="版本 ${escapeHtml(agentVersion)}">${escapeHtml(agentVersion)}</span>
           </span>
           <div class="node-live-locks">
-            <label class="node-live-field" title="当前 Profile：${escapeHtml(currentProfileName)}"><span class="node-live-label">Profile</span>
-              <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="当前 Profile：${escapeHtml(currentProfileName)}">${profileOptions(nodeProfileId(node))}</select>
+            <label class="node-live-field" title="${escapeHtml(lockHint)}：${escapeHtml(currentProfileName)}"><span class="node-live-label">Profile</span>
+              <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(lockHint)}：${escapeHtml(currentProfileName)}" ${lockAttr}>${profileOptions(rowProfileId)}</select>
             </label>
-            <label class="node-live-field" title="当前直播流：${escapeHtml(currentStreamName)}"><span class="node-live-label">直播流</span>
-              <select class="node-live-select" data-node-stream-select data-node-id="${escapeHtml(node.id)}" title="当前直播流：${escapeHtml(currentStreamName)}">${nodeYoutubeStreamOptions(node)}</select>
+            <label class="node-live-field" title="${escapeHtml(lockHint)}：${escapeHtml(currentStreamName)}"><span class="node-live-label">直播流</span>
+              <select class="node-live-select" data-node-stream-select data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(lockHint)}：${escapeHtml(currentStreamName)}" ${lockAttr}>${nodeYoutubeStreamOptions(node, rowStreamId, rowProfileId)}</select>
             </label>
-            <label class="node-live-field" title="当前视频：${escapeHtml(currentVideoName)}"><span class="node-live-label">视频</span>
-              <select class="node-live-select" data-node-video-select data-node-id="${escapeHtml(node.id)}" title="当前视频：${escapeHtml(currentVideoName)}">${nodeVideoOptions(node)}</select>
+            <label class="node-live-field" title="${escapeHtml(lockHint)}：${escapeHtml(currentVideoName)}"><span class="node-live-label">视频</span>
+              <select class="node-live-select" data-node-video-select data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(lockHint)}：${escapeHtml(currentVideoName)}" ${lockAttr}>${nodeVideoOptions(node, rowLock)}</select>
             </label>
           </div>
+          <div class="node-param-summary" title="${escapeHtml(parameterSummary)}">${escapeHtml(parameterSummary)}</div>
         </div>
       `;
     }
@@ -3130,12 +3208,13 @@ HTML = r"""
       refs.nodeMonitor.innerHTML = renderMonitor(selectedNode());
       refs.nodeList.innerHTML = agentRows.length ? `
         <div class="node-table-head agent-table-head">
+          <span>#</span>
           <span>Agent / 直播目标</span>
           <span>在线</span>
           <span>推流</span>
           <span>设置 / 版本</span>
         </div>
-        ${agentRows.map((node) => renderNodeRow(node)).join("")}
+        ${agentRows.map((node, index) => renderNodeRow(node, index)).join("")}
       ` : `<div class="empty-state">还没有配置 Agent 节点。</div>`;
       refs.hubNodeList.innerHTML = activeHubs.length ? `
         <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
@@ -3301,7 +3380,7 @@ HTML = r"""
             const cleanupCandidate = Math.floor(ageDays / 3) >= 5;
             return `
               <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""} ${cleanupCandidate ? "cleanup-candidate" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-profile-names="${escapeHtml(resourceProfileLabel(item))}" data-copy-names="${escapeHtml(copyNames)}" data-copy-count="${escapeHtml(copies.length)}" data-last-used-label="${escapeHtml(lastUsedLabels || "从未开播")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
-                <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                <span class="media-name-cell" data-media-rename-name title="${escapeHtml(name)}">${escapeHtml(name)}</span>
                 <span class="muted">${escapeHtml(fmtBytes(item.size || 0))}</span>
                 <span class="muted">${escapeHtml(item.modified_label || "--")}</span>
                 <span>${escapeHtml(resourceProfileLabel(item))}</span>
@@ -5806,16 +5885,19 @@ HTML = r"""
     refs.nodeList.addEventListener("change", (event) => {
       const profileEl = event.target.closest("[data-node-profile-select]");
       if (profileEl) {
+        if (profileEl.disabled) return;
         saveNodeYouTubeProfile(profileEl);
         return;
       }
       const streamEl = event.target.closest("[data-node-stream-select]");
       if (streamEl) {
+        if (streamEl.disabled) return;
         saveNodeStreamLock(streamEl.dataset.nodeId, { youtube_stream_id: streamEl.value || "" }, streamEl);
         return;
       }
       const videoEl = event.target.closest("[data-node-video-select]");
       if (videoEl) {
+        if (videoEl.disabled) return;
         saveNodeStreamLock(videoEl.dataset.nodeId, videoLockFromOption(videoEl.selectedOptions[0]), videoEl);
       }
     });
@@ -5963,7 +6045,13 @@ HTML = r"""
     });
     refs.mediaList.addEventListener("dblclick", (event) => {
       const row = event.target.closest("[data-media-row]");
-      if (row) handleMediaAction("inspect", row);
+      if (!row) return;
+      if (event.target.closest("[data-media-rename-name]")) {
+        event.preventDefault();
+        handleMediaAction("rename", row);
+        return;
+      }
+      handleMediaAction("inspect", row);
     });
     refs.mediaList.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
