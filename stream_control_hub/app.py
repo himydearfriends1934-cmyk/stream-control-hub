@@ -867,7 +867,46 @@ HTML = r"""
     .grid { display: grid; grid-template-columns: minmax(520px, 0.92fr) minmax(600px, 1.08fr); gap: 12px; margin-top: 10px; align-items: start; }
     .left-stack, .side-stack { display: grid; gap: 10px; align-content: start; min-width: 0; }
     .grid > .side-stack { align-self: start; grid-template-rows: auto; }
-    .bottom-section { grid-column: 1 / -1; display: grid; grid-template-columns: 0.9fr 1.15fr 1.35fr; gap: 10px; }
+    .top-utility-strip {
+      display: grid;
+      grid-template-columns: minmax(250px, .8fr) minmax(390px, 1.25fr) minmax(230px, .7fr);
+      gap: 8px;
+      margin-top: 10px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(7, 18, 14, .46);
+    }
+    .top-utility-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 9px;
+      align-items: center;
+      min-width: 0;
+      padding: 6px 8px;
+      border-right: 1px solid var(--line);
+    }
+    .top-utility-item:last-child { border-right: 0; }
+    .top-utility-item > span { min-width: 0; }
+    .top-utility-item strong, .top-utility-item small { display: block; }
+    .top-utility-item strong { font-size: 13px; }
+    .top-utility-item small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .top-utility-item button, .top-utility-item summary { min-height: 36px; }
+    .api-utility-item button { min-width: 92px; }
+    .top-log-panel {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: rgba(7, 18, 14, .34);
+    }
+    .top-log-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .top-log-head h2 { margin: 0; font-size: 14px; }
+    .top-log-head small { color: var(--muted); font-size: 11px; }
+    .top-log-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .top-log-grid > div { min-width: 0; }
+    .top-log-grid strong { display: block; margin: 5px 0 3px; color: #d6fff0; font-size: 11px; }
+    .top-log-grid pre { min-height: 48px; max-height: 92px; margin: 0; }
     .card {
       border: 1px solid var(--line);
       border-radius: 12px;
@@ -2048,7 +2087,7 @@ HTML = r"""
     .mono { font-family: "Cascadia Mono", "Consolas", monospace; word-break: break-word; }
     .compact-card { padding: 10px; }
     .log-card { display: grid; gap: 8px; }
-    .log-card pre { min-height: 58px; max-height: 120px; }
+    .top-log-panel.log-card pre { min-height: 48px; max-height: 92px; }
     .node strong, .media strong { display: block; }
     .node small, .media small { color: var(--muted); }
     .resource-card, .upload-card { display: grid; gap: 8px; }
@@ -2105,8 +2144,9 @@ HTML = r"""
       .media-window-head, .media-file-row { min-width: 520px; }
     }
     @media (max-width: 1080px) {
-      .grid, .split, .hero, .task-flow, .node-detail, .bottom-section, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
-      .bottom-section { grid-column: auto; }
+      .grid, .split, .hero, .task-flow, .node-detail, .top-utility-strip, .top-log-grid, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
+      .top-utility-item { border-right: 0; border-bottom: 1px solid var(--line); }
+      .top-utility-item:last-child { border-bottom: 0; }
       .monitor-card, .node-table-card { min-height: auto; }
       .node-monitor { min-height: 420px; }
       .node-table { max-height: none; }
@@ -2186,6 +2226,42 @@ HTML = r"""
     </section>
     <div class="flow-status" id="flowStatus" aria-live="polite">先接入或选择一台推流服务器，然后上传/选择视频即可开播。</div>
 
+    <section class="top-utility-strip" aria-label="系统快捷操作">
+      <div class="top-utility-item">
+        <span><strong>Agent 快速连接</strong><small>通过 Tailscale 地址接入节点</small></span>
+        <button class="primary" id="tailscaleWizardBtn">连接 Agent</button>
+      </div>
+      <div class="top-utility-item github-utility-item">
+        <span><strong>GitHub 更新</strong><small>检查版本或复制安装命令</small></span>
+        <div class="actions github-update-actions">
+          <button id="checkUpdatesBtn">检查并更新</button>
+          <details class="github-update-more" id="githubUpdateMore">
+            <summary>功能</summary>
+            <div class="github-update-menu">
+              <button id="showInstallCommandsBtn">显示安装命令</button>
+              <button id="copyHubInstallBtn">复制 Hub 命令</button>
+              <button id="copyAgentInstallQuickBtn">复制 Agent 命令</button>
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="top-utility-item api-utility-item">
+        <span><strong>YouTube API</strong><small>授权、直播流与自动调参</small></span>
+        <button id="youtubeWizardBtn">YouTube API</button>
+      </div>
+    </section>
+
+    <section class="top-log-panel log-card">
+      <div class="top-log-head">
+        <h2>策略 / 审计 / 操作日志</h2>
+        <small>策略、推送审计和最近操作集中显示</small>
+      </div>
+      <div class="top-log-grid">
+        <div><strong>策略 / 审计</strong><pre id="updateBox">点击 Upload Policy 或 Push Audit 查看系统规则与最近推送记录。</pre></div>
+        <div><strong>操作日志</strong><pre id="logBox">就绪。</pre></div>
+      </div>
+    </section>
+
     <section class="card command-strip">
       <div class="command-head">
         <div>
@@ -2232,7 +2308,6 @@ HTML = r"""
         </div>
         <div class="command-actions">
           <button id="previewTuneBtn">预览调优</button>
-          <button id="youtubeWizardBtn">YouTube API</button>
           <button class="primary" id="smartStartBtn">Smart Start</button>
         </div>
         <details class="command-advanced" id="commandAdvanced">
@@ -2361,35 +2436,6 @@ HTML = r"""
         </div>
       </div>
 
-      <div class="bottom-section">
-        <div class="card compact-card">
-          <h2>GitHub 更新</h2>
-          <p>每天首次打开自动检查；有新版本会弹窗确认。也可复制 GitHub 一键安装/升级命令。</p>
-          <div class="actions github-update-actions">
-            <button id="checkUpdatesBtn">检查并更新</button>
-            <details class="github-update-more" id="githubUpdateMore">
-              <summary>功能</summary>
-              <div class="github-update-menu">
-                <button id="showInstallCommandsBtn">显示安装命令</button>
-                <button id="copyHubInstallBtn">复制 Hub 命令</button>
-                <button id="copyAgentInstallQuickBtn">复制 Agent 命令</button>
-              </div>
-            </details>
-          </div>
-        </div>
-        <div class="card compact-card">
-          <h2>Agent 快速连接</h2>
-          <p>输入目标服务器的 Tailscale IP，自动检测同一 Tailnet、Agent 服务并完成授权。</p>
-          <div class="actions">
-            <button class="primary" id="tailscaleWizardBtn">连接 Agent</button>
-          </div>
-        </div>
-        <div class="card compact-card log-card">
-          <h2>策略 / 审计 / 操作日志</h2>
-          <pre id="updateBox">点击 Upload Policy 或 Push Audit 查看系统规则与最近推送记录。</pre>
-          <pre id="logBox">就绪。</pre>
-        </div>
-      </div>
     </section>
   </div>
 
@@ -3469,7 +3515,7 @@ HTML = r"""
             <span>先在目标 VPS 安装 Agent，然后输入它的 Tailscale 100.x 地址，系统会自动检测并接入。</span>
             <div class="actions">
               <button class="primary" data-open-connect>接入推流服务器</button>
-              <button data-scroll-target=".bottom-section">查看安装命令</button>
+              <button data-scroll-target=".top-utility-strip">查看安装命令</button>
             </div>
           </div>
         `;
