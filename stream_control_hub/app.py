@@ -2370,7 +2370,7 @@ HTML = r"""
     .dashboard-grid .command-strip { grid-column: span 12; }
     .dashboard-grid .resource-card { grid-column: span 7; order: initial; }
     .dashboard-grid .monitor-card { grid-column: span 7; }
-    .dashboard-grid .node-table-card { grid-column: span 5; }
+    .dashboard-grid .node-table-card { grid-column: span 5; grid-row: span 2; }
     .dashboard-grid .upload-card { grid-column: span 12; }
     .dashboard-grid .upload-stack { display: contents; }
     .dashboard-source-grid { display: none; }
@@ -2381,7 +2381,7 @@ HTML = r"""
     }
     @media (max-width: 1080px) {
       .dashboard-grid { grid-template-columns: 1fr; }
-      .dashboard-grid .dashboard-module { grid-column: span 12 !important; height: auto !important; }
+      .dashboard-grid .dashboard-module { grid-column: span 12 !important; grid-row: auto !important; height: auto !important; }
       .grid, .split, .hero, .task-flow, .node-detail, .top-utility-strip, .top-log-grid, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .top-utility-item { border-right: 0; border-bottom: 1px solid var(--line); }
       .top-utility-item:last-child { border-bottom: 0; }
@@ -3080,7 +3080,7 @@ HTML = r"""
         // Browser storage may be unavailable in private or restricted contexts.
       }
     }
-    const DASHBOARD_LAYOUT_STORAGE_KEY = "streamHub.dashboardLayout.v2";
+    const DASHBOARD_LAYOUT_STORAGE_KEY = "streamHub.dashboardLayout.v3";
     const DASHBOARD_MODULES = [
       { id: "connect", selector: ".utility-connect", title: "Agent 快速连接", span: 4 },
       { id: "github", selector: ".github-utility-item", title: "GitHub 更新", span: 5 },
@@ -3088,7 +3088,7 @@ HTML = r"""
       { id: "logs", selector: ".top-log-panel", title: "审计与操作日志", span: 12 },
       { id: "command", selector: ".command-strip", title: "开播指挥条", span: 12 },
       { id: "monitor", selector: ".monitor-card", title: "节点监控", span: 7 },
-      { id: "nodes", selector: ".node-table-card", title: "VPS 节点表", span: 5 },
+      { id: "nodes", selector: ".node-table-card", title: "VPS 节点表", span: 5, rowSpan: 2 },
       { id: "resources", selector: ".resource-card", title: "资源管理", span: 7 },
       { id: "upload", selector: ".upload-card", title: "上传模块", span: 12 },
     ];
@@ -3110,6 +3110,7 @@ HTML = r"""
       [...refs.dashboardGrid.querySelectorAll("[data-dashboard-module]")].forEach((module) => {
         modules[module.dataset.dashboardModule] = {
           span: Number(module.dataset.dashboardSpan || 6),
+          rowSpan: Number(module.dataset.dashboardRowSpan || 1),
           height: module.dataset.dashboardHeight ? Number(module.dataset.dashboardHeight) : null,
         };
       });
@@ -3250,6 +3251,9 @@ HTML = r"""
         const span = Math.max(3, Math.min(12, Number(savedModule.span || config.span)));
         module.dataset.dashboardSpan = String(span);
         module.style.gridColumn = `span ${span}`;
+        const rowSpan = Math.max(1, Math.min(4, Number(savedModule.rowSpan || config.rowSpan || 1)));
+        module.dataset.dashboardRowSpan = String(rowSpan);
+        module.style.gridRow = `span ${rowSpan}`;
         if (savedModule.height) {
           module.dataset.dashboardHeight = String(Math.max(120, Number(savedModule.height)));
           module.style.height = `${module.dataset.dashboardHeight}px`;
