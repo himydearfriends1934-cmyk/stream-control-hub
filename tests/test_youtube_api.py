@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from stream_control_hub.youtube_api import YouTubeAPIClient, youtube_health_recommendation
+from stream_control_hub.youtube_api import YouTubeAPIClient, YouTubeAPIError, youtube_health_recommendation
 
 
 class FakeResponse:
@@ -21,6 +21,65 @@ class FakeResponse:
 
 
 class YouTubeAPIClientTests(unittest.TestCase):
+    def test_hub_marks_revoked_refresh_token_as_reauthorization_required(self):
+        from stream_control_hub import app
+
+        with app.APP.app_context():
+            response, status = app.youtube_error_response(
+                YouTubeAPIError("Token has been expired or revoked", status_code=400, reason="invalid_grant")
+            )
+
+        self.assertEqual(status, 400)
+        self.assertTrue(response.get_json()["reauthorize_required"])
+
+    def test_profile_config_save_is_atomic(self):
+        from stream_control_hub import app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile_file = root / "youtube_profiles.json"
+            credentials_dir = root / "profile_credentials"
+            payload = {"version": 1, "active_profile_id": "default", "profiles": [{"id": "default"}]}
+            with patch.object(app, "DATA_DIR", root), patch.object(
+                app,
+                "YOUTUBE_PROFILES_FILE",
+                profile_file,
+            ), patch.object(app, "YOUTUBE_PROFILE_CREDENTIALS_DIR", credentials_dir):
+                app.save_youtube_profiles_config(payload)
+
+            saved = json.loads(profile_file.read_text(encoding="utf-8"))
+            leftovers = list(root.glob(".youtube_profiles.json.*.tmp"))
+
+        self.assertEqual(saved, payload)
+        self.assertEqual(leftovers, [])
+
+    def test_default_profile_rebuilds_stale_global_client_from_saved_profile(self):
+        from stream_control_hub import app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            credential_path = Path(tmp) / "default.json"
+            profile = {
+                "id": "default",
+                "name": "KIANA",
+                "client_id": "saved-client-id",
+                "client_secret": "saved-client-secret",
+                "credential_file": str(credential_path),
+            }
+            stale = YouTubeAPIClient(
+                client_id="",
+                client_secret="",
+                credential_path=credential_path,
+            )
+            with patch.object(
+                app,
+                "load_youtube_profiles_config",
+                return_value={"active_profile_id": "default", "profiles": [profile]},
+            ), patch.object(app, "YOUTUBE_CLIENT", stale):
+                client = app.youtube_client_for_id("default")
+
+        self.assertEqual(client.client_id, "saved-client-id")
+        self.assertEqual(client.client_secret, "saved-client-secret")
+
     def test_device_authorization_stores_only_agent_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
             credential_path = Path(tmp) / "youtube_credentials.json"
@@ -279,14 +338,16 @@ class YouTubeAPIClientTests(unittest.TestCase):
             nodes_file = Path(tmp) / "nodes.json"
             settings_file = Path(tmp) / "hub-settings.json"
             nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            youtube_client = MagicMock()
+            youtube_client.ingestion_target.return_value = "rtmp://example.test/live2/private-stream-name"
             with patch.object(app, "NODES_FILE", nodes_file), patch.object(
                 app,
                 "HUB_SETTINGS_FILE",
                 settings_file,
             ), patch.object(
-                app.YOUTUBE_CLIENT,
-                "ingestion_target",
-                return_value="rtmp://example.test/live2/private-stream-name",
+                app,
+                "youtube_client_for_id",
+                return_value=youtube_client,
             ), patch.object(
                 app,
                 "post_node_json",
@@ -596,6 +657,10 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertIn("function saveYouTubeProfileName", app.HTML)
         self.assertIn("overflow-x: auto", app.HTML)
         self.assertNotIn('class="youtube-profile-name-line', app.HTML)
+        self.assertIn("YOUTUBE_STREAM_CACHE_TTL_MS", app.HTML)
+        self.assertIn("invalidateYouTubeStreams", app.HTML)
+        self.assertIn("preloadNodeYouTubeStreams({ force: true })", app.HTML)
+        self.assertIn("YOUTUBE_PROFILE_REFRESH_MS", app.HTML)
         self.assertNotIn('id="youtubeNodeInput" type="text"', app.HTML)
 
     def test_youtube_health_recommendation_reduces_high_bitrate(self):

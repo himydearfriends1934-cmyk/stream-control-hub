@@ -210,10 +210,13 @@ The Hub is a coordinator, not the media warehouse. Browser uploads go straight t
 - Failed pushes call `/api/upload-chunk/cancel` through the node `base_url`, then close the public window if one was opened.
 - Public routes must pass `/api/upload-probe` and the minimum speed threshold before large chunks are sent.
 - Uploads and Agent-to-Agent sharing are public-only. If no public address is configured, the public probe fails, or a public transfer is interrupted, the operation stops with an explicit error and never falls back to the Tailscale/internal `base_url`.
+- Before an Agent-to-Agent task is created, the source Agent now probes the target's exact public upload route and TCP port with a short-lived ticket. The Hub also checks source media, target reachability, duplicate filenames, disk reserve, public-origin discovery, ticket issuance, and minimum probe speed; failures open a repair guide instead of waiting for chunk timeouts.
 - Each push writes a token-free audit event with policy, route, probe, speed, fallback, and cleanup details.
 - The global media library aggregates every online Agent, sorts videos by upload time, filters by YouTube Profile, and shows per-node disk usage.
+- A video's Profile is stored as file-level Hub metadata and can be changed directly from the resource manager's right-click menu; all copies grouped under the same filename share that Profile.
 - Uploads inherit the selected Agent's YouTube Profile and still go directly to the currently selected Agent.
 - Smart Start can select any grouped library item. If the target Agent has no local copy, the Hub copies one from an online source Agent over the public-only transfer route before streaming.
+- Hub upgrades preserve the default YouTube Profile's OAuth client settings and credential path. Saved Profile configuration is authoritative after restart, while browser stream caches expire, retry after failures, and refresh periodically.
 - Media filenames preserve Unicode, including Chinese, Japanese, spaces, and full-width punctuation; only path/control characters and unsafe ASCII filename characters are removed.
 - Every Agent-to-Agent copy is verified by SHA-256 and size. Verified source/new-copy pairs coexist for 72 hours; after that, automatic cleanup rechecks that both complete copies still exist before deleting the older source copy.
 - Automatic and batch cleanup can delete verified duplicate copies only. It never deletes the final/only copy of a video. Single-copy deletion remains an explicit manual action.
@@ -344,6 +347,8 @@ data/nodes.local.json
 ```
 
 `base_url` 建议使用 Tailscale IP 或内网地址。`token` 是 Agent 安装时生成的控制令牌，Hub 会自动带上它访问 Agent。
+
+Agent 之间的视频互传仍然只走公网，不会回退 Tailscale。创建互传任务前，源 Agent 会直接检测目标公网地址和 TCP 8787，同时检查临时上传票据、上传探针速度、磁盘空间及同名文件冲突。检测失败时 Hub 会弹出逐项结果和修复向导，提示检查云安全组、本机防火墙、`0.0.0.0:8787` 监听状态、Agent 版本或 `STREAM_AGENT_PUBLIC_ORIGIN`。
 
 
 公网文件上传说明：

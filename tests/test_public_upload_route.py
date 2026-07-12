@@ -64,6 +64,77 @@ class PublicOriginDiscoveryTests(unittest.TestCase):
 
 
 class HubPublicUploadRouteTests(unittest.TestCase):
+    def test_agent_share_preflight_checks_public_route_from_source_agent(self):
+        from stream_control_hub import app
+
+        source = {"id": "source", "name": "Source", "base_url": "http://100.64.0.10:8787"}
+        target = {"id": "target", "name": "Target", "base_url": "http://100.64.0.20:8787"}
+
+        def node_json(node, path, timeout=10):
+            if path == "/api/status":
+                return {"ok": True, "disk": {"free": 20 * 1024 ** 3}, "videos": []}
+            if path == "/api/public-upload":
+                return {"ok": True, "supported": True, "public_origin": "http://165.99.42.174:8787"}
+            raise AssertionError(path)
+
+        def node_post(node, path, payload, timeout=15):
+            self.assertEqual(node["id"], "source")
+            self.assertEqual(path, "/api/share-media/preflight")
+            self.assertEqual(payload["target_base_url"], "http://165.99.42.174:8787")
+            return {
+                "ok": True,
+                "route": "http://165.99.42.174:8787",
+                "probe": {"ok": True, "rate_label": "12 MB/s"},
+            }
+
+        with patch.object(
+            app,
+            "request_node_media_info",
+            return_value={"ok": True, "name": "video.mp4", "size": 1024},
+        ), patch.object(app, "request_node_json", side_effect=node_json), patch.object(
+            app,
+            "request_node_upload_ticket",
+            return_value={"ok": True, "ticket": "preflight-ticket"},
+        ), patch.object(app, "post_node_json", side_effect=node_post), patch.object(
+            app,
+            "post_url_json",
+            return_value={"ok": True},
+        ):
+            result = app.share_transfer_preflight(source, [target], "video.mp4")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["targets"][0]["ok"])
+        self.assertEqual(result["targets"][0]["route"], "http://165.99.42.174:8787")
+
+    def test_share_api_returns_repairable_preflight_failure_before_task(self):
+        from stream_control_hub import app
+
+        source = {"id": "source", "name": "Source", "enabled": True}
+        target = {"id": "target", "name": "Target", "enabled": True}
+
+        def lookup(node_id):
+            return source if node_id == "source" else target if node_id == "target" else None
+
+        preflight = {
+            "ok": False,
+            "message": "公网互传预检未通过",
+            "repair_steps": ["放行 TCP 8787"],
+            "targets": [{"node_id": "target", "ok": False}],
+        }
+        with patch.object(app, "node_by_id", side_effect=lookup), patch.object(
+            app,
+            "share_transfer_preflight",
+            return_value=preflight,
+        ):
+            response = app.APP.test_client().post(
+                "/api/media/share",
+                json={"source_node_id": "source", "target_node_ids": ["target"], "media": "video.mp4"},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["reason"], "share_preflight_failed")
+        self.assertEqual(response.get_json()["preflight"]["repair_steps"], ["放行 TCP 8787"])
+
     def test_upload_target_prefers_agent_discovered_public_origin(self):
         from stream_control_hub import app
 
@@ -155,6 +226,32 @@ class HubPublicUploadRouteTests(unittest.TestCase):
 
 
 class AgentUploadIntegrityTests(unittest.TestCase):
+    def test_agent_preflight_probes_public_upload_with_ticket(self):
+        from stream_control_hub import headless_agent
+
+        response = type("Response", (), {
+            "ok": True,
+            "status_code": 200,
+            "text": "",
+            "json": lambda self: {"ok": True},
+        })()
+        with patch.object(headless_agent, "CONTROL_TOKEN", ""), patch.object(
+            headless_agent.requests,
+            "post",
+            return_value=response,
+        ) as post:
+            result = headless_agent.APP.test_client().post(
+                "/api/share-media/preflight",
+                json={
+                    "target_base_urls": ["http://165.99.42.174:8787"],
+                    "target_upload_ticket": "ticket",
+                    "probe_bytes": 1024,
+                },
+            )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.get_json()["ok"])
+        self.assertEqual(post.call_args.kwargs["headers"]["X-Upload-Ticket"], "ticket")
     def test_agent_share_accepts_only_public_target_urls(self):
         from stream_control_hub import headless_agent
 

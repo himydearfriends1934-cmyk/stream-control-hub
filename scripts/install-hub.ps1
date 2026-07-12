@@ -108,6 +108,9 @@ $token = ""
 $existingHost = ""
 $existingPort = 0
 $existingTrustedRemoteWrites = ""
+$existingYoutubeClientId = ""
+$existingYoutubeClientSecret = ""
+$existingYoutubeCredentialFile = ""
 if (Test-Path $envFile) {
   $existing = Select-String -LiteralPath $envFile -Pattern "^STREAM_HUB_CONTROL_TOKEN=(.+)$" -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($existing) { $token = $existing.Matches[0].Groups[1].Value }
@@ -117,6 +120,12 @@ if (Test-Path $envFile) {
   if ($existing) { $existingPort = [int]$existing.Matches[0].Groups[1].Value }
   $existing = Select-String -LiteralPath $envFile -Pattern "^STREAM_HUB_TRUSTED_REMOTE_WRITES=(.+)$" -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($existing) { $existingTrustedRemoteWrites = $existing.Matches[0].Groups[1].Value }
+  $existing = Select-String -LiteralPath $envFile -Pattern "^YOUTUBE_CLIENT_ID=(.*)$" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($existing) { $existingYoutubeClientId = $existing.Matches[0].Groups[1].Value }
+  $existing = Select-String -LiteralPath $envFile -Pattern "^YOUTUBE_CLIENT_SECRET=(.*)$" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($existing) { $existingYoutubeClientSecret = $existing.Matches[0].Groups[1].Value }
+  $existing = Select-String -LiteralPath $envFile -Pattern "^YOUTUBE_CREDENTIAL_FILE=(.*)$" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($existing) { $existingYoutubeCredentialFile = $existing.Matches[0].Groups[1].Value }
 }
 if (-not $token) { $token = New-Token }
 if (-not $HostName) { $HostName = if ($existingHost) { $existingHost } else { "127.0.0.1" } }
@@ -124,6 +133,9 @@ if ($Port -le 0) { $Port = if ($existingPort -gt 0) { $existingPort } else { 878
 if (-not $TrustedRemoteWrites) {
   $TrustedRemoteWrites = if ($existingTrustedRemoteWrites) { $existingTrustedRemoteWrites } else { "0" }
 }
+$youtubeClientId = if ($env:YOUTUBE_CLIENT_ID) { $env:YOUTUBE_CLIENT_ID } else { $existingYoutubeClientId }
+$youtubeClientSecret = if ($env:YOUTUBE_CLIENT_SECRET) { $env:YOUTUBE_CLIENT_SECRET } else { $existingYoutubeClientSecret }
+$youtubeCredentialFile = if ($env:YOUTUBE_CREDENTIAL_FILE) { $env:YOUTUBE_CREDENTIAL_FILE } elseif ($existingYoutubeCredentialFile) { $existingYoutubeCredentialFile } else { Join-Path $dataDir "youtube_credentials.json" }
 if ($TrustedRemoteWrites -match "^(?i:1|true|yes)$") {
   $TrustedRemoteWrites = "1"
 } elseif ($TrustedRemoteWrites -match "^(?i:0|false|no)$") {
@@ -138,6 +150,9 @@ if ($TrustedRemoteWrites -match "^(?i:1|true|yes)$") {
   "STREAM_HUB_HOST=$HostName",
   "STREAM_HUB_PORT=$Port",
   "STREAM_HUB_TRUSTED_REMOTE_WRITES=$TrustedRemoteWrites"
+  "YOUTUBE_CLIENT_ID=$youtubeClientId"
+  "YOUTUBE_CLIENT_SECRET=$youtubeClientSecret"
+  "YOUTUBE_CREDENTIAL_FILE=$youtubeCredentialFile"
 ) | Set-Content -LiteralPath $envFile -Encoding UTF8
 
 $runScript = Join-Path $InstallDir "run-hub.ps1"
