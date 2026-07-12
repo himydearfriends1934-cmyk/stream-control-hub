@@ -765,22 +765,22 @@ HTML = r"""
   <title>Stream Control Hub</title>
   <style>
     :root {
-      --bg: #0c1110;
-      --panel: #13201c;
-      --panel-2: #192b25;
-      --line: #31594c;
-      --text: #effdf6;
-      --muted: #9fc8b8;
-      --accent: #36d399;
-      --accent-2: #54c6eb;
-      --bad: #fb7185;
-      --warn: #fbbf24;
-      --body-bg: radial-gradient(circle at 12% 10%, rgba(54, 211, 153, 0.16), transparent 28%), radial-gradient(circle at 88% 0%, rgba(84, 198, 235, 0.14), transparent 24%), linear-gradient(135deg, #08100d, #111917 45%, #090d0c);
-      --panel-bg: rgba(19, 32, 28, 0.9);
+      --bg: #090e11;
+      --panel: #11191e;
+      --panel-2: #182229;
+      --line: #2b3a42;
+      --text: #edf2f4;
+      --muted: #94a3aa;
+      --accent: #35c487;
+      --accent-2: #58b9d2;
+      --bad: #ef6b78;
+      --warn: #e4ad45;
+      --body-bg: #090e11;
+      --panel-bg: #11191e;
     }
-    :root[data-theme="midnight"] { --bg:#080d18; --panel:#101a2d; --panel-2:#17243b; --line:#304d78; --text:#eef5ff; --muted:#9fb4d2; --accent:#55a7ff; --accent-2:#7ee7ff; --body-bg:radial-gradient(circle at 85% 5%,rgba(85,167,255,.2),transparent 28%),linear-gradient(135deg,#050914,#0d1728 55%,#060b14); --panel-bg:rgba(16,26,45,.92); }
-    :root[data-theme="violet"] { --bg:#130b1c; --panel:#25142f; --panel-2:#34203f; --line:#68437a; --text:#fff4ff; --muted:#d1acd9; --accent:#d97cff; --accent-2:#ff9fcf; --body-bg:radial-gradient(circle at 15% 5%,rgba(217,124,255,.2),transparent 30%),linear-gradient(135deg,#100718,#25102c 52%,#0d0713); --panel-bg:rgba(37,20,47,.92); }
-    :root[data-theme="light"] { --bg:#edf4f1; --panel:#ffffff; --panel-2:#edf5f2; --line:#9ab8ad; --text:#15251f; --muted:#577268; --accent:#18a873; --accent-2:#2b93bc; --body-bg:linear-gradient(135deg,#e7f2ed,#f8fbfa 48%,#e8f1f6); --panel-bg:rgba(255,255,255,.94); }
+    :root[data-theme="midnight"] { --bg:#080d15; --panel:#101923; --panel-2:#172330; --line:#2f465b; --text:#edf4f8; --muted:#98aabd; --accent:#4ca6dc; --accent-2:#59c5a6; --body-bg:#080d15; --panel-bg:#101923; }
+    :root[data-theme="violet"] { --bg:#100e13; --panel:#1a171e; --panel-2:#24202a; --line:#463d4e; --text:#f5f1f6; --muted:#aaa0ae; --accent:#d47fba; --accent-2:#67b9ca; --body-bg:#100e13; --panel-bg:#1a171e; }
+    :root[data-theme="light"] { --bg:#eef2f3; --panel:#ffffff; --panel-2:#f2f5f6; --line:#c6d0d4; --text:#172126; --muted:#5e6e75; --accent:#178d65; --accent-2:#287f9d; --body-bg:#eef2f3; --panel-bg:#ffffff; }
     * { box-sizing: border-box; }
     body {
       margin: 0;
@@ -2159,12 +2159,204 @@ HTML = r"""
       color: #c9f7e7;
     }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+    /* Dense operations-workspace layout. */
+    body { background: var(--body-bg); line-height: 1.35; }
+    .wrap { max-width: 1600px; padding: 10px; }
+    .hero {
+      min-height: 64px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      background: var(--panel-bg);
+      box-shadow: none;
+    }
+    .hero h1 { font-size: 22px; }
+    .hero p { max-width: 880px; margin-top: 3px; font-size: 12px; }
+    .hero .actions { justify-content: flex-end; }
+    .hero button, .hero select { min-height: 34px; padding: 7px 10px; }
+    .task-flow {
+      grid-template-columns: repeat(4, minmax(110px, 1fr));
+      gap: 0;
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      overflow: hidden;
+      background: var(--panel);
+    }
+    .task-card {
+      min-height: 38px;
+      place-items: center;
+      padding: 7px 10px;
+      border: 0;
+      border-right: 1px solid var(--line);
+      border-radius: 0;
+      background: transparent;
+      text-align: center;
+    }
+    .task-card:last-child { border-right: 0; }
+    .task-card strong { font-size: 12px; }
+    .flow-status {
+      min-height: 25px;
+      margin-top: 6px;
+      padding: 5px 8px;
+      border-style: solid;
+      border-radius: 6px;
+      background: rgba(53, 196, 135, .05);
+      font-size: 11px;
+    }
+    .top-utility-strip {
+      margin-top: 8px;
+      padding: 5px 7px;
+      gap: 5px;
+      border-radius: 7px;
+      background: var(--panel);
+    }
+    .top-utility-item { min-height: 46px; padding: 4px 7px; }
+    .top-utility-item strong { font-size: 12px; }
+    .top-utility-item small { font-size: 10px; }
+    .top-utility-item button, .top-utility-item summary { min-height: 32px; padding: 6px 9px; border-radius: 6px; }
+    .github-update-actions > button { min-width: 106px; }
+    .github-update-more { min-width: 74px; }
+    .top-log-panel {
+      margin-top: 6px;
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+    .top-log-head {
+      min-height: 36px;
+      padding: 7px 10px;
+      cursor: pointer;
+      list-style: none;
+    }
+    .top-log-head::-webkit-details-marker { display: none; }
+    .top-log-head::after { content: "展开"; color: var(--muted); font-size: 11px; font-weight: 800; }
+    .top-log-panel[open] .top-log-head { border-bottom: 1px solid var(--line); }
+    .top-log-panel[open] .top-log-head::after { content: "收起"; color: var(--accent); }
+    .top-log-head h2 { font-size: 13px; }
+    .top-log-grid { gap: 6px; padding: 0 8px 8px; }
+    .top-log-panel.log-card pre { min-height: 46px; max-height: 86px; padding: 8px; border-radius: 6px; font-size: 11px; }
+    .command-strip {
+      margin-top: 8px;
+      padding: 9px;
+      border-color: rgba(228, 173, 69, .5);
+      border-radius: 8px;
+      background: var(--panel-bg);
+      box-shadow: none;
+    }
+    .command-head { margin-bottom: 6px; }
+    .command-head h2 { font-size: 15px; }
+    .command-head p { font-size: 11px; }
+    .checklist { margin-top: 5px; }
+    .check-step { padding: 4px 7px; border-radius: 6px; font-size: 10px; }
+    .grid { grid-template-columns: minmax(520px, 1fr) minmax(620px, 1.18fr); gap: 8px; margin-top: 8px; }
+    .left-stack, .side-stack { gap: 8px; }
+    .card {
+      padding: 9px;
+      border-radius: 8px;
+      background: var(--panel-bg);
+      box-shadow: 0 5px 18px rgba(0, 0, 0, .16);
+    }
+    .card h2 { margin-bottom: 5px; font-size: 14px; }
+    button, input, select, textarea { border-radius: 6px; }
+    .monitor-heading, .resource-header, .node-table-toolbar { align-items: center; }
+    .monitor-heading p, .node-table-toolbar p { margin-top: 2px; font-size: 11px; }
+    .upload-stack { gap: 0; }
+    .upload-card { display: block; padding: 0; overflow: hidden; }
+    .upload-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 42px;
+      padding: 7px 9px;
+      cursor: pointer;
+      list-style: none;
+    }
+    .upload-summary::-webkit-details-marker { display: none; }
+    .upload-summary strong, .upload-summary small { display: block; }
+    .upload-summary strong { font-size: 13px; }
+    .upload-summary small { margin-top: 2px; color: var(--muted); font-size: 10px; }
+    .upload-card[open] .upload-summary { border-bottom: 1px solid var(--line); }
+    .upload-body { padding: 8px; }
+    .upload-card .split { grid-template-columns: minmax(210px, .7fr) minmax(0, 1.3fr); gap: 8px; }
+    .upload-card .actions { grid-template-columns: 1fr 1fr; gap: 6px; }
+    .upload-card .transfer-box { min-height: 88px; }
+    .transfer-grid { gap: 5px 8px; }
+    .transfer-grid strong { font-size: 13px; }
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+      align-items: start;
+    }
+    .dashboard-module { position: relative; min-width: 0; grid-column: span 6; min-height: 120px; }
+    .dashboard-module-handle {
+      display: none;
+      align-items: center;
+      gap: 7px;
+      min-height: 26px;
+      margin: -2px -2px 7px;
+      padding: 3px 5px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      cursor: grab;
+      user-select: none;
+    }
+    .dashboard-module-handle::before { content: "⋮⋮"; color: var(--accent-2); letter-spacing: 1px; }
+    .dashboard-module-handle:active { cursor: grabbing; }
+    .dashboard-module-resize {
+      display: none;
+      position: absolute;
+      right: 5px;
+      bottom: 5px;
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--accent-2);
+      cursor: nwse-resize;
+      font-size: 15px;
+      line-height: 1;
+    }
+    .dashboard-grid.is-editing .dashboard-module { outline: 1px dashed rgba(88, 185, 210, .55); outline-offset: 2px; }
+    .dashboard-grid.is-editing .dashboard-module-handle,
+    .dashboard-grid.is-editing .dashboard-module-resize { display: flex; }
+    .dashboard-module--dragging { opacity: .55; }
+    .dashboard-grid .top-utility-strip,
+    .dashboard-grid .top-log-panel,
+    .dashboard-grid .command-strip { margin-top: 0; }
+    .dashboard-source-utility { display: none; }
+    .dashboard-grid .top-utility-item {
+      min-height: 74px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+    }
+    .dashboard-grid .top-utility-strip,
+    .dashboard-grid .top-log-panel,
+    .dashboard-grid .command-strip { grid-column: span 12; }
+    .dashboard-grid .resource-card { grid-column: span 7; order: initial; }
+    .dashboard-grid .monitor-card { grid-column: span 5; }
+    .dashboard-grid .node-table-card { grid-column: span 7; }
+    .dashboard-grid .node-space-card { grid-column: span 5; }
+    .dashboard-grid .upload-card { grid-column: span 5; }
+    .dashboard-grid .upload-stack { display: contents; }
+    .dashboard-source-grid { display: none; }
     @media (max-width: 760px) {
       .node-space-rings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .media-window { overflow-x: auto; }
       .media-window-head, .media-file-row { min-width: 520px; }
     }
     @media (max-width: 1080px) {
+      .dashboard-grid { grid-template-columns: 1fr; }
+      .dashboard-grid .dashboard-module { grid-column: span 12 !important; height: auto !important; }
       .grid, .split, .hero, .task-flow, .node-detail, .top-utility-strip, .top-log-grid, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .top-utility-item { border-right: 0; border-bottom: 1px solid var(--line); }
       .top-utility-item:last-child { border-bottom: 0; }
@@ -2223,32 +2415,32 @@ HTML = r"""
           <button class="primary" id="refreshBtn">刷新状态</button>
           <button id="policyBtn">Upload Policy</button>
           <button id="auditBtn">Push Audit</button>
+          <button id="dashboardEditBtn" title="拖动模块或调整模块尺寸">布局调整</button>
+          <button id="dashboardResetBtn" aria-label="恢复默认布局" title="恢复默认布局">↺</button>
         </div>
       </div>
     </section>
 
     <section class="task-flow" aria-label="常用任务入口">
       <button class="task-card" type="button" data-scroll-target=".command-strip">
-        <strong>我要开播</strong>
-        <small>按顺序选择推流服务器、视频和 YouTube 目标，再一键 Smart Start。</small>
+        <strong>开播控制</strong>
       </button>
-      <button class="task-card" type="button" data-scroll-target=".upload-card">
-        <strong>我要上传视频</strong>
-        <small>先选推流服务器，再把视频直接上传到该服务器。</small>
+      <button class="task-card" type="button" data-scroll-target=".upload-card" data-open-details=".upload-card">
+        <strong>媒体上传</strong>
       </button>
       <button class="task-card" type="button" data-open-connect>
-        <strong>我要接入新 VPS</strong>
-        <small>输入 Tailscale 100.x 地址，系统自动检测并接入 Agent。</small>
+        <strong>接入节点</strong>
       </button>
       <button class="task-card" type="button" data-scroll-target=".monitor-card">
-        <strong>我要看异常</strong>
-        <small>查看在线、推流、磁盘、网络和最近操作反馈。</small>
+        <strong>运行监控</strong>
       </button>
     </section>
     <div class="flow-status" id="flowStatus" aria-live="polite">先接入或选择一台推流服务器，然后上传/选择视频即可开播。</div>
 
+    <main class="dashboard-grid" id="dashboardGrid" aria-label="可组合工作区"></main>
+
     <section class="top-utility-strip" aria-label="系统快捷操作">
-      <div class="top-utility-item">
+      <div class="top-utility-item utility-connect">
         <span><strong>Agent 快速连接</strong><small>通过 Tailscale 地址接入节点</small></span>
         <button class="primary" id="tailscaleWizardBtn">连接 Agent</button>
       </div>
@@ -2266,28 +2458,28 @@ HTML = r"""
           </details>
         </div>
       </div>
-      <div class="top-utility-item api-utility-item">
+      <div class="top-utility-item api-utility-item utility-api">
         <span><strong>YouTube API</strong><small>授权、直播流与自动调参</small></span>
         <button id="youtubeWizardBtn">YouTube API</button>
       </div>
     </section>
 
-    <section class="top-log-panel log-card">
-      <div class="top-log-head">
+    <details class="top-log-panel log-card">
+      <summary class="top-log-head">
         <h2>策略 / 审计 / 操作日志</h2>
         <small>策略、推送审计和最近操作集中显示</small>
-      </div>
+      </summary>
       <div class="top-log-grid">
         <div><strong>策略 / 审计</strong><pre id="updateBox">点击 Upload Policy 或 Push Audit 查看系统规则与最近推送记录。</pre></div>
         <div><strong>操作日志</strong><pre id="logBox">就绪。</pre></div>
       </div>
-    </section>
+    </details>
 
     <section class="card command-strip">
       <div class="command-head">
         <div>
           <h2>开播指挥条 / Smart Start</h2>
-          <p>和右侧 VPS 节点表联动：先核对目标节点，再选择手动直播码或 YouTube API、选视频、调优、开播。</p>
+          <p>为当前 Agent 配置媒体、输出目标与编码参数。</p>
         </div>
         <span class="pill warn">核对节点后再开播</span>
       </div>
@@ -2374,7 +2566,7 @@ HTML = r"""
         <div class="monitor-heading">
           <div>
             <h2>节点监控屏</h2>
-            <p>点击右侧 VPS 节点，集中显示健康状态、网络吞吐、推流码率和节点配置。</p>
+            <p>实时健康、网络吞吐、推流质量与节点配置。</p>
           </div>
           <span class="pill">live view</span>
         </div>
@@ -2385,8 +2577,8 @@ HTML = r"""
         <div class="card resource-card">
           <div class="resource-header">
             <div>
-              <h2>资源管理模块</h2>
-              <p>按 YouTube Profile 管理全部节点视频；Profile 名称与 API 模块保持一致，双击即可改名。</p>
+            <h2>资源管理模块</h2>
+              <p>当前 Agent 媒体、副本位置与 Profile 归属。</p>
             </div>
             <span class="pill">resource table</span>
           </div>
@@ -2419,7 +2611,7 @@ HTML = r"""
           <div class="node-table-toolbar">
             <div>
               <h2>VPS 节点表</h2>
-              <p>一屏预留约 10 台：在线、推流、重启推流、重启 VPS。</p>
+              <p>Agent 与 Hub 的运行状态和开播目标。</p>
             </div>
             <span class="pill warn">protected</span>
           </div>
@@ -2440,9 +2632,12 @@ HTML = r"""
           <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
         </div>
         <div class="upload-stack">
-          <div class="card upload-card">
-            <h2>上传模块</h2>
-            <p>上传保持在右侧：先选择目标 Agent，再把视频直传到该节点；资源归属由目标 Agent 的 Profile 决定。</p>
+          <details class="card upload-card">
+            <summary class="upload-summary">
+              <span><strong>上传模块</strong><small>浏览器直传当前 Agent</small></span>
+              <span class="pill">按需展开</span>
+            </summary>
+            <div class="upload-body">
             <div class="split">
               <div>
                 <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
@@ -2453,7 +2648,8 @@ HTML = r"""
               </div>
               <div id="uploadBox" class="transfer-box"></div>
             </div>
-          </div>
+            </div>
+          </details>
         </div>
       </div>
 
@@ -2720,6 +2916,9 @@ HTML = r"""
       editableHubTitle: document.getElementById("editableHubTitle"),
       themeSelect: document.getElementById("themeSelect"),
       flowStatus: document.getElementById("flowStatus"),
+      dashboardGrid: document.getElementById("dashboardGrid"),
+      dashboardEditBtn: document.getElementById("dashboardEditBtn"),
+      dashboardResetBtn: document.getElementById("dashboardResetBtn"),
       smartStartChecklist: document.getElementById("smartStartChecklist"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
@@ -2849,6 +3048,163 @@ HTML = r"""
         // Browser storage may be unavailable in private or restricted contexts.
       }
     }
+    const DASHBOARD_LAYOUT_STORAGE_KEY = "streamHub.dashboardLayout";
+    const DASHBOARD_MODULES = [
+      { id: "connect", selector: ".utility-connect", title: "Agent 快速连接", span: 4 },
+      { id: "github", selector: ".github-utility-item", title: "GitHub 更新", span: 5 },
+      { id: "youtube", selector: ".utility-api", title: "YouTube API", span: 3 },
+      { id: "logs", selector: ".top-log-panel", title: "审计与操作日志", span: 12 },
+      { id: "command", selector: ".command-strip", title: "开播指挥条", span: 12 },
+      { id: "resources", selector: ".resource-card", title: "资源管理", span: 7 },
+      { id: "monitor", selector: ".monitor-card", title: "节点监控", span: 5 },
+      { id: "nodes", selector: ".node-table-card", title: "VPS 节点表", span: 7 },
+      { id: "space", selector: ".node-space-card", title: "节点空间", span: 5 },
+      { id: "upload", selector: ".upload-card", title: "上传模块", span: 5 },
+    ];
+    let dashboardEditMode = false;
+    let dashboardDragId = "";
+    let dashboardResizeState = null;
+
+    function readDashboardLayout() {
+      try {
+        const layout = JSON.parse(localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY) || "{}");
+        return layout && typeof layout === "object" ? layout : {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function writeDashboardLayout() {
+      if (!refs.dashboardGrid) return;
+      const modules = {};
+      [...refs.dashboardGrid.querySelectorAll("[data-dashboard-module]")].forEach((module) => {
+        modules[module.dataset.dashboardModule] = {
+          span: Number(module.dataset.dashboardSpan || 6),
+          height: module.dataset.dashboardHeight ? Number(module.dataset.dashboardHeight) : null,
+        };
+      });
+      try {
+        localStorage.setItem(DASHBOARD_LAYOUT_STORAGE_KEY, JSON.stringify({
+          order: [...refs.dashboardGrid.querySelectorAll("[data-dashboard-module]")].map((module) => module.dataset.dashboardModule),
+          modules,
+        }));
+      } catch (_) {
+        // Browser storage may be unavailable in private or restricted contexts.
+      }
+    }
+
+    function setDashboardEditMode(enabled) {
+      dashboardEditMode = Boolean(enabled);
+      refs.dashboardGrid.classList.toggle("is-editing", dashboardEditMode);
+      refs.dashboardEditBtn.textContent = dashboardEditMode ? "完成布局" : "布局调整";
+      refs.dashboardEditBtn.classList.toggle("primary", dashboardEditMode);
+      refs.dashboardEditBtn.setAttribute("aria-pressed", dashboardEditMode ? "true" : "false");
+    }
+
+    function dashboardMoveBefore(dragged, target, event) {
+      if (!dragged || !target || dragged === target) return;
+      const rect = target.getBoundingClientRect();
+      const before = event.clientY < rect.top + rect.height / 2 || event.clientX < rect.left + rect.width / 2;
+      refs.dashboardGrid.insertBefore(dragged, before ? target : target.nextSibling);
+    }
+
+    function beginDashboardResize(event, module) {
+      if (!dashboardEditMode) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = module.getBoundingClientRect();
+      dashboardResizeState = {
+        module,
+        startX: event.clientX,
+        startY: event.clientY,
+        startWidth: rect.width,
+        startHeight: rect.height,
+        startSpan: Number(module.dataset.dashboardSpan || 6),
+      };
+      const onMove = (moveEvent) => {
+        if (!dashboardResizeState) return;
+        const gridRect = refs.dashboardGrid.getBoundingClientRect();
+        const gap = 8;
+        const cellWidth = (gridRect.width - gap * 11) / 12;
+        const nextSpan = Math.max(3, Math.min(12, Math.round((dashboardResizeState.startWidth + moveEvent.clientX - dashboardResizeState.startX + gap) / (cellWidth + gap))));
+        const nextHeight = Math.max(120, Math.round(dashboardResizeState.startHeight + moveEvent.clientY - dashboardResizeState.startY));
+        module.dataset.dashboardSpan = String(nextSpan);
+        module.style.gridColumn = `span ${nextSpan}`;
+        module.dataset.dashboardHeight = String(nextHeight);
+        module.style.height = `${nextHeight}px`;
+      };
+      const onEnd = () => {
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onEnd);
+        if (dashboardResizeState) writeDashboardLayout();
+        dashboardResizeState = null;
+      };
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onEnd, { once: true });
+    }
+
+    function initializeDashboardLayout() {
+      if (!refs.dashboardGrid) return;
+      const sourceGrid = document.querySelector(".grid");
+      const saved = readDashboardLayout();
+      const savedModules = saved.modules || {};
+      const byId = new Map(DASHBOARD_MODULES.map((config) => [config.id, config]));
+      const ordered = [...DASHBOARD_MODULES].sort((a, b) => {
+        const ai = Array.isArray(saved.order) ? saved.order.indexOf(a.id) : -1;
+        const bi = Array.isArray(saved.order) ? saved.order.indexOf(b.id) : -1;
+        return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi);
+      });
+      ordered.forEach((config) => {
+        const module = document.querySelector(config.selector);
+        if (!module) return;
+        module.classList.add("dashboard-module");
+        module.dataset.dashboardModule = config.id;
+        const savedModule = savedModules[config.id] || {};
+        const span = Math.max(3, Math.min(12, Number(savedModule.span || config.span)));
+        module.dataset.dashboardSpan = String(span);
+        module.style.gridColumn = `span ${span}`;
+        if (savedModule.height) {
+          module.dataset.dashboardHeight = String(Math.max(120, Number(savedModule.height)));
+          module.style.height = `${module.dataset.dashboardHeight}px`;
+        }
+        const handle = document.createElement("div");
+        handle.className = "dashboard-module-handle";
+        handle.textContent = config.title;
+        handle.draggable = true;
+        handle.addEventListener("dragstart", (event) => {
+          if (!dashboardEditMode) { event.preventDefault(); return; }
+          dashboardDragId = config.id;
+          module.classList.add("dashboard-module--dragging");
+          event.dataTransfer.effectAllowed = "move";
+        });
+        handle.addEventListener("dragend", () => {
+          dashboardDragId = "";
+          module.classList.remove("dashboard-module--dragging");
+          writeDashboardLayout();
+        });
+        module.prepend(handle);
+        const resize = document.createElement("button");
+        resize.type = "button";
+        resize.className = "dashboard-module-resize";
+        resize.textContent = "↘";
+        resize.title = "调整模块大小";
+        resize.setAttribute("aria-label", "调整模块大小");
+        resize.addEventListener("pointerdown", (event) => beginDashboardResize(event, module));
+        module.append(resize);
+        refs.dashboardGrid.append(module);
+      });
+      if (sourceGrid) sourceGrid.classList.add("dashboard-source-grid");
+      const sourceUtility = document.querySelector(".top-utility-strip");
+      if (sourceUtility) sourceUtility.classList.add("dashboard-source-utility");
+      refs.dashboardGrid.addEventListener("dragover", (event) => {
+        if (!dashboardEditMode || !dashboardDragId) return;
+        event.preventDefault();
+        const target = event.target.closest("[data-dashboard-module]");
+        const dragged = refs.dashboardGrid.querySelector(`[data-dashboard-module="${dashboardDragId}"]`);
+        if (target && dragged) dashboardMoveBefore(dragged, target, event);
+      });
+      setDashboardEditMode(false);
+    }
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
     function rememberSelectedNode(nodeId) {
@@ -2936,7 +3292,7 @@ HTML = r"""
       setButtonReady(refs.smartStartBtn, smartReady, smartReady ? "" : `还缺少：${missing.filter(Boolean).join("、")}`);
       setButtonReady(refs.uploadBtn, uploadReady, uploadReady ? "" : state.nodeReady ? "先选择一个视频文件" : "先选择推流服务器");
       if (!nodes.length) {
-        uiMessage("还没有推流服务器。点击“我要接入新 VPS”，输入 Tailscale 100.x 地址即可接入。");
+        uiMessage("还没有推流服务器。点击“接入节点”，输入 Tailscale 100.x 地址即可接入。");
       } else if (!state.nodeReady) {
         uiMessage("请选择一台在线推流服务器。");
       } else if (!state.hasVideo) {
@@ -3067,6 +3423,8 @@ HTML = r"""
 
     function renderTransfer(state = {}) {
       const status = state.status || "idle";
+      const uploadDetails = document.querySelector(".upload-card");
+      if (status === "running" && uploadDetails instanceof HTMLDetailsElement) uploadDetails.open = true;
       const percent = pct(state.percent || 0);
       const boxClass = status === "failed" ? "fail" : status === "done" ? "done" : "";
       refs.uploadBox.className = `transfer-box ${boxClass}`;
@@ -7192,6 +7550,8 @@ HTML = r"""
       const scrollButton = event.target.closest("[data-scroll-target]");
       if (scrollButton) {
         event.preventDefault();
+        const details = scrollButton.dataset.openDetails ? document.querySelector(scrollButton.dataset.openDetails) : null;
+        if (details instanceof HTMLDetailsElement) details.open = true;
         scrollToSelector(scrollButton.dataset.scrollTarget);
         uiMessage("已跳到对应操作区域。");
       }
@@ -7299,6 +7659,11 @@ HTML = r"""
     });
     refs.tailscaleUseExistingIpBtn.addEventListener("click", connectExistingTailscaleIp);
     refs.copyAgentInstallBtn.addEventListener("click", copyAgentInstallCommand);
+    refs.dashboardEditBtn.addEventListener("click", () => setDashboardEditMode(!dashboardEditMode));
+    refs.dashboardResetBtn.addEventListener("click", () => {
+      localStorage.removeItem(DASHBOARD_LAYOUT_STORAGE_KEY);
+      window.location.reload();
+    });
     if (refs.pushSelectedBtn) refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
     refs.previewTuneBtn.addEventListener("click", previewTune);
     refs.applyTuneBtn.addEventListener("click", applyLastTune);
@@ -7311,6 +7676,7 @@ HTML = r"""
     [refs.presetInput, refs.videoBitrateInput, refs.audioBitrateInput, refs.fpsInput, refs.resolutionInput, refs.keyframeInput].forEach((el) => {
       el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
     });
+    initializeDashboardLayout();
     loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
     checkDailyGithubUpdates();
     window.setInterval(refreshRunningAgentParameters, AGENT_STREAM_REFRESH_MS);
