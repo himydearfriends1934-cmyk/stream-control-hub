@@ -1135,6 +1135,21 @@ HTML = r"""
     .node-space-card { padding-bottom: 10px; }
     .node-space-card h2 { margin-bottom: 2px; }
     .node-space-card p { margin: 0 0 5px; font-size: 12px; line-height: 1.35; }
+    .node-space-inline { margin-bottom: 8px; }
+    .node-space-toggle {
+      width: 100%;
+      min-height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 9px;
+      border-color: var(--line);
+      background: var(--panel-2);
+      font-weight: 900;
+    }
+    .node-space-toggle small { color: var(--muted); font-size: 10px; }
+    .node-space-toggle[aria-expanded="true"] { border-color: var(--accent); }
+    .node-space-panel { padding: 7px 0 2px; }
     .node-space-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); grid-auto-rows: minmax(116px, auto); gap: 8px; max-height: 248px; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; padding-right: 2px; }
     .node-space-ring-item { min-width: 0; min-height: 116px; height: auto; display: grid; justify-items: center; align-content: center; gap: 4px; padding: 7px 6px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.5); text-align: center; cursor: pointer; }
     .node-space-ring-item:hover, .node-space-ring-item.open { border-color: var(--accent); background: rgba(54,211,153,.09); }
@@ -1655,17 +1670,11 @@ HTML = r"""
     .monitor-heading p { margin: 0; font-size: 12px; }
     .node-monitor {
       min-height: 0;
-      border-radius: 12px;
+      border-radius: 6px;
       padding: 10px;
-      border: 1px solid rgba(54, 211, 153, 0.35);
-      background:
-        linear-gradient(rgba(54, 211, 153, 0.035) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(54, 211, 153, 0.035) 1px, transparent 1px),
-        radial-gradient(circle at 10% 0%, rgba(54, 211, 153, 0.18), transparent 26%),
-        radial-gradient(circle at 100% 12%, rgba(84, 198, 235, 0.12), transparent 24%),
-        #07110e;
-      background-size: 24px 24px, 24px 24px, auto, auto, auto;
-      box-shadow: inset 0 0 42px rgba(54, 211, 153, 0.06);
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      box-shadow: none;
     }
     .monitor-hero {
       display: grid;
@@ -2307,6 +2316,7 @@ HTML = r"""
       font-weight: 900;
       cursor: grab;
       user-select: none;
+      touch-action: none;
     }
     .dashboard-module-handle::before { content: "⋮⋮"; color: var(--accent-2); letter-spacing: 1px; }
     .dashboard-module-handle:active { cursor: grabbing; }
@@ -2329,6 +2339,22 @@ HTML = r"""
     .dashboard-grid.is-editing .dashboard-module-handle,
     .dashboard-grid.is-editing .dashboard-module-resize { display: flex; }
     .dashboard-module--dragging { opacity: .55; }
+    .dashboard-module--target { outline-color: var(--accent) !important; background-color: rgba(53, 196, 135, .06); }
+    .dashboard-drag-active { user-select: none; cursor: grabbing; }
+    .dashboard-drag-ghost {
+      position: fixed;
+      z-index: 1000;
+      display: grid;
+      place-items: center;
+      pointer-events: none;
+      border: 1px solid var(--accent-2);
+      border-radius: 7px;
+      background: rgba(17, 25, 30, .92);
+      color: var(--text);
+      box-shadow: 0 14px 40px rgba(0, 0, 0, .42);
+      font-size: 13px;
+      font-weight: 900;
+    }
     .dashboard-grid .top-utility-strip,
     .dashboard-grid .top-log-panel,
     .dashboard-grid .command-strip { margin-top: 0; }
@@ -2345,7 +2371,6 @@ HTML = r"""
     .dashboard-grid .resource-card { grid-column: span 7; order: initial; }
     .dashboard-grid .monitor-card { grid-column: span 5; }
     .dashboard-grid .node-table-card { grid-column: span 7; }
-    .dashboard-grid .node-space-card { grid-column: span 5; }
     .dashboard-grid .upload-card { grid-column: span 5; }
     .dashboard-grid .upload-stack { display: contents; }
     .dashboard-source-grid { display: none; }
@@ -2361,7 +2386,7 @@ HTML = r"""
       .top-utility-item { border-right: 0; border-bottom: 1px solid var(--line); }
       .top-utility-item:last-child { border-bottom: 0; }
       .monitor-card, .node-table-card { min-height: auto; }
-      .node-monitor { min-height: 420px; }
+      .node-monitor { min-height: 0; }
       .node-table { max-height: none; }
       .node-table-head { display: none; }
       .node-row {
@@ -2615,6 +2640,14 @@ HTML = r"""
             </div>
             <span class="pill warn">protected</span>
           </div>
+          <div class="node-space-inline">
+            <button type="button" class="node-space-toggle" id="nodeSpaceToggle" aria-expanded="false">
+              <span>节点空间</span><small>展开</small>
+            </button>
+            <div class="node-space-panel" id="nodeSpacePanel" hidden>
+              <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
+            </div>
+          </div>
           <div class="node-role-split" id="nodeRoleSplit">
           <div class="role-group node-role-pane agent-role-pane">
             <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
@@ -2625,11 +2658,6 @@ HTML = r"""
             <div class="node-table" id="hubNodeList">加载中...</div>
           </details>
           </div>
-        </div>
-        <div class="card node-space-card">
-          <h2>节点空间</h2>
-          <p>各 Agent 媒体磁盘的已用比例与剩余容量；双击节点可在左侧筛出它的视频。</p>
-          <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
         </div>
         <div class="upload-stack">
           <details class="card upload-card">
@@ -2923,6 +2951,8 @@ HTML = r"""
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
       nodeSpaceRings: document.getElementById("nodeSpaceRings"),
+      nodeSpaceToggle: document.getElementById("nodeSpaceToggle"),
+      nodeSpacePanel: document.getElementById("nodeSpacePanel"),
       mediaContextMenu: document.getElementById("mediaContextMenu"),
       mediaProfileTargets: document.getElementById("mediaProfileTargets"),
       mediaSendTargets: document.getElementById("mediaSendTargets"),
@@ -3036,7 +3066,9 @@ HTML = r"""
     }
 
     function monitorDisclosureOpen(section) {
-      return monitorDisclosureState()[section] !== false;
+      const state = monitorDisclosureState();
+      if (Object.prototype.hasOwnProperty.call(state, section)) return Boolean(state[section]);
+      return section !== "autotune";
     }
 
     function rememberMonitorDisclosure(section, open) {
@@ -3058,11 +3090,9 @@ HTML = r"""
       { id: "resources", selector: ".resource-card", title: "资源管理", span: 7 },
       { id: "monitor", selector: ".monitor-card", title: "节点监控", span: 5 },
       { id: "nodes", selector: ".node-table-card", title: "VPS 节点表", span: 7 },
-      { id: "space", selector: ".node-space-card", title: "节点空间", span: 5 },
       { id: "upload", selector: ".upload-card", title: "上传模块", span: 5 },
     ];
     let dashboardEditMode = false;
-    let dashboardDragId = "";
     let dashboardResizeState = null;
 
     function readDashboardLayout() {
@@ -3104,8 +3134,65 @@ HTML = r"""
     function dashboardMoveBefore(dragged, target, event) {
       if (!dragged || !target || dragged === target) return;
       const rect = target.getBoundingClientRect();
-      const before = event.clientY < rect.top + rect.height / 2 || event.clientX < rect.left + rect.width / 2;
+      const verticalDistance = Math.abs(event.clientY - (rect.top + rect.height / 2));
+      const horizontalDistance = Math.abs(event.clientX - (rect.left + rect.width / 2));
+      const before = verticalDistance > horizontalDistance
+        ? event.clientY < rect.top + rect.height / 2
+        : event.clientX < rect.left + rect.width / 2;
       refs.dashboardGrid.insertBefore(dragged, before ? target : target.nextSibling);
+    }
+
+    function beginDashboardDrag(event, module, title) {
+      if (!dashboardEditMode || event.button !== 0) return;
+      event.preventDefault();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const rect = module.getBoundingClientRect();
+      let ghost = null;
+      let activeTarget = null;
+      const clearTarget = () => {
+        if (activeTarget) activeTarget.classList.remove("dashboard-module--target");
+        activeTarget = null;
+      };
+      const onMove = (moveEvent) => {
+        const dx = moveEvent.clientX - startX;
+        const dy = moveEvent.clientY - startY;
+        if (!ghost && Math.hypot(dx, dy) < 4) return;
+        if (!ghost) {
+          ghost = document.createElement("div");
+          ghost.className = "dashboard-drag-ghost";
+          ghost.textContent = title;
+          ghost.style.width = `${Math.min(rect.width, window.innerWidth - 24)}px`;
+          ghost.style.height = `${Math.min(rect.height, 180)}px`;
+          document.body.append(ghost);
+          module.classList.add("dashboard-module--dragging");
+          document.body.classList.add("dashboard-drag-active");
+        }
+        ghost.style.left = `${Math.max(8, Math.min(window.innerWidth - ghost.offsetWidth - 8, moveEvent.clientX - Math.min(80, rect.width / 3)))}px`;
+        ghost.style.top = `${Math.max(8, Math.min(window.innerHeight - ghost.offsetHeight - 8, moveEvent.clientY - 22))}px`;
+        const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest("[data-dashboard-module]");
+        if (!target || target === module) {
+          clearTarget();
+          return;
+        }
+        if (target !== activeTarget) {
+          clearTarget();
+          activeTarget = target;
+          activeTarget.classList.add("dashboard-module--target");
+        }
+        dashboardMoveBefore(module, target, moveEvent);
+      };
+      const onEnd = () => {
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onEnd);
+        clearTarget();
+        if (ghost) ghost.remove();
+        module.classList.remove("dashboard-module--dragging");
+        document.body.classList.remove("dashboard-drag-active");
+        writeDashboardLayout();
+      };
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onEnd, { once: true });
     }
 
     function beginDashboardResize(event, module) {
@@ -3170,18 +3257,7 @@ HTML = r"""
         const handle = document.createElement("div");
         handle.className = "dashboard-module-handle";
         handle.textContent = config.title;
-        handle.draggable = true;
-        handle.addEventListener("dragstart", (event) => {
-          if (!dashboardEditMode) { event.preventDefault(); return; }
-          dashboardDragId = config.id;
-          module.classList.add("dashboard-module--dragging");
-          event.dataTransfer.effectAllowed = "move";
-        });
-        handle.addEventListener("dragend", () => {
-          dashboardDragId = "";
-          module.classList.remove("dashboard-module--dragging");
-          writeDashboardLayout();
-        });
+        handle.addEventListener("pointerdown", (event) => beginDashboardDrag(event, module, config.title));
         module.prepend(handle);
         const resize = document.createElement("button");
         resize.type = "button";
@@ -3196,13 +3272,6 @@ HTML = r"""
       if (sourceGrid) sourceGrid.classList.add("dashboard-source-grid");
       const sourceUtility = document.querySelector(".top-utility-strip");
       if (sourceUtility) sourceUtility.classList.add("dashboard-source-utility");
-      refs.dashboardGrid.addEventListener("dragover", (event) => {
-        if (!dashboardEditMode || !dashboardDragId) return;
-        event.preventDefault();
-        const target = event.target.closest("[data-dashboard-module]");
-        const dragged = refs.dashboardGrid.querySelector(`[data-dashboard-module="${dashboardDragId}"]`);
-        if (target && dragged) dashboardMoveBefore(dragged, target, event);
-      });
       setDashboardEditMode(false);
     }
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
@@ -3927,65 +3996,12 @@ HTML = r"""
           </div>
         `;
       }
-      if (!node) {
-        return `<div class="empty-state">还没有配置节点。把 VPS 节点加入 config/nodes.json 后会显示在这里。</div>`;
-      }
       const h = node.health || {};
       const stream = h.stream || {};
-      const adaptive = stream.adaptive || {};
-      const autoRestart = stream.auto_restart || {};
-      const relay = stream.relay || {};
-      const tuning = stream.tuning || {};
-      const config = h.stream_config || {};
-      const net = h.net || {};
-      const quota = h.quota || {};
-      const agent = h.agent || {};
-      const transfer = h.transfer || {};
-      const publicUpload = h.public_upload || {};
-      const videos = h.videos || [];
-      const profileId = nodeRowProfileId(node);
-      const youtubeProfile = youtubeProfiles.find((item) => String(item.id) === String(profileId)) || {};
-      const youtubeSmartTuneEnabled = Boolean(youtubeProfile.auto_tune_enabled);
-      const parameterStateLabel = stream.running ? "当前" : "最后";
-      const streamVideoParameters = [
-        config.resolution || "--",
-        config.fps ? `${config.fps}fps` : "--fps",
-        config.video_bitrate ? `${config.video_bitrate}kbps` : "--kbps",
-      ].join(" / ");
-      const streamEncodingParameters = [
-        config.copy_mode ? "copy" : (config.preset || "--"),
-        config.audio_bitrate ? `音频 ${config.audio_bitrate}kbps` : "音频 --",
-        config.keyframe_seconds ? `关键帧 ${config.keyframe_seconds}s` : "关键帧 --",
-      ].join(" / ");
-      const loadText = Array.isArray(h.load_avg) && h.load_avg.length ? h.load_avg.join(" / ") : (h.load_avg || "--");
-      const bitrate = stream.current_bitrate_label || (stream.current_bitrate_kbps ? `${stream.current_bitrate_kbps} Kbps` : "未知");
-      const processText = stream.processes?.length ? `${stream.processes.length} 个进程` : "未检测到";
-      const videoList = videos.length
-        ? videos.slice(0, 6).map((item) => `${escapeHtml(item.name)} (${escapeHtml(fmtBytes(item.size))})`).join("<br>")
-        : "服务器暂无视频";
-      const processList = stream.processes?.length
-        ? stream.processes.slice(0, 4).map((item) => {
-            const pid = item.pid || item.PID || "-";
-            const cpu = item.cpu_percent !== undefined ? ` CPU ${Number(item.cpu_percent || 0).toFixed(1)}%` : "";
-            return `${escapeHtml(pid)}${escapeHtml(cpu)}`;
-          }).join("<br>")
-        : "未检测到 FFmpeg 进程";
 
       return `
         <div class="monitor-hero">
-          <div>
-            <h3>${escapeHtml(node.name || node.id)}</h3>
-            <small>${escapeHtml(h.hostname || node.id)} · ${escapeHtml(h.platform || "未知系统")}</small>
-            <small class="mono">${escapeHtml(node.base_url || "")}</small>
-            <div class="machine-compact">
-              <span>核心 <strong>${escapeHtml(h.cpu_count || "--")}</strong></span>
-              <span>负载 <strong>${escapeHtml(loadText)}</strong></span>
-              <span>系统在线 <strong>${escapeHtml(h.uptime || "--")}</strong></span>
-              <span>面板在线 <strong>${escapeHtml(h.app_uptime || "--")}</strong></span>
-              <span>内存 <strong>${escapeHtml(`${fmtBytes(h.memory?.used || 0)} / ${fmtBytes(h.memory?.total || 0)}`)}</strong></span>
-              <span>硬盘 <strong>${escapeHtml(`${fmtBytes(h.disk?.used || 0)} / ${fmtBytes(h.disk?.total || 0)}`)}</strong></span>
-            </div>
-          </div>
+          <h3>${escapeHtml(node.name || node.id)}</h3>
           ${nodeStatusPill(node)}
         </div>
 
@@ -3996,67 +4012,12 @@ HTML = r"""
           ${donut("推流", stream.running ? "运行中" : "未推流", stream.running ? 100 : 0, stream.running ? "var(--accent)" : "var(--danger)")}
         </div>
 
-        <div class="monitor-compact-row">
-          <div class="agent-compact">
-            <span>Agent <strong>${escapeHtml(agent.mode || "compatible")}</strong></span>
-            <span>版本 <strong>${escapeHtml(agent.version || "--")}</strong></span>
-            <span>${agent.headless ? "Headless" : "兼容模式"}</span>
-            <span>上传 <strong>${publicUpload.supported === false ? "直传" : "票据直传"}</strong></span>
-            <span>路由 <strong>${escapeHtml(transfer.last_route || "--")}</strong></span>
-            <span>错误 <strong>${escapeHtml(transfer.last_error || "无")}</strong></span>
-          </div>
-
-          <div class="network-compact">
-            <span class="compact-title">网络</span>
-            <span>上行 <strong>${escapeHtml(fmtRate(net.current_upload_bps || 0))}</strong></span>
-            <span>下行 <strong>${escapeHtml(fmtRate(net.current_download_bps || 0))}</strong></span>
-            <span>累计发 <strong>${escapeHtml(fmtBytes(net.bytes_sent || 0))}</strong></span>
-            <span>累计收 <strong>${escapeHtml(fmtBytes(net.bytes_recv || 0))}</strong></span>
-            <span>流量 <strong>${escapeHtml(`${Number(quota.total_percent || 0).toFixed(2)}%`)}</strong></span>
-            <span>剩余 <strong>${escapeHtml(fmtBytes(quota.remaining || 0))}</strong></span>
-            <span>线路 <strong>${escapeHtml(net.rate_label || "--")}</strong></span>
-          </div>
-        </div>
-
-        <div class="monitor-panel autotune-history-panel">
-          <h4>智能调参记录</h4>
+        <details class="monitor-panel monitor-disclosure autotune-history-panel" data-monitor-section="autotune" ${monitorDisclosureOpen("autotune") ? "open" : ""}>
+          <summary>智能调参记录</summary>
+          <div class="monitor-disclosure-body">
           ${renderAutotuneHistory(node.autotune_history || [])}
-        </div>
-        <div class="monitor-panel-grid">
-          <details class="monitor-panel monitor-disclosure" data-monitor-section="engine" ${monitorDisclosureOpen("engine") ? "open" : ""}>
-            <summary>推流引擎</summary>
-            <div class="monitor-disclosure-body">
-            <div class="metric-grid">
-              ${metric("FFmpeg", stream.running ? "运行中" : "未运行")}
-              ${metric("进程", processText)}
-              ${metric("视频数", `${videos.length}`)}
-              ${metric("推流目标", config.stream_output_mode === "youtube_api" ? "YouTube API" : (config.has_stream_key ? "直播码" : "未配置"))}
-            </div>
-            <div class="mini-table" style="margin-top: 10px;">
-              ${miniRow(`${parameterStateLabel}视频参数`, streamVideoParameters)}
-              ${miniRow(`${parameterStateLabel}编码参数`, streamEncodingParameters)}
-              ${miniRow("YouTube 智能调参", youtubeSmartTuneEnabled ? `开启 · 检查 ${youtubeProfile.auto_tune_interval_seconds || 300}s · 冷却 ${youtubeProfile.auto_tune_cooldown_seconds || 900}s · 上限 ${youtubeProfile.auto_tune_max_bitrate || 40000}kbps` : "关闭")}
-              ${miniRow("Agent 自适应模式", `${config.adaptive_mode || "--"} · ${adaptive.enabled ? `${adaptive.status || "idle"} / ${adaptive.last_error || "正常"}` : "运行时关闭"}`)}
-              ${miniRow("Agent 自动重启", autoRestart.enabled ? `开启 · ${autoRestart.last_error || "正常"}` : "关闭")}
-              ${miniRow("本地中继", relay.enabled ? `${relay.mode || "relay"} · ${relay.reachable ? "可达" : "不可达"}` : relay.message || "关闭")}
-              ${miniRow("FIFO 缓冲", tuning.fifo_enabled ? `${tuning.fifo_timeshift_seconds || 0}s / queue ${tuning.fifo_queue_size || 0}` : "关闭")}
-              ${miniRowHtml("FFmpeg PID", `<span class="mono">${processList}</span>`)}
-            </div>
-            </div>
-          </details>
-
-          <details class="monitor-panel monitor-disclosure" data-monitor-section="resources" ${monitorDisclosureOpen("resources") ? "open" : ""}>
-            <summary>节点资源</summary>
-            <div class="monitor-disclosure-body">
-            <div class="mini-table">
-              ${miniRow("节点 ID", node.id || "--")}
-              ${miniRow("启用状态", node.enabled === false ? "已禁用" : "已启用")}
-              ${miniRowHtml("健康采集", healthSummaryHtml(node))}
-              ${miniRowHtml("服务器视频", `<span class="mono">${videoList}</span>`)}
-            </div>
-            </div>
-          </details>
-        </div>
+          </div>
+        </details>
       `;
     }
 
@@ -7338,6 +7299,13 @@ HTML = r"""
       document.querySelector(".resource-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
       refs.mediaList.querySelector('[data-resource-filter="ownerNode"]')?.focus({ preventScroll: true });
     }
+    refs.nodeSpaceToggle.addEventListener("click", () => {
+      const open = refs.nodeSpacePanel.hidden;
+      refs.nodeSpacePanel.hidden = !open;
+      refs.nodeSpaceToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      const label = refs.nodeSpaceToggle.querySelector("small");
+      if (label) label.textContent = open ? "收起" : "展开";
+    });
     refs.nodeSpaceRings.addEventListener("dblclick", (event) => {
       const card = event.target.closest("[data-space-node-id]");
       if (card) openNodeResources(card.dataset.spaceNodeId);
