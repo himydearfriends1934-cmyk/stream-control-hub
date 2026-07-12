@@ -29,6 +29,19 @@ class InstallerPersistenceTests(unittest.TestCase):
         self.assertIn("existingPort", powershell)
         self.assertIn("STREAM_HUB_SUPPRESS_TOKEN_OUTPUT", script)
 
+    def test_hub_preserves_youtube_environment_during_update(self):
+        script = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+        powershell = (ROOT / "scripts" / "install-hub.ps1").read_text(encoding="utf-8")
+
+        for name in ("YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_CREDENTIAL_FILE"):
+            self.assertIn(f"EXISTING_{name}", script)
+            self.assertIn(f"{name}=${name}", script)
+        self.assertIn("existingYoutubeClientId", powershell)
+        self.assertIn("existingYoutubeClientSecret", powershell)
+        self.assertIn("existingYoutubeCredentialFile", powershell)
+        self.assertIn('"YOUTUBE_CLIENT_ID=$youtubeClientId"', powershell)
+        self.assertIn('"YOUTUBE_CREDENTIAL_FILE=$youtubeCredentialFile"', powershell)
+
     def test_agent_preserves_connection_settings_during_update(self):
         script = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
 

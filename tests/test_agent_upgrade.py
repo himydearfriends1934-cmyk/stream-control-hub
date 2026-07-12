@@ -265,6 +265,9 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('list="resourceNameOptions"', app.HTML)
         self.assertIn("data-clear-resource-filters", app.HTML)
         self.assertIn("function clearResourceFilters", app.HTML)
+        self.assertIn('id="mediaProfileTargets"', app.HTML)
+        self.assertIn('data-media-menu-action="set-profile"', app.HTML)
+        self.assertIn('postJson("/api/media-library/profile"', app.HTML)
         self.assertIn("function ensureSmartStartMedia", app.HTML)
         self.assertIn('postJson("/api/media/share"', app.HTML)
         self.assertIn('same_node: true', app.HTML)
@@ -273,6 +276,54 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('data-media-local="${localCopy ? "1" : "0"}"', app.HTML)
         self.assertIn('request_node_json(target_node, "/api/public-upload", timeout=10)', inspect.getsource(app.run_share_task))
         self.assertIn("discovered_public_url", inspect.getsource(app.run_share_task))
+        self.assertIn("share_transfer_preflight", inspect.getsource(app.api_media_share))
+        self.assertIn("function showShareRepairGuide", app.HTML)
+        self.assertIn("Agent 公网互传预检失败", app.HTML)
+        self.assertIn("打开目标 Agent 设置", app.HTML)
+        self.assertIn("云厂商安全组必须另外放行入站 TCP 8787", app.HTML)
+
+    def test_media_profile_can_be_changed_and_persists_in_library(self):
+        from stream_control_hub import app
+
+        profile_config = {
+            "version": 1,
+            "active_profile_id": "default",
+            "profiles": [
+                {"id": "default", "name": "Default"},
+                {"id": "account-a", "name": "Account A"},
+            ],
+        }
+        node = {"id": "node-a", "name": "Node A", "enabled": True}
+        status = {
+            "ok": True,
+            "disk": {"total": 1000, "used": 100, "free": 900, "percent": 10},
+            "videos": [{
+                "name": "video.mp4",
+                "video_path": "/media/video.mp4",
+                "size": 123,
+                "modified": 100,
+                "modified_label": "now",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata_file = Path(tmp) / "media-library-meta.json"
+            with patch.object(app, "MEDIA_METADATA_FILE", metadata_file), patch.object(
+                app, "load_youtube_profiles_config", return_value=profile_config
+            ), patch.object(app, "load_nodes", return_value=[node]), patch.object(
+                app, "request_node_json", return_value=status
+            ):
+                response = app.APP.test_client().post(
+                    "/api/media-library/profile",
+                    json={"media_name": "video.mp4", "profile_id": "account-a"},
+                )
+                library = app.media_library_payload()
+                saved = json.loads(metadata_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["profile_name"], "Account A")
+        self.assertEqual(saved["media_profiles"]["video.mp4"]["profile_id"], "account-a")
+        self.assertEqual(library["resources"][0]["profile_id"], "account-a")
+        self.assertEqual(library["resources"][0]["profile_name"], "Account A")
         self.assertIn("不支持媒体哈希校验", inspect.getsource(app.run_share_task))
         self.assertIn("source_hash=source_hash", inspect.getsource(app.run_share_task))
         self.assertIn("首选源节点不可用，已切换到", inspect.getsource(app.run_share_task))

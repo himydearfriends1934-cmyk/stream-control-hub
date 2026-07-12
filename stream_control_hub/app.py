@@ -75,6 +75,7 @@ UPLOAD_POLICY_NAME = os.environ.get("STREAM_HUB_UPLOAD_POLICY_NAME", "safe-stabl
 PUSH_AUDIT_LOG = DATA_DIR / "push_audit.jsonl"
 HUB_SETTINGS_FILE = DATA_DIR / "hub-settings.json"
 MEDIA_METADATA_FILE = DATA_DIR / "media-library-meta.json"
+MEDIA_METADATA_LOCK = threading.RLock()
 PUSH_AUDIT_LOG_MAX_BYTES = int(os.environ.get("STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYTES", str(5 * 1024 ** 2)))
 CONTROL_TOKEN = os.environ.get("STREAM_HUB_CONTROL_TOKEN", "").strip()
 TRUSTED_REMOTE_WRITES = os.environ.get("STREAM_HUB_TRUSTED_REMOTE_WRITES", "").strip().lower() in {"1", "true", "yes"}
@@ -213,9 +214,16 @@ def load_youtube_profiles_config() -> dict[str, Any]:
 def save_youtube_profiles_config(payload: dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     YOUTUBE_PROFILE_CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
-    YOUTUBE_PROFILES_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    with suppress(OSError):
-        YOUTUBE_PROFILES_FILE.chmod(0o600)
+    temporary = YOUTUBE_PROFILES_FILE.with_name(f".{YOUTUBE_PROFILES_FILE.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        with suppress(OSError):
+            temporary.chmod(0o600)
+        temporary.replace(YOUTUBE_PROFILES_FILE)
+        with suppress(OSError):
+            YOUTUBE_PROFILES_FILE.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def make_youtube_client(profile: dict[str, Any]) -> YouTubeAPIClient:
@@ -264,9 +272,8 @@ def active_youtube_profile_id() -> str:
 
 
 def youtube_client_for_id(profile_id: str) -> YouTubeAPIClient:
+    global YOUTUBE_CLIENT
     target = safe_youtube_profile_id(profile_id or active_youtube_profile_id())
-    if target == YOUTUBE_DEFAULT_PROFILE_ID:
-        return YOUTUBE_CLIENT
     profile = youtube_profile_by_id(target)
     signature = (
         str(profile.get("client_id") or ""),
@@ -274,12 +281,23 @@ def youtube_client_for_id(profile_id: str) -> YouTubeAPIClient:
         str(profile.get("credential_file") or ""),
     )
     with YOUTUBE_PROFILE_LOCK:
-        cached = YOUTUBE_CLIENT_CACHE.get(target)
+        cached = YOUTUBE_CLIENT if target == YOUTUBE_DEFAULT_PROFILE_ID else YOUTUBE_CLIENT_CACHE.get(target)
+        if cached is not None and getattr(cached, "_profile_signature", None) is None:
+            cached_signature = (
+                str(getattr(cached, "client_id", "") or ""),
+                str(getattr(cached, "client_secret", "") or ""),
+                str(getattr(cached, "credential_path", "") or ""),
+            )
+            if cached_signature == signature:
+                setattr(cached, "_profile_signature", signature)
         if cached is not None and getattr(cached, "_profile_signature", None) == signature:
             return cached
         client = make_youtube_client(profile)
         setattr(client, "_profile_signature", signature)
-        YOUTUBE_CLIENT_CACHE[target] = client
+        if target == YOUTUBE_DEFAULT_PROFILE_ID:
+            YOUTUBE_CLIENT = client
+        else:
+            YOUTUBE_CLIENT_CACHE[target] = client
         return client
 
 
@@ -1116,6 +1134,7 @@ HTML = r"""
       border: 0;
     }
     .media-context-menu button:hover { background: rgba(54, 211, 153, 0.12); }
+    .media-context-menu button.active { border-color: var(--accent); background: rgba(54, 211, 153, 0.18); color: var(--text); }
     .media-context-menu button.danger:hover { background: rgba(251, 113, 133, 0.16); }
     .media-context-label { padding: 7px 9px 3px; color: var(--muted); font-size: 11px; font-weight: 900; border-top: 1px solid var(--line); }
     .media-context-targets { display: grid; gap: 3px; max-height: 190px; overflow: auto; }
@@ -2252,6 +2271,8 @@ HTML = r"""
           <div class="resource-filter-chip" id="resourceFilterChip" hidden></div>
           <div class="media-list" id="mediaList">加载中...</div>
           <div class="media-context-menu" id="mediaContextMenu">
+            <div class="media-context-label">修改 Profile</div>
+            <div class="media-context-targets" id="mediaProfileTargets"></div>
             <button data-media-menu-action="property">属性</button>
             <button data-media-menu-action="inspect">查看详情</button>
             <button data-media-menu-action="use">选用开播</button>
@@ -2605,6 +2626,7 @@ HTML = r"""
       mediaList: document.getElementById("mediaList"),
       nodeSpaceRings: document.getElementById("nodeSpaceRings"),
       mediaContextMenu: document.getElementById("mediaContextMenu"),
+      mediaProfileTargets: document.getElementById("mediaProfileTargets"),
       mediaSendTargets: document.getElementById("mediaSendTargets"),
       mediaMoveTargets: document.getElementById("mediaMoveTargets"),
       mediaProfileFilter: document.getElementById("mediaProfileFilter"),
@@ -2715,7 +2737,10 @@ HTML = r"""
     let activeYouTubeProfileId = "default";
     let youtubeStreamsByProfile = {};
     let youtubeStreamLoadState = {};
+    let youtubeStreamLoadedAt = {};
     const YOUTUBE_PROFILE_VISIBLE_SLOTS = 6;
+    const YOUTUBE_STREAM_CACHE_TTL_MS = 2 * 60 * 1000;
+    const YOUTUBE_PROFILE_REFRESH_MS = 5 * 60 * 1000;
     const AGENT_STREAM_REFRESH_MS = 5 * 60 * 1000;
     let agentStreamRefreshInFlight = false;
     let editingYouTubeProfileId = "";
@@ -3277,6 +3302,14 @@ HTML = r"""
       const key = String(profileId || activeYouTubeProfileId || "default");
       youtubeStreamsByProfile[key] = Array.isArray(streams) ? streams : [];
       youtubeStreamLoadState[key] = "done";
+      youtubeStreamLoadedAt[key] = Date.now();
+    }
+
+    function invalidateYouTubeStreams(profileId, state = "idle") {
+      const key = String(profileId || activeYouTubeProfileId || "default");
+      delete youtubeStreamsByProfile[key];
+      delete youtubeStreamLoadedAt[key];
+      youtubeStreamLoadState[key] = state;
     }
 
     function nodeYoutubeStreamOptions(node, selectedStreamId = lockedYoutubeStreamId(node), profileId = nodeProfileId(node)) {
@@ -3649,6 +3682,7 @@ HTML = r"""
     }
 
     function resourceProfileIds(item) {
+      if (item?.profile_id) return [String(item.profile_id)];
       const ids = new Set();
       (item?.copies || []).forEach((copy) => {
         const node = nodes.find((entry) => String(entry.id) === String(copy.node_id || ""));
@@ -3839,8 +3873,8 @@ HTML = r"""
       refs.youtubeJsonFileInput.click();
     }
 
-    function renderYouTubeStreams(streams = [], selectedStreamId = "") {
-      cacheYouTubeStreams(selectedYouTubeProfileId(), streams);
+    function renderYouTubeStreams(streams = [], selectedStreamId = "", options = {}) {
+      if (options.cache !== false) cacheYouTubeStreams(selectedYouTubeProfileId(), streams);
       const previousMain = selectedStreamId || refs.youtubeStreamSelect.value;
       const previousPrepare = refs.youtubePrepareStreamSelect.value;
       const streamOptions = streams.map((item) => {
@@ -3856,31 +3890,33 @@ HTML = r"""
       syncStreamOutputMode();
     }
 
-    async function ensureYouTubeStreamsForProfile(profileId, nodeId) {
+    async function ensureYouTubeStreamsForProfile(profileId, nodeId, options = {}) {
       profileId = String(profileId || "default");
-      if (!profileId || youtubeStreamsByProfile[profileId] || youtubeStreamLoadState[profileId] === "loading") return;
+      const cacheFresh = youtubeStreamLoadState[profileId] === "done"
+        && Date.now() - Number(youtubeStreamLoadedAt[profileId] || 0) < YOUTUBE_STREAM_CACHE_TTL_MS;
+      if (!profileId || youtubeStreamLoadState[profileId] === "loading" || (!options.force && cacheFresh)) return;
       if (!nodeId) return;
       youtubeStreamLoadState[profileId] = "loading";
       renderNodes();
       try {
         const data = await postNodeAction("/api/nodes/youtube/resources", { node_id: nodeId, profile_id: profileId });
-        if (data.ok) cacheYouTubeStreams(profileId, data.streams || []);
-        else youtubeStreamLoadState[profileId] = "failed";
+        if (data.ok && data.configured !== false && data.authorized !== false) cacheYouTubeStreams(profileId, data.streams || []);
+        else invalidateYouTubeStreams(profileId, "failed");
       } catch (error) {
-        youtubeStreamLoadState[profileId] = "failed";
+        invalidateYouTubeStreams(profileId, "failed");
       }
       renderNodes();
       renderStreamControls();
     }
 
-    function preloadNodeYouTubeStreams() {
+    function preloadNodeYouTubeStreams(options = {}) {
       const seen = new Set();
       nodes.forEach((node) => {
         if (node.enabled === false || !node.roles?.agent?.enabled) return;
         const profileId = nodeRowProfileId(node);
         if (!profileId || seen.has(profileId)) return;
         seen.add(profileId);
-        ensureYouTubeStreamsForProfile(profileId, node.id);
+        ensureYouTubeStreamsForProfile(profileId, node.id, options);
       });
     }
 
@@ -4084,6 +4120,7 @@ HTML = r"""
       renderYouTubeAgentList();
       renderNodes();
       await youtubeProfileApi("/api/youtube/profiles/select", { profile_id: profileId });
+      invalidateYouTubeStreams(profileId);
       await refreshYouTubeResources();
     }
 
@@ -4257,7 +4294,8 @@ HTML = r"""
         node = ensureSelectedNodeForProfile();
       }
       if (!node) {
-        renderYouTubeStreams([]);
+        invalidateYouTubeStreams(selectedYouTubeProfileId(), "failed");
+        renderYouTubeStreams([], "", { cache: false });
         renderYouTubeAgentList();
         renderYouTubeResourceDetails({});
         refs.youtubeWizardLog.textContent = "当前 Profile 还没有可用 Agent。请先在节点列表给 Agent 选择这个 Profile。";
@@ -4270,21 +4308,33 @@ HTML = r"""
       try {
         const data = await postNodeAction("/api/nodes/youtube/resources", { node_id: node.id, profile_id: selectedYouTubeProfileId() });
         if (!data.ok && data.configured === undefined) {
-          renderYouTubeStreams([]);
-          refs.youtubeWizardLog.textContent = data.message || "YouTube API 读取失败";
+          invalidateYouTubeStreams(selectedYouTubeProfileId(), "failed");
+          renderYouTubeStreams([], "", { cache: false });
+          if (data.reauthorize_required) {
+            youtubeProfiles = youtubeProfiles.map((profile) => (
+              profile.id === selectedYouTubeProfileId() ? { ...profile, authorized: false } : profile
+            ));
+            renderYouTubeProfileQuickBar();
+          }
+          refs.youtubeWizardLog.textContent = data.reauthorize_required
+            ? `YouTube 长期授权已失效：${data.message || "Google 已撤销 Refresh Token"}\n请点击“连接 YouTube”重新授权。`
+            : (data.message || "YouTube API 读取失败");
           return data;
         }
         if (!data.configured) {
-          renderYouTubeStreams([]);
+          invalidateYouTubeStreams(selectedYouTubeProfileId(), "failed");
+          renderYouTubeStreams([], "", { cache: false });
           refs.youtubeWizardLog.textContent = "当前 Hub 尚未配置 YouTube OAuth。请先上传 client_secret_*.json 并保存 API 配置，再连接 YouTube。";
           return data;
         }
         if (!data.authorized) {
-          renderYouTubeStreams([]);
+          invalidateYouTubeStreams(selectedYouTubeProfileId(), "failed");
+          renderYouTubeStreams([], "", { cache: false });
           refs.youtubeWizardLog.textContent = "Client ID 已配置，频道尚未授权。点击“连接 YouTube”获取设备验证码。";
           return data;
         }
         if (!data.ok) {
+          invalidateYouTubeStreams(selectedYouTubeProfileId(), "failed");
           refs.youtubeWizardLog.textContent = data.message || "YouTube API 读取失败";
           return data;
         }
@@ -4306,6 +4356,7 @@ HTML = r"""
         refs.youtubeWizardLog.textContent = renderYouTubeResourceSummary(data);
         return data;
       } catch (error) {
+        invalidateYouTubeStreams(selectedYouTubeProfileId(), "failed");
         refs.youtubeWizardLog.textContent = friendlyError(error, "YouTube API 读取失败");
         return null;
       } finally {
@@ -4518,6 +4569,7 @@ HTML = r"""
         if (data.result?.stream_id) {
           await saveNodeStreamLock(node.id, { youtube_stream_id: data.result.stream_id });
         }
+        invalidateYouTubeStreams(selectedYouTubeProfileId());
         refs.youtubeWizardLog.textContent = `直播目标已创建并锁定到当前 Agent。\n${data.result?.title || title}\n${data.result?.watch_url || ""}`;
         await refreshYouTubeResources();
         refs.youtubeStreamSelect.value = data.result?.stream_id || "";
@@ -4736,7 +4788,11 @@ HTML = r"""
       uiMessage("正在刷新 Hub、Agent 和资源状态...");
       showDiagnostics("正在刷新状态，请稍候...", { scroll: false });
       try {
-        const [nodeResp, libraryResp] = await Promise.all([fetch("/api/nodes"), fetch("/api/media-library")]);
+        const [nodeResp, libraryResp] = await Promise.all([
+          fetch("/api/nodes"),
+          fetch("/api/media-library"),
+          loadYouTubeProfiles().catch(() => null),
+        ]);
         if (!nodeResp.ok) throw new Error(nodeResp.statusText || "节点状态读取失败");
         if (!libraryResp.ok) throw new Error(libraryResp.statusText || "媒体库读取失败");
         nodes = await nodeResp.json();
@@ -4746,7 +4802,7 @@ HTML = r"""
         renderStreamControls();
         renderYouTubeAgentList();
         renderTailscaleNodeOptions();
-        preloadNodeYouTubeStreams();
+        preloadNodeYouTubeStreams({ force: true });
         showDiagnostics(statusSummaryText(), { scroll: false });
         uiMessage("状态已刷新。AGENT 表、资源管理和开播表单已经更新。");
         log("状态已刷新");
@@ -5417,6 +5473,61 @@ HTML = r"""
       window.setTimeout(() => { refs.copyAgentInstallBtn.textContent = "复制一键安装命令"; }, 1800);
     }
 
+    function sharePreflightDiagnosticText(preflight = {}) {
+      const lines = [
+        "文件互传保持公网直连，不会回退 Tailscale。",
+        "",
+        `文件：${preflight.media || "--"} ${preflight.size_label ? `(${preflight.size_label})` : ""}`,
+      ];
+      (preflight.targets || []).forEach((target) => {
+        lines.push("");
+        lines.push(`${target.ok ? "✓" : "✗"} ${target.node_name || target.node_id || "目标 Agent"}`);
+        (target.checks || []).forEach((check) => {
+          lines.push(`  ${check.ok ? "✓" : "✗"} ${check.name}：${check.message || "--"}`);
+        });
+      });
+      const repairs = preflight.repair_steps || [];
+      if (repairs.length) {
+        lines.push("");
+        lines.push("修复向导");
+        repairs.forEach((step, index) => lines.push(`${index + 1}. ${step}`));
+        lines.push(`${repairs.length + 1}. 目标 VPS 自检：ss -ltnp | grep :8787`);
+        lines.push(`${repairs.length + 2}. 本机防火墙示例：sudo ufw allow 8787/tcp`);
+        lines.push(`${repairs.length + 3}. 云厂商安全组必须另外放行入站 TCP 8787。`);
+      }
+      return lines.join("\n");
+    }
+
+    function runtimeShareRepairGuide(preflight = {}, error = "") {
+      const message = String(error || "公网传输在预检通过后中断");
+      const repairs = [
+        `运行时错误：${message}`,
+        "确认目标公网 TCP 8787 在整个传输期间保持开放，且云安全组没有连接数或流量限制。",
+        "检查源、目标 Agent 服务日志和磁盘空间；修复后重新检测并传输。",
+        ...(preflight.repair_steps || []),
+      ];
+      return { ...preflight, repair_steps: [...new Set(repairs)] };
+    }
+
+    async function showShareRepairGuide(preflight = {}, options = {}) {
+      return showChoiceDialog({
+        title: options.title || "Agent 公网互传预检失败",
+        subtitle: options.subtitle || "请按失败项目修复，然后重新检测。",
+        icon: "!",
+        message: sharePreflightDiagnosticText(preflight),
+        choices: [
+          { label: "修复后重新检测", value: "retry", className: "primary" },
+          { label: "打开目标 Agent 设置", value: "agent_settings" },
+          { label: "刷新节点状态", value: "refresh" },
+        ],
+      });
+    }
+
+    function openFailedShareAgentSettings(preflight = {}) {
+      const failed = (preflight.targets || []).find((target) => !target.ok) || (preflight.targets || [])[0];
+      if (failed?.node_id) setRoleSettingsOpen(true, failed.node_id);
+    }
+
     async function pushSelectedMedia(explicitTargetNodeIds = null) {
       const sourceNode = nodes.find((item) => String(item.id) === String(selectedMediaNodeId())) || selectedNode();
       const requestedTargets = Array.isArray(explicitTargetNodeIds) ? explicitTargetNodeIds : selectedNodeIds();
@@ -5438,11 +5549,11 @@ HTML = r"""
       if (refs.pushSelectedBtn) refs.pushSelectedBtn.disabled = true;
       renderTransfer({
         status: "running",
-        badge: "共享中",
-        title: `共享到 ${targetLabel}`,
+        badge: "线路检测",
+        title: `检查 ${sourceLabel} → ${targetLabel}`,
         source: sourceLabel,
         target: targetLabel,
-        message: `正在创建共享任务：${media}`,
+        message: `正在检查源/目标 Agent、目标公网地址、TCP 8787、临时票据、上传探针和磁盘空间：${media}`,
       });
       try {
         const resp = await fetch("/api/media/share", {
@@ -5460,6 +5571,16 @@ HTML = r"""
             target: targetLabel,
             message: friendlyError(first.message || first.error || "Hub 未能创建共享任务"),
           });
+          if (first.preflight) {
+            const repairAction = await showShareRepairGuide(first.preflight);
+            if (repairAction === "refresh") {
+              await refreshAll();
+            } else if (repairAction === "agent_settings") {
+              openFailedShareAgentSettings(first.preflight);
+            } else if (repairAction === "retry") {
+              window.setTimeout(() => pushSelectedMedia([...target_node_ids]), 0);
+            }
+          }
           return false;
         }
         let last = first;
@@ -5498,6 +5619,15 @@ HTML = r"""
           if (!statusResp.ok && last.status !== "failed") {
             last = { ...last, status: "failed", message: last.message || "无法读取共享进度" };
           }
+        }
+        if (last.status === "failed" && last.preflight) {
+          const repairAction = await showShareRepairGuide(
+            runtimeShareRepairGuide(last.preflight, last.error || last.message),
+            { title: "Agent 公网互传中断", subtitle: "线路预检曾通过，但实际传输期间发生错误。" },
+          );
+          if (repairAction === "refresh") await refreshAll();
+          if (repairAction === "agent_settings") openFailedShareAgentSettings(last.preflight);
+          if (repairAction === "retry") window.setTimeout(() => pushSelectedMedia([...target_node_ids]), 0);
         }
         return completed;
       } catch (error) {
@@ -5571,7 +5701,16 @@ HTML = r"""
         target_node_ids: [payload.node_id],
         media: payload.library_media_name,
       });
-      if (!task.ok || !task.task_id) throw new Error(task.message || "自动复制任务创建失败");
+      if (!task.ok || !task.task_id) {
+        if (task.preflight) {
+          const repairAction = await showShareRepairGuide(task.preflight);
+          if (repairAction === "refresh") await refreshAll();
+          if (repairAction === "agent_settings") openFailedShareAgentSettings(task.preflight);
+          if (repairAction === "retry") return ensureSmartStartMedia(payload);
+          return { ok: false, copied: false, canceled: true, preflight: task.preflight };
+        }
+        throw new Error(task.message || "自动复制任务创建失败");
+      }
       const deadline = Date.now() + 30 * 60 * 1000;
       while (Date.now() < deadline) {
         const response = await fetch(`/api/media/share/status/${encodeURIComponent(task.task_id)}`);
@@ -5598,7 +5737,19 @@ HTML = r"""
           message: status.message || "复制完成后自动开播",
         });
         if (status.status === "done") return { ok: true, copied: true, task_id: task.task_id };
-        if (status.status === "failed" || status.ok === false) throw new Error(status.message || "自动复制失败");
+        if (status.status === "failed" || status.ok === false) {
+          if (status.preflight) {
+            const repairAction = await showShareRepairGuide(
+              runtimeShareRepairGuide(status.preflight, status.error || status.message),
+              { title: "Smart Start 自动复制中断", subtitle: "请修复公网线路后重新检测。" },
+            );
+            if (repairAction === "refresh") await refreshAll();
+            if (repairAction === "agent_settings") openFailedShareAgentSettings(status.preflight);
+            if (repairAction === "retry") return ensureSmartStartMedia(payload);
+            return { ok: false, copied: false, canceled: true, preflight: status.preflight };
+          }
+          throw new Error(status.error || status.message || "自动复制失败");
+        }
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
       throw new Error("自动复制等待超时，请检查节点网络后重试");
@@ -5722,6 +5873,40 @@ HTML = r"""
       const data = await resp.json().catch(() => ({ ok: false, message: resp.statusText }));
       if (!resp.ok && data.ok !== false) data.ok = false;
       return data;
+    }
+
+    async function updateMediaProfile(row, profileId) {
+      const mediaName = row.dataset.mediaName || "";
+      const profile = youtubeProfiles.find((item) => String(item.id) === String(profileId));
+      const data = await postJson("/api/media-library/profile", {
+        media_name: mediaName,
+        profile_id: profileId,
+      });
+      if (!data.ok) {
+        renderTransfer({
+          status: "failed",
+          badge: "修改失败",
+          title: "视频 Profile 修改失败",
+          percent: 0,
+          message: friendlyError(data.message || "无法保存视频 Profile"),
+        });
+        return;
+      }
+      const resource = mediaResourceByName(mediaName);
+      if (resource) {
+        resource.profile_id = data.profile_id || profileId;
+        resource.profile_name = data.profile_name || profile?.name || profileId;
+      }
+      renderTransfer({
+        status: "done",
+        badge: "已修改",
+        title: "视频 Profile 已更新",
+        percent: 100,
+        message: `${mediaName} → ${data.profile_name || profile?.name || profileId}`,
+      });
+      log(`视频 Profile 已更新：${mediaName} → ${data.profile_name || profile?.name || profileId}`);
+      renderMedia();
+      renderStreamControls();
     }
 
     async function handleMediaAction(action, row) {
@@ -5848,12 +6033,20 @@ HTML = r"""
       selectMediaRow(row);
       contextMediaRow = row;
       const sourceNodeId = String(row.dataset.nodeId || "");
+      const resource = mediaResourceByName(row.dataset.mediaName || "");
+      const currentProfileId = resourceProfileIds(resource)[0] || "";
+      const profiles = youtubeProfiles.length ? youtubeProfiles : [{ id: "default", name: "Default YouTube Profile" }];
       const targets = nodes.filter((node) => node.roles?.agent?.enabled && String(node.id) !== sourceNodeId);
       const targetButtons = (action) => targets.length
         ? targets.map((node) => `<button data-media-menu-action="${action}" data-target-node-id="${escapeHtml(node.id)}">${escapeHtml(node.name || node.id)}</button>`).join("")
         : `<button disabled>没有其他在线节点</button>`;
       refs.mediaSendTargets.innerHTML = targetButtons("send-node");
       refs.mediaMoveTargets.innerHTML = targetButtons("move-node");
+      refs.mediaProfileTargets.innerHTML = profiles.map((profile) => `
+        <button class="${String(profile.id) === String(currentProfileId) ? "active" : ""}" data-media-menu-action="set-profile" data-profile-id="${escapeHtml(profile.id)}">
+          ${escapeHtml(profile.name || profile.id)}
+        </button>
+      `).join("");
       refs.mediaContextMenu.classList.add("open");
       const menuWidth = refs.mediaContextMenu.offsetWidth || 160;
       const menuHeight = refs.mediaContextMenu.offsetHeight || 170;
@@ -6672,8 +6865,11 @@ HTML = r"""
       const row = contextMediaRow;
       const action = button.dataset.mediaMenuAction;
       const targetNodeId = button.dataset.targetNodeId || "";
+      const profileId = button.dataset.profileId || "";
       hideMediaMenu();
-      if (action === "send-node") {
+      if (action === "set-profile") {
+        updateMediaProfile(row, profileId);
+      } else if (action === "send-node") {
         selectMediaRow(row);
         pushSelectedMedia([targetNodeId]);
       } else if (action === "move-node") {
@@ -6895,6 +7091,11 @@ HTML = r"""
     loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
     checkDailyGithubUpdates();
     window.setInterval(refreshRunningAgentParameters, AGENT_STREAM_REFRESH_MS);
+    window.setInterval(() => {
+      loadYouTubeProfiles()
+        .then(() => preloadNodeYouTubeStreams({ force: true }))
+        .catch(() => null);
+    }, YOUTUBE_PROFILE_REFRESH_MS);
     window.setInterval(checkDailyGithubUpdates, 60 * 60 * 1000);
   </script>
 </body>
@@ -7319,20 +7520,65 @@ def set_node_stream_lock(node_id: str, updates: dict[str, Any]) -> dict[str, Any
 
 
 def load_media_metadata() -> dict[str, Any]:
-    ensure_dirs()
-    try:
-        payload = json.loads(MEDIA_METADATA_FILE.read_text(encoding="utf-8"))
-        if isinstance(payload, dict):
-            payload.setdefault("duplicate_retention", [])
-            return payload
-    except Exception:
-        pass
-    return {"duplicate_retention": []}
+    with MEDIA_METADATA_LOCK:
+        ensure_dirs()
+        try:
+            payload = json.loads(MEDIA_METADATA_FILE.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                payload.setdefault("duplicate_retention", [])
+                payload.setdefault("media_profiles", {})
+                return payload
+        except Exception:
+            pass
+        return {"duplicate_retention": [], "media_profiles": {}}
 
 
 def save_media_metadata(payload: dict[str, Any]) -> None:
-    ensure_dirs()
-    MEDIA_METADATA_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with MEDIA_METADATA_LOCK:
+        ensure_dirs()
+        MEDIA_METADATA_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def assigned_media_profile_id(metadata: dict[str, Any], media_name: str) -> str:
+    assignments = metadata.get("media_profiles") or {}
+    raw = assignments.get(media_name) if isinstance(assignments, dict) else ""
+    if isinstance(raw, dict):
+        raw = raw.get("profile_id")
+    return safe_youtube_profile_id(str(raw)) if raw else ""
+
+
+def set_media_profile(media_name: str, profile_id: str) -> dict[str, Any]:
+    media_name = safe_media_filename(media_name)
+    profile_id = safe_youtube_profile_id(profile_id)
+    config = load_youtube_profiles_config()
+    profile = next((item for item in config["profiles"] if item["id"] == profile_id), None)
+    if not profile:
+        raise YouTubeAPIError("YouTube profile was not found", status_code=404, reason="profile_not_found")
+    with MEDIA_METADATA_LOCK:
+        metadata = load_media_metadata()
+        assignments = metadata.get("media_profiles")
+        if not isinstance(assignments, dict):
+            assignments = {}
+        assignments[media_name] = {
+            "profile_id": profile_id,
+            "updated_at": time.time(),
+        }
+        metadata["media_profiles"] = assignments
+        save_media_metadata(metadata)
+    return profile
+
+
+def copy_media_profile_assignment(old_name: str, new_name: str) -> None:
+    old_name = Path(str(old_name or "")).name
+    new_name = safe_media_filename(Path(str(new_name or "")).name)
+    with MEDIA_METADATA_LOCK:
+        metadata = load_media_metadata()
+        assignments = metadata.get("media_profiles") or {}
+        if not isinstance(assignments, dict) or old_name not in assignments:
+            return
+        assignments[new_name] = dict(assignments[old_name]) if isinstance(assignments[old_name], dict) else assignments[old_name]
+        metadata["media_profiles"] = assignments
+        save_media_metadata(metadata)
 
 
 def cleanup_verified_duplicates(
@@ -7423,6 +7669,7 @@ def media_library_payload() -> dict[str, Any]:
     cleanup_verified_duplicates(metadata, execute=True)
     metadata = load_media_metadata()
     resources: dict[str, dict[str, Any]] = {}
+    profiles = {profile["id"]: profile for profile in load_youtube_profiles_config()["profiles"]}
     node_disks: list[dict[str, Any]] = []
     for node in load_nodes():
         if not node.get("enabled", True):
@@ -7464,6 +7711,11 @@ def media_library_payload() -> dict[str, Any]:
                 "last_used_label": str(video.get("last_used_label") or "从未开播"),
             })
             item["last_used_at"] = max(float(item.get("last_used_at") or 0), float(video.get("last_used_at") or 0))
+    for item in resources.values():
+        profile_id = assigned_media_profile_id(metadata, str(item.get("name") or ""))
+        if profile_id in profiles:
+            item["profile_id"] = profile_id
+            item["profile_name"] = str(profiles[profile_id].get("name") or profile_id)
     return {
         "ok": True,
         "resources": sorted(resources.values(), key=lambda item: float(item.get("modified") or 0), reverse=True),
@@ -7569,7 +7821,17 @@ def save_youtube_profile_config(profile_id: str, updates: dict[str, Any]) -> dic
 
 def youtube_error_response(exc: Exception):
     if isinstance(exc, YouTubeAPIError):
-        return jsonify({"ok": False, "message": str(exc), "reason": exc.reason}), exc.status_code
+        detail = f"{exc.reason} {exc}".lower()
+        reauthorize_required = any(
+            marker in detail
+            for marker in ("invalid_grant", "unauthorized_client", "deleted_client", "token has been expired", "token has been revoked")
+        )
+        return jsonify({
+            "ok": False,
+            "message": str(exc),
+            "reason": exc.reason,
+            "reauthorize_required": reauthorize_required,
+        }), exc.status_code
     return jsonify({"ok": False, "message": str(exc)}), 502
 
 
@@ -7839,6 +8101,198 @@ def request_node_media_info(node: dict[str, Any], media: str) -> dict[str, Any]:
     return {"ok": False, "message": "media not found on source node"}
 
 
+def share_transfer_preflight(
+    source_node: dict[str, Any],
+    target_nodes: list[dict[str, Any]],
+    media: str,
+) -> dict[str, Any]:
+    source_name = str(source_node.get("name") or source_node.get("id") or "source Agent")
+    media_info = request_node_media_info(source_node, media)
+    checks: list[dict[str, Any]] = []
+    repair_steps: list[str] = []
+
+    def add_repair(step: str) -> None:
+        if step and step not in repair_steps:
+            repair_steps.append(step)
+
+    if not media_info.get("ok"):
+        add_repair(f"确认源 Agent「{source_name}」在线，并在资源管理器中重新选择仍然存在的视频。")
+        add_repair("如果源 Agent 刚升级或重启，请刷新 Hub 节点和媒体库后重试。")
+        return {
+            "ok": False,
+            "message": media_info.get("message") or "源 Agent 无法读取所选视频",
+            "checks": [{"name": "源 Agent 与视频", "ok": False, "message": media_info.get("message") or "不可用"}],
+            "repair_steps": repair_steps,
+            "targets": [],
+        }
+
+    filename = str(media_info.get("name") or Path(media).name)
+    total_size = int(media_info.get("size") or 0)
+    if total_size <= 0:
+        return {
+            "ok": False,
+            "message": "源视频大小不可用或文件为空",
+            "checks": [{"name": "源视频", "ok": False, "message": "文件大小不可用"}],
+            "repair_steps": ["在源 Agent 上检查文件是否完整，再刷新媒体库。"],
+            "targets": [],
+        }
+    checks.append({
+        "name": "源 Agent 与视频",
+        "ok": True,
+        "message": f"{source_name} / {filename} / {file_size_label(total_size)}",
+    })
+
+    target_results: list[dict[str, Any]] = []
+    for target_node in target_nodes:
+        target_id = str(target_node.get("id") or "")
+        target_name = str(target_node.get("name") or target_id)
+        target_result: dict[str, Any] = {
+            "node_id": target_id,
+            "node_name": target_name,
+            "ok": False,
+            "checks": [],
+            "public_urls": [],
+        }
+        status = request_node_json(target_node, "/api/status", timeout=10)
+        if not status.get("ok"):
+            message = status.get("message") or "Hub 无法连接目标 Agent 控制端口"
+            target_result["checks"].append({"name": "Agent 控制连接", "ok": False, "message": message})
+            target_result["message"] = message
+            add_repair(f"确认目标 Agent「{target_name}」在线，Tailscale 地址和 8787 控制端口可达。")
+            target_results.append(target_result)
+            continue
+        target_result["checks"].append({"name": "Agent 控制连接", "ok": True, "message": "控制接口正常"})
+
+        existing = next(
+            (
+                item for item in status.get("videos") or []
+                if str(item.get("name") or Path(str(item.get("video_path") or "")).name) == filename
+            ),
+            None,
+        )
+        if existing:
+            message = f"目标 Agent 已有同名文件 {filename}；为避免覆盖或误校验，未开始复制"
+            target_result["checks"].append({"name": "目标文件冲突", "ok": False, "message": message})
+            target_result["message"] = message
+            add_repair(f"目标 Agent「{target_name}」已有同名视频；直接使用现有副本，或先改名后再复制。")
+            target_results.append(target_result)
+            continue
+        target_result["checks"].append({"name": "目标文件冲突", "ok": True, "message": "没有同名文件"})
+
+        free_bytes = int((status.get("disk") or {}).get("free") or 0)
+        if free_bytes and free_bytes - total_size < MIN_FREE_AFTER_UPLOAD_BYTES:
+            message = (
+                f"可用空间 {file_size_label(free_bytes)} 不足；传输后必须至少保留 "
+                f"{file_size_label(MIN_FREE_AFTER_UPLOAD_BYTES)}"
+            )
+            target_result["checks"].append({"name": "磁盘空间", "ok": False, "message": message})
+            target_result["message"] = message
+            add_repair(f"清理目标 Agent「{target_name}」磁盘，确保视频写入后仍保留至少 {file_size_label(MIN_FREE_AFTER_UPLOAD_BYTES)}。")
+            target_results.append(target_result)
+            continue
+        target_result["checks"].append({
+            "name": "磁盘空间",
+            "ok": True,
+            "message": file_size_label(free_bytes) if free_bytes else "Agent 未报告空间，继续检查线路",
+        })
+
+        public_status = request_node_json(target_node, "/api/public-upload", timeout=10)
+        discovered_public_url = (
+            str(public_status.get("public_origin") or "").strip().rstrip("/")
+            if public_status.get("ok") and public_status.get("supported")
+            else ""
+        )
+        public_urls: list[str] = []
+        for public_url in [discovered_public_url, *node_upload_base_urls(target_node)]:
+            if public_url and is_public_upload_url(public_url) and public_url not in public_urls:
+                public_urls.append(public_url)
+        target_result["public_urls"] = public_urls
+        if not public_urls:
+            message = "目标 Agent 没有可用的公网 IPv4 上传地址"
+            target_result["checks"].append({"name": "公网地址", "ok": False, "message": message})
+            target_result["message"] = message
+            add_repair(f"给目标 Agent「{target_name}」配置公网 IPv4，并设置 STREAM_AGENT_PUBLIC_ORIGIN=http://公网IP:8787。")
+            target_results.append(target_result)
+            continue
+        target_result["checks"].append({"name": "公网地址", "ok": True, "message": " / ".join(public_urls)})
+
+        preflight_upload_id = f"preflight_{uuid.uuid4().hex}"
+        ticket = request_node_upload_ticket(
+            target_node,
+            upload_id=preflight_upload_id,
+            filename=filename,
+            total_size=total_size,
+        )
+        if not ticket.get("ok") or not str(ticket.get("ticket") or ""):
+            message = ticket.get("message") or "目标 Agent 无法签发临时上传票据"
+            target_result["checks"].append({"name": "临时上传票据", "ok": False, "message": message})
+            target_result["message"] = message
+            add_repair(f"升级目标 Agent「{target_name}」，并确认 Hub 保存的 Agent 控制凭据有效。")
+            target_results.append(target_result)
+            continue
+        ticket_value = str(ticket.get("ticket") or "")
+        target_result["checks"].append({"name": "临时上传票据", "ok": True, "message": "签发成功"})
+
+        source_probe = post_node_json(
+            source_node,
+            "/api/share-media/preflight",
+            {
+                "target_base_url": public_urls[0],
+                "target_base_urls": public_urls,
+                "target_upload_ticket": ticket_value,
+                "probe_bytes": NODE_UPLOAD_PROBE_BYTES,
+                "minimum_bytes_per_second": MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND,
+                "timeout_seconds": NODE_UPLOAD_PROBE_TIMEOUT_SECONDS,
+            },
+            timeout=max(20, NODE_UPLOAD_PROBE_TIMEOUT_SECONDS * max(1, len(public_urls)) + 5),
+        )
+        cancel_url = str(source_probe.get("route") or public_urls[0]).rstrip("/")
+        with suppress(Exception):
+            post_url_json(
+                f"{cancel_url}/api/upload-chunk/cancel",
+                {"upload_id": preflight_upload_id},
+                timeout=10,
+                headers={"X-Upload-Ticket": ticket_value},
+            )
+        if not source_probe.get("ok"):
+            message = source_probe.get("message") or "源 Agent 无法连接目标公网 8787 上传端口"
+            target_result["checks"].append({"name": "源到目标公网线路", "ok": False, "message": message})
+            target_result["probe"] = source_probe
+            target_result["message"] = message
+            add_repair(f"在目标 VPS「{target_name}」的云安全组放行入站 TCP 8787。")
+            add_repair("检查目标 VPS 本机防火墙，并确认 Agent 监听 0.0.0.0:8787。")
+            add_repair("升级源、目标 Agent 后重新检测；旧版 Agent 不支持公网互传预检。")
+            target_results.append(target_result)
+            continue
+
+        probe = source_probe.get("probe") or {}
+        target_result["checks"].append({
+            "name": "源到目标公网线路",
+            "ok": True,
+            "message": f"{source_probe.get('route') or public_urls[0]} / {probe.get('rate_label') or '可达'}",
+        })
+        target_result["route"] = source_probe.get("route") or public_urls[0]
+        target_result["probe"] = probe
+        target_result["message"] = "公网互传预检通过"
+        target_result["ok"] = True
+        target_results.append(target_result)
+
+    ok = bool(target_results) and all(item.get("ok") for item in target_results)
+    if not ok and not repair_steps:
+        add_repair("根据失败项目检查公网地址、云安全组 TCP 8787、系统防火墙和 Agent 版本。")
+    return {
+        "ok": ok,
+        "message": "所有目标公网线路预检通过" if ok else "公网互传预检未通过",
+        "media": filename,
+        "size": total_size,
+        "size_label": file_size_label(total_size),
+        "checks": checks,
+        "targets": target_results,
+        "repair_steps": repair_steps,
+        "policy": "public-only; no Tailscale fallback",
+    }
+
+
 def share_task_snapshot(task_id: str) -> dict[str, Any] | None:
     with SHARE_TASKS_LOCK:
         task = SHARE_TASKS.get(task_id)
@@ -7880,6 +8334,7 @@ def share_task_payload(task: dict[str, Any]) -> dict[str, Any]:
         "migration_done_files": int(task.get("migration_done_files") or 0),
         "route_label": task.get("route_label") or "",
         "transfer_route": task.get("transfer_route") or "",
+        "preflight": task.get("preflight") or {},
     }
 
 
@@ -8133,6 +8588,18 @@ def run_node_delete_migration_task(
                 done_bytes=0,
                 total_bytes=0,
             )
+            preflight = share_transfer_preflight(
+                source_node,
+                [target_node],
+                str(item.get("video_path") or item.get("name") or ""),
+            )
+            if not preflight.get("ok"):
+                details = "; ".join(
+                    str(target.get("message") or "")
+                    for target in preflight.get("targets") or []
+                    if target.get("message")
+                )
+                raise RuntimeError(details or preflight.get("message") or "公网迁移预检失败")
             run_share_task(
                 task_id,
                 source_node,
@@ -8703,6 +9170,28 @@ def api_save_hub_settings():
 @APP.get("/api/media-library")
 def api_media_library():
     return jsonify(media_library_payload())
+
+
+@APP.post("/api/media-library/profile")
+def api_media_library_profile():
+    payload = request.get_json(silent=True) or {}
+    media_name = str(payload.get("media_name") or payload.get("media") or "").strip()
+    profile_id = str(payload.get("profile_id") or "").strip()
+    if not media_name or not profile_id:
+        return jsonify({"ok": False, "message": "media_name and profile_id are required"}), 400
+    try:
+        profile = set_media_profile(media_name, profile_id)
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    except YouTubeAPIError as exc:
+        return youtube_error_response(exc)
+    return jsonify({
+        "ok": True,
+        "media_name": safe_media_filename(media_name),
+        "profile_id": str(profile.get("id") or profile_id),
+        "profile_name": str(profile.get("name") or profile_id),
+        "message": "Media Profile updated",
+    })
 
 
 @APP.post("/api/media-library/cleanup")
@@ -9513,6 +10002,15 @@ def api_media_share():
     if not target_nodes:
         return jsonify({"ok": False, "message": "no target agents selected"}), 400
 
+    preflight = share_transfer_preflight(source_node, target_nodes, media)
+    if not preflight.get("ok"):
+        return jsonify({
+            "ok": False,
+            "reason": "share_preflight_failed",
+            "message": preflight.get("message") or "公网互传预检未通过",
+            "preflight": preflight,
+        }), 409
+
     task_id = f"share_{uuid.uuid4().hex}"
     progress_url = request.host_url.rstrip("/") + f"/api/media/share/progress/{task_id}"
     with SHARE_TASKS_LOCK:
@@ -9527,6 +10025,8 @@ def api_media_share():
             "total_bytes": 0,
             "current_bps": 0,
             "average_bps": 0,
+            "route_label": "公网直连（预检已通过，禁止内网回退）",
+            "preflight": preflight,
             "results": [],
             "created_at": time.time(),
             "updated_at": time.time(),
@@ -9588,6 +10088,9 @@ def api_node_media_rename():
     if not media or not new_name:
         return jsonify({"ok": False, "message": "media and new_name are required"}), 400
     result = post_node_json(node, "/api/media/rename", {"media": media, "new_name": new_name}, timeout=30)
+    if result.get("ok"):
+        with suppress(Exception):
+            copy_media_profile_assignment(Path(media).name, str(result.get("name") or new_name))
     return jsonify({"node_id": node_id, **result}), 200 if result.get("ok") else int(result.get("status_code") or 502)
 
 

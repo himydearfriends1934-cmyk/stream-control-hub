@@ -72,6 +72,7 @@ APP_STARTED_AT = time.time()
 SHARE_CHUNK_BYTES = int(os.environ.get("STREAM_AGENT_SHARE_CHUNK_BYTES", str(32 * 1024 ** 2)))
 SHARE_TIMEOUT_SECONDS = int(os.environ.get("STREAM_AGENT_SHARE_TIMEOUT_SECONDS", "300"))
 SHARE_RETRIES = int(os.environ.get("STREAM_AGENT_SHARE_RETRIES", "2"))
+SHARE_PREFLIGHT_BYTES = int(os.environ.get("STREAM_AGENT_SHARE_PREFLIGHT_BYTES", str(256 * 1024)))
 UPLOAD_TICKET_TTL_SECONDS = int(os.environ.get("STREAM_AGENT_UPLOAD_TICKET_TTL_SECONDS", "3600"))
 UPLOAD_STALE_STATE_SECONDS = max(300, int(os.environ.get("STREAM_AGENT_UPLOAD_STALE_STATE_SECONDS", "3600")))
 MIN_FREE_AFTER_UPLOAD_BYTES = int(os.environ.get("STREAM_AGENT_MIN_FREE_AFTER_UPLOAD_BYTES", str(2 * 1024 ** 3)))
@@ -1815,7 +1816,7 @@ def api_public_upload():
         "message": (
             "public browser uploads require a short-lived Hub-issued ticket"
             if public_origin
-            else "public IPv4 discovery is unavailable; use the Tailscale fallback"
+            else "public IPv4 discovery is unavailable; configure STREAM_AGENT_PUBLIC_ORIGIN"
         ),
     })
 
@@ -2123,6 +2124,80 @@ def report_share_progress(payload: dict[str, Any], *, done_bytes: int, total_byt
             },
             timeout=5,
         )
+
+
+@APP.post("/api/share-media/preflight")
+def api_share_media_preflight():
+    payload = request.get_json(silent=True) or {}
+    target_base_urls = [
+        str(item or "").strip().rstrip("/")
+        for item in (payload.get("target_base_urls") or [])
+        if str(item or "").strip()
+    ]
+    target_base_url = str(payload.get("target_base_url") or "").strip().rstrip("/")
+    if target_base_url:
+        target_base_urls.insert(0, target_base_url)
+    target_base_urls = list(dict.fromkeys(target_base_urls))
+    if not target_base_urls:
+        return jsonify({"ok": False, "message": "missing target public URL"}), 400
+    if any(not is_public_transfer_url(url) for url in target_base_urls):
+        return jsonify({
+            "ok": False,
+            "message": "互传预检只允许公网目标地址；Tailscale 和局域网不会用于文件传输",
+        }), 400
+
+    headers = target_headers(payload)
+    probe_size = max(1024, min(int(payload.get("probe_bytes") or SHARE_PREFLIGHT_BYTES), 1024 * 1024))
+    minimum_bps = max(1, int(payload.get("minimum_bytes_per_second") or 1))
+    results: list[dict[str, Any]] = []
+    for target_url in target_base_urls:
+        parsed = urlparse(target_url)
+        started_at = time.time()
+        try:
+            response = requests.post(
+                f"{target_url}/api/upload-probe",
+                data=b"0" * probe_size,
+                headers={**headers, "Content-Type": "application/octet-stream"},
+                timeout=min(30, max(3, int(payload.get("timeout_seconds") or 12))),
+            )
+            try:
+                response_payload = response.json()
+            except ValueError:
+                response_payload = {"message": response.text[:300]}
+            elapsed = max(0.001, time.time() - started_at)
+            bytes_per_second = int(probe_size / elapsed)
+            ok = response.ok and bool(response_payload.get("ok")) and bytes_per_second >= minimum_bps
+            message = str(response_payload.get("message") or "")
+            if response.ok and bool(response_payload.get("ok")) and bytes_per_second < minimum_bps:
+                message = f"公网线路速度过低：{file_size_label(bytes_per_second)}/s"
+            result = {
+                "ok": ok,
+                "url": target_url,
+                "host": str(parsed.hostname or ""),
+                "port": int(parsed.port or (443 if parsed.scheme == "https" else 80)),
+                "status_code": response.status_code,
+                "elapsed_seconds": round(elapsed, 3),
+                "bytes_per_second": bytes_per_second,
+                "rate_label": f"{file_size_label(bytes_per_second)}/s",
+                "message": message or ("公网线路正常" if ok else "目标 Agent 的上传探针返回失败"),
+            }
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "url": target_url,
+                "host": str(parsed.hostname or ""),
+                "port": int(parsed.port or (443 if parsed.scheme == "https" else 80)),
+                "message": str(exc),
+            }
+        results.append(result)
+        if result["ok"]:
+            return jsonify({"ok": True, "route": target_url, "probe": result, "results": results})
+
+    return jsonify({
+        "ok": False,
+        "message": results[-1].get("message") if results else "公网线路预检失败",
+        "results": results,
+    }), 502
 
 
 @APP.post("/api/share-media")
