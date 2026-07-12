@@ -2369,9 +2369,9 @@ HTML = r"""
     .dashboard-grid .top-log-panel,
     .dashboard-grid .command-strip { grid-column: span 12; }
     .dashboard-grid .resource-card { grid-column: span 7; order: initial; }
-    .dashboard-grid .monitor-card { grid-column: span 5; }
-    .dashboard-grid .node-table-card { grid-column: span 7; }
-    .dashboard-grid .upload-card { grid-column: span 5; }
+    .dashboard-grid .monitor-card { grid-column: span 7; }
+    .dashboard-grid .node-table-card { grid-column: span 5; }
+    .dashboard-grid .upload-card { grid-column: span 12; }
     .dashboard-grid .upload-stack { display: contents; }
     .dashboard-source-grid { display: none; }
     @media (max-width: 760px) {
@@ -3080,17 +3080,17 @@ HTML = r"""
         // Browser storage may be unavailable in private or restricted contexts.
       }
     }
-    const DASHBOARD_LAYOUT_STORAGE_KEY = "streamHub.dashboardLayout";
+    const DASHBOARD_LAYOUT_STORAGE_KEY = "streamHub.dashboardLayout.v2";
     const DASHBOARD_MODULES = [
       { id: "connect", selector: ".utility-connect", title: "Agent 快速连接", span: 4 },
       { id: "github", selector: ".github-utility-item", title: "GitHub 更新", span: 5 },
       { id: "youtube", selector: ".utility-api", title: "YouTube API", span: 3 },
       { id: "logs", selector: ".top-log-panel", title: "审计与操作日志", span: 12 },
       { id: "command", selector: ".command-strip", title: "开播指挥条", span: 12 },
+      { id: "monitor", selector: ".monitor-card", title: "节点监控", span: 7 },
+      { id: "nodes", selector: ".node-table-card", title: "VPS 节点表", span: 5 },
       { id: "resources", selector: ".resource-card", title: "资源管理", span: 7 },
-      { id: "monitor", selector: ".monitor-card", title: "节点监控", span: 5 },
-      { id: "nodes", selector: ".node-table-card", title: "VPS 节点表", span: 7 },
-      { id: "upload", selector: ".upload-card", title: "上传模块", span: 5 },
+      { id: "upload", selector: ".upload-card", title: "上传模块", span: 12 },
     ];
     let dashboardEditMode = false;
     let dashboardResizeState = null;
