@@ -243,7 +243,11 @@ STREAM_HUB_NODE_UPLOAD_PROBE_TIMEOUT_SECONDS=12
 STREAM_HUB_MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND=32768
 STREAM_HUB_MIN_FREE_AFTER_UPLOAD_BYTES=2147483648
 STREAM_HUB_PUSH_AUDIT_LOG_MAX_BYTES=5242880
+STREAM_HUB_OFFLINE_NODE_RETENTION_SECONDS=86400
+STREAM_HUB_NODE_RETENTION_SCAN_INTERVAL_SECONDS=900
 ```
+
+The Hub records each node's last successful health check. Enabled nodes that remain unreachable for 24 hours are removed from the Hub node registry automatically; disabled nodes and nodes whose Hub role is still reachable are kept. Automatic cleanup removes only the Hub record and never deletes remote media or services. Override the retention and scan interval with the variables above.
 
 ## 中文说明
 

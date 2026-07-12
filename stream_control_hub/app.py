@@ -48,6 +48,23 @@ def load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
+def write_json_atomic(path: Path, payload: Any, *, mode: int | None = None) -> None:
+    """Write JSON through a sibling temp file so interrupted writes cannot corrupt state."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if mode is not None:
+            with suppress(OSError):
+                temporary.chmod(mode)
+        temporary.replace(path)
+        if mode is not None:
+            with suppress(OSError):
+                path.chmod(mode)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 load_env_file(ROOT / ".env")
 CONFIG_DIR = ROOT / "config"
 DATA_DIR = Path(os.environ.get("STREAM_HUB_DATA_DIR", str(ROOT / "data")))
@@ -94,6 +111,16 @@ YOUTUBE_PROFILE_LOCK = threading.RLock()
 YOUTUBE_AUTOTUNE_STOP = threading.Event()
 YOUTUBE_AUTOTUNE_LOCK = threading.Lock()
 YOUTUBE_CLIENT_CACHE: dict[str, YouTubeAPIClient] = {}
+OFFLINE_NODE_RETENTION_SECONDS = max(
+    3600,
+    int(os.environ.get("STREAM_HUB_OFFLINE_NODE_RETENTION_SECONDS", str(24 * 60 * 60))),
+)
+NODE_RETENTION_SCAN_INTERVAL_SECONDS = max(
+    60,
+    int(os.environ.get("STREAM_HUB_NODE_RETENTION_SCAN_INTERVAL_SECONDS", "900")),
+)
+NODE_RETENTION_STOP = threading.Event()
+NODE_RETENTION_LOCK = threading.RLock()
 
 
 def youtube_quota_day() -> str:
@@ -112,10 +139,7 @@ def load_youtube_usage() -> dict[str, Any]:
 
 
 def save_youtube_usage(payload: dict[str, Any]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    YOUTUBE_USAGE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    with suppress(OSError):
-        YOUTUBE_USAGE_FILE.chmod(0o600)
+    write_json_atomic(YOUTUBE_USAGE_FILE, payload, mode=0o600)
 
 
 def record_youtube_api_usage(profile_id: str, method: str, resource: str, units: int) -> None:
@@ -212,18 +236,8 @@ def load_youtube_profiles_config() -> dict[str, Any]:
 
 
 def save_youtube_profiles_config(payload: dict[str, Any]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
     YOUTUBE_PROFILE_CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
-    temporary = YOUTUBE_PROFILES_FILE.with_name(f".{YOUTUBE_PROFILES_FILE.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        with suppress(OSError):
-            temporary.chmod(0o600)
-        temporary.replace(YOUTUBE_PROFILES_FILE)
-        with suppress(OSError):
-            YOUTUBE_PROFILES_FILE.chmod(0o600)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(YOUTUBE_PROFILES_FILE, payload, mode=0o600)
 
 
 def make_youtube_client(profile: dict[str, Any]) -> YouTubeAPIClient:
@@ -315,10 +329,7 @@ def load_youtube_autotune_state() -> dict[str, Any]:
 
 
 def save_youtube_autotune_state(payload: dict[str, Any]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    YOUTUBE_AUTOTUNE_STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    with suppress(OSError):
-        YOUTUBE_AUTOTUNE_STATE_FILE.chmod(0o600)
+    write_json_atomic(YOUTUBE_AUTOTUNE_STATE_FILE, payload, mode=0o600)
 
 
 def youtube_autotune_payload_diff(current: dict[str, Any], recommendation: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
@@ -7439,8 +7450,7 @@ def load_nodes() -> list[dict[str, Any]]:
 
 
 def save_nodes(nodes: list[dict[str, Any]]) -> None:
-    ensure_dirs()
-    NODES_FILE.write_text(json.dumps(nodes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(NODES_FILE, nodes)
 
 
 def load_hub_settings() -> dict[str, Any]:
@@ -7453,8 +7463,7 @@ def load_hub_settings() -> dict[str, Any]:
 
 
 def save_hub_settings(settings: dict[str, Any]) -> None:
-    ensure_dirs()
-    HUB_SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(HUB_SETTINGS_FILE, settings)
 
 
 def node_youtube_profile_map() -> dict[str, str]:
@@ -7535,8 +7544,7 @@ def load_media_metadata() -> dict[str, Any]:
 
 def save_media_metadata(payload: dict[str, Any]) -> None:
     with MEDIA_METADATA_LOCK:
-        ensure_dirs()
-        MEDIA_METADATA_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_atomic(MEDIA_METADATA_FILE, payload)
 
 
 def assigned_media_profile_id(metadata: dict[str, Any], media_name: str) -> str:
@@ -7887,6 +7895,81 @@ def request_hub_role_status(node: dict[str, Any]) -> dict[str, Any]:
         }
     except Exception as exc:
         return {"ok": False, "enabled": False, "url": hub_url, "message": str(exc)}
+
+
+def retention_timestamp(value: Any) -> float:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def retention_timestamp_text(value: float | None = None) -> str:
+    return datetime.fromtimestamp(time.time() if value is None else value, timezone.utc).isoformat(timespec="seconds")
+
+
+def node_has_online_hub_role(node: dict[str, Any]) -> bool:
+    """Do not remove a node whose Hub role is still reachable while its Agent is down."""
+    roles = node.get("roles") if isinstance(node.get("roles"), dict) else {}
+    if not (node.get("hub_only") or node.get("hub_url") or roles.get("hub")):
+        return False
+    status = request_hub_role_status(node)
+    return bool(status.get("ok") and status.get("enabled"))
+
+
+def prune_offline_nodes(*, now: float | None = None) -> list[str]:
+    """Remove node records that have remained unreachable for the retention window."""
+    current_time = now or time.time()
+    removed: list[str] = []
+    changed = False
+    with NODE_RETENTION_LOCK:
+        nodes = load_nodes()
+        retained: list[dict[str, Any]] = []
+        for node in nodes:
+            # Disabled nodes are an explicit operator choice, not stale nodes.
+            if node.get("enabled", True) is False:
+                retained.append(node)
+                continue
+            health = request_node_json(node, "/api/status", timeout=10)
+            if health.get("ok") or node_has_online_hub_role(node):
+                if node.get("offline_since") or not node.get("last_online_at"):
+                    node["last_online_at"] = retention_timestamp_text(current_time)
+                    node.pop("offline_since", None)
+                    changed = True
+                retained.append(node)
+                continue
+
+            offline_since = retention_timestamp(node.get("offline_since"))
+            if not offline_since:
+                node["offline_since"] = retention_timestamp_text(current_time)
+                changed = True
+                retained.append(node)
+                continue
+            if current_time - offline_since < OFFLINE_NODE_RETENTION_SECONDS:
+                retained.append(node)
+                continue
+            node_id = str(node.get("id") or "")
+            if node_id:
+                removed.append(node_id)
+            changed = True
+
+        if changed:
+            save_nodes(retained)
+    return removed
+
+
+def offline_node_retention_loop() -> None:
+    while not NODE_RETENTION_STOP.is_set():
+        try:
+            removed = prune_offline_nodes()
+            if removed:
+                APP.logger.info("Removed stale offline node records: %s", ", ".join(removed))
+        except Exception:
+            APP.logger.exception("Offline node retention scan failed")
+        NODE_RETENTION_STOP.wait(NODE_RETENTION_SCAN_INTERVAL_SECONDS)
 
 
 def update_private_env_file(path: Path, updates: dict[str, str]) -> None:
@@ -10874,6 +10957,7 @@ def api_deactivate_node_role(role: str):
 def main() -> None:
     ensure_dirs()
     threading.Thread(target=youtube_autotune_loop, name="youtube-autotune", daemon=True).start()
+    threading.Thread(target=offline_node_retention_loop, name="offline-node-retention", daemon=True).start()
     host = os.environ.get("STREAM_HUB_HOST", "127.0.0.1")
     try:
         from waitress import serve
