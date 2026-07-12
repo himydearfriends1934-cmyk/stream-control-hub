@@ -1731,7 +1731,27 @@ HTML = r"""
       background: rgba(9, 17, 14, 0.58);
     }
     .monitor-panel h4 { margin: 0 0 5px; font-size: 13px; color: #d6fff0; }
-    .autotune-history-panel { margin-top: 8px; }
+    .monitor-disclosure { padding: 0; overflow: hidden; }
+    .monitor-disclosure summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 38px;
+      padding: 8px 10px;
+      color: #d6fff0;
+      font-size: 13px;
+      font-weight: 900;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+    .monitor-disclosure summary::-webkit-details-marker { display: none; }
+    .monitor-disclosure summary::after { content: "+"; color: var(--muted); font-size: 18px; line-height: 1; }
+    .monitor-disclosure[open] summary { border-bottom: 1px solid rgba(49, 89, 76, .55); }
+    .monitor-disclosure[open] summary::after { content: "−"; color: var(--accent); }
+    .monitor-disclosure-body { padding: 8px; }
+    .autotune-history-panel { margin-bottom: 8px; }
     .autotune-history { display: grid; max-height: 320px; overflow-y: auto; }
     .autotune-history-row { display: grid; gap: 5px; padding: 8px 0; border-top: 1px solid rgba(49, 89, 76, .55); }
     .autotune-history-row:first-child { border-top: 0; padding-top: 2px; }
@@ -2091,6 +2111,7 @@ HTML = r"""
     .node strong, .media strong { display: block; }
     .node small, .media small { color: var(--muted); }
     .resource-card, .upload-card { display: grid; gap: 8px; }
+    .left-stack .resource-card { order: -1; }
     .resource-wide { grid-column: 1 / -1; }
     .upload-card .split { grid-template-columns: 1fr; gap: 8px; }
     .upload-card .actions { display: grid; grid-template-columns: 1fr; }
@@ -2793,6 +2814,10 @@ HTML = r"""
       logBox: document.getElementById("logBox"),
     };
     refs.cancelUploadBtn = document.getElementById("cancelUploadBtn");
+    refs.nodeMonitor.addEventListener("toggle", (event) => {
+      const section = event.target.closest("[data-monitor-section]")?.dataset.monitorSection;
+      if (section) rememberMonitorDisclosure(section, event.target.open);
+    }, true);
     let nodes = [];
     let mediaLibrary = { resources: [], nodes: [], duplicate_retention: [] };
     let openResourceNodeId = "";
@@ -2800,6 +2825,30 @@ HTML = r"""
     let resourceTableFilters = { name: "", size: "", age: "", profile: "", ownerNode: "" };
     let resourceNameFilterTimer = null;
     const PROFILE_FILTER_VISIBLE_SLOTS = 6;
+    const MONITOR_DISCLOSURE_STORAGE_KEY = "streamHub.monitorSections";
+
+    function monitorDisclosureState() {
+      try {
+        const state = JSON.parse(localStorage.getItem(MONITOR_DISCLOSURE_STORAGE_KEY) || "{}");
+        return state && typeof state === "object" ? state : {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function monitorDisclosureOpen(section) {
+      return monitorDisclosureState()[section] !== false;
+    }
+
+    function rememberMonitorDisclosure(section, open) {
+      try {
+        const state = monitorDisclosureState();
+        state[section] = Boolean(open);
+        localStorage.setItem(MONITOR_DISCLOSURE_STORAGE_KEY, JSON.stringify(state));
+      } catch (_) {
+        // Browser storage may be unavailable in private or restricted contexts.
+      }
+    }
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
     function rememberSelectedNode(nodeId) {
@@ -3611,9 +3660,14 @@ HTML = r"""
           </div>
         </div>
 
+        <div class="monitor-panel autotune-history-panel">
+          <h4>智能调参记录</h4>
+          ${renderAutotuneHistory(node.autotune_history || [])}
+        </div>
         <div class="monitor-panel-grid">
-          <div class="monitor-panel">
-            <h4>推流引擎</h4>
+          <details class="monitor-panel monitor-disclosure" data-monitor-section="engine" ${monitorDisclosureOpen("engine") ? "open" : ""}>
+            <summary>推流引擎</summary>
+            <div class="monitor-disclosure-body">
             <div class="metric-grid">
               ${metric("FFmpeg", stream.running ? "运行中" : "未运行")}
               ${metric("进程", processText)}
@@ -3630,21 +3684,20 @@ HTML = r"""
               ${miniRow("FIFO 缓冲", tuning.fifo_enabled ? `${tuning.fifo_timeshift_seconds || 0}s / queue ${tuning.fifo_queue_size || 0}` : "关闭")}
               ${miniRowHtml("FFmpeg PID", `<span class="mono">${processList}</span>`)}
             </div>
-          </div>
+            </div>
+          </details>
 
-          <div class="monitor-panel">
-            <h4>节点资源</h4>
-            <div class="mini-table" style="margin-top: 10px;">
+          <details class="monitor-panel monitor-disclosure" data-monitor-section="resources" ${monitorDisclosureOpen("resources") ? "open" : ""}>
+            <summary>节点资源</summary>
+            <div class="monitor-disclosure-body">
+            <div class="mini-table">
               ${miniRow("节点 ID", node.id || "--")}
               ${miniRow("启用状态", node.enabled === false ? "已禁用" : "已启用")}
               ${miniRowHtml("健康采集", healthSummaryHtml(node))}
               ${miniRowHtml("服务器视频", `<span class="mono">${videoList}</span>`)}
             </div>
-          </div>
-        </div>
-        <div class="monitor-panel autotune-history-panel">
-          <h4>智能调参记录</h4>
-          ${renderAutotuneHistory(node.autotune_history || [])}
+            </div>
+          </details>
         </div>
       `;
     }
