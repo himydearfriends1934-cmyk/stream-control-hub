@@ -266,8 +266,10 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("data-clear-resource-filters", app.HTML)
         self.assertIn("function clearResourceFilters", app.HTML)
         self.assertIn('id="mediaProfileTargets"', app.HTML)
-        self.assertIn('data-media-menu-action="set-profile"', app.HTML)
-        self.assertIn('postJson("/api/media-library/profile"', app.HTML)
+        self.assertIn("function resourceEntriesForScope", app.HTML)
+        self.assertIn("resourceAllMode", app.HTML)
+        self.assertIn("selectResourceNodeScope", app.HTML)
+        self.assertIn('Agent Profile（自动继承）', app.HTML)
         self.assertIn("function ensureSmartStartMedia", app.HTML)
         self.assertIn('postJson("/api/media/share"', app.HTML)
         self.assertIn('same_node: true', app.HTML)
@@ -282,7 +284,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("打开目标 Agent 设置", app.HTML)
         self.assertIn("云厂商安全组必须另外放行入站 TCP 8787", app.HTML)
 
-    def test_media_profile_can_be_changed_and_persists_in_library(self):
+    def test_media_profile_follows_agent_profile_in_library(self):
         from stream_control_hub import app
 
         profile_config = {
@@ -310,18 +312,13 @@ class AgentUpgradeTests(unittest.TestCase):
             with patch.object(app, "MEDIA_METADATA_FILE", metadata_file), patch.object(
                 app, "load_youtube_profiles_config", return_value=profile_config
             ), patch.object(app, "load_nodes", return_value=[node]), patch.object(
-                app, "request_node_json", return_value=status
-            ):
-                response = app.APP.test_client().post(
-                    "/api/media-library/profile",
-                    json={"media_name": "video.mp4", "profile_id": "account-a"},
-                )
+                app, "node_youtube_profile_map", return_value={"node-a": "account-a"}
+            ), patch.object(app, "request_node_json", return_value=status):
                 library = app.media_library_payload()
-                saved = json.loads(metadata_file.read_text(encoding="utf-8"))
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["profile_name"], "Account A")
-        self.assertEqual(saved["media_profiles"]["video.mp4"]["profile_id"], "account-a")
+        copy = library["resources"][0]["copies"][0]
+        self.assertEqual(copy["profile_id"], "account-a")
+        self.assertEqual(copy["profile_name"], "Account A")
         self.assertEqual(library["resources"][0]["profile_id"], "account-a")
         self.assertEqual(library["resources"][0]["profile_name"], "Account A")
         self.assertIn("不支持媒体哈希校验", inspect.getsource(app.run_share_task))
@@ -368,8 +365,10 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("正在刷新状态，请稍候", app.HTML)
         self.assertIn("Upload Policy 上传策略", app.HTML)
         self.assertIn("Push Audit 最近推送记录", app.HTML)
-        self.assertIn('<span class="node-live-label">Profile</span>', app.HTML)
-        self.assertIn('<span class="node-live-label">直播流</span>', app.HTML)
+        self.assertIn('data-node-lock-toggle data-lock-field="profile"', app.HTML)
+        self.assertIn('data-node-lock-toggle data-lock-field="stream"', app.HTML)
+        self.assertIn('alert("请先解锁 Profile")', app.HTML)
+        self.assertIn('alert("请先解锁直播流")', app.HTML)
         self.assertIn('<span class="node-live-label">视频</span>', app.HTML)
         self.assertIn("正在推流，停止后才能修改", app.HTML)
         self.assertIn("停止状态，可调整下次推流参数", app.HTML)
@@ -469,6 +468,46 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("更改 Agent：", app.HTML)
         self.assertIn("更改后：", app.HTML)
         self.assertNotIn("upgradeSelectedNodes", app.HTML)
+
+    def test_media_library_keeps_profile_per_agent_copy(self):
+        from stream_control_hub import app
+
+        profile_config = {
+            "version": 1,
+            "active_profile_id": "default",
+            "profiles": [
+                {"id": "default", "name": "Default"},
+                {"id": "account-a", "name": "Account A"},
+            ],
+        }
+        nodes = [
+            {"id": "node-a", "name": "Node A", "enabled": True},
+            {"id": "node-b", "name": "Node B", "enabled": True},
+        ]
+        statuses = [
+            {
+                "ok": True,
+                "disk": {"total": 1000, "used": 100, "free": 900, "percent": 10},
+                "videos": [{"name": "video.mp4", "video_path": "/media/a/video.mp4", "size": 123, "modified": 100}],
+            },
+            {
+                "ok": True,
+                "disk": {"total": 2000, "used": 200, "free": 1800, "percent": 10},
+                "videos": [{"name": "video.mp4", "video_path": "/media/b/video.mp4", "size": 456, "modified": 200}],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(app, "MEDIA_METADATA_FILE", Path(tmp) / "media-library-meta.json"), patch.object(
+                app, "load_youtube_profiles_config", return_value=profile_config
+            ), patch.object(app, "load_nodes", return_value=nodes), patch.object(
+                app, "node_youtube_profile_map", return_value={"node-a": "account-a", "node-b": "default"}
+            ), patch.object(app, "request_node_json", side_effect=statuses):
+                item = app.media_library_payload()["resources"][0]
+
+        self.assertEqual({copy["profile_id"] for copy in item["copies"]}, {"account-a", "default"})
+        self.assertEqual(item["profile_ids"], ["account-a", "default"])
+        self.assertEqual(item["profile_id"], "")
+        self.assertEqual({copy["size"] for copy in item["copies"]}, {123, 456})
 
     def test_agent_can_schedule_hub_activation(self):
         from stream_control_hub import headless_agent

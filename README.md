@@ -75,6 +75,8 @@ Each Agent row in the Hub shows its current Git revision and has its own `升级
 
 The enlarged node-management area separates `Agent 节点` and `Hub 节点`. Each Agent row can lock a YouTube Profile, reusable live stream, and video independently; each VPS can still run both roles independently: Agent uses port `8787`, Hub uses `8788`. Enabled roles show their Git version and can be upgraded individually; disabled roles are shown in gray and require an explicit security confirmation before activation. Clicking an enabled Hub switches the browser to that Hub. Background Hub installation suppresses control-token output from systemd logs.
 
+The Agent row's `Profile` and `直播流` labels are persistent lock buttons. Locked selectors reject changes until the corresponding label is clicked again to unlock them.
+
 When `STREAM_AGENT_CONTROL_HUB` points to the Hub's Tailscale URL, the Agent trusts API traffic only from that exact Tailscale source IP. In the Hub Tailscale wizard, choose `新增 Agent（仅输入 IP）`, enter the Agent's `100.x` address, and connect. Other tailnet peers still need the per-Agent control token.
 
 The installers generate a local control token and keep node secrets outside git. The Hub prints a URL like `http://127.0.0.1:8788/?token=...`; use that URL for remote write actions when `STREAM_HUB_CONTROL_TOKEN` is enabled.
@@ -212,8 +214,8 @@ The Hub is a coordinator, not the media warehouse. Browser uploads go straight t
 - Uploads and Agent-to-Agent sharing are public-only. If no public address is configured, the public probe fails, or a public transfer is interrupted, the operation stops with an explicit error and never falls back to the Tailscale/internal `base_url`.
 - Before an Agent-to-Agent task is created, the source Agent now probes the target's exact public upload route and TCP port with a short-lived ticket. The Hub also checks source media, target reachability, duplicate filenames, disk reserve, public-origin discovery, ticket issuance, and minimum probe speed; failures open a repair guide instead of waiting for chunk timeouts.
 - Each push writes a token-free audit event with policy, route, probe, speed, fallback, and cleanup details.
-- The global media library aggregates every online Agent, sorts videos by upload time, filters by YouTube Profile, and shows per-node disk usage.
-- A video's Profile is stored as file-level Hub metadata and can be changed directly from the resource manager's right-click menu; all copies grouped under the same filename share that Profile.
+- The resource manager follows the selected Agent by default; its All resources action clears the node scope and shows every Agent copy, with per-node disk usage.
+- Each media copy inherits the YouTube Profile assigned to its Agent. Files with the same name on different Agents remain separate resource rows in the all-resources view.
 - Uploads inherit the selected Agent's YouTube Profile and still go directly to the currently selected Agent.
 - Smart Start can select any grouped library item. If the target Agent has no local copy, the Hub copies one from an online source Agent over the public-only transfer route before streaming.
 - Hub upgrades preserve the default YouTube Profile's OAuth client settings and credential path. Saved Profile configuration is authoritative after restart, while browser stream caches expire, retry after failures, and refresh periodically.

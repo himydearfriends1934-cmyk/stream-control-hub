@@ -494,6 +494,64 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(lock["library_media_name"], "show.mp4")
         self.assertEqual(listed.get_json()[0]["stream_lock"]["video_path"], "/srv/videos/show.mp4")
 
+    def test_agent_profile_and_stream_locks_reject_changes_until_unlocked(self):
+        from stream_control_hub import app
+
+        node = {"id": "node-a", "base_url": "http://100.64.0.10:8787", "enabled": True}
+        profile_config = {
+            "version": 1,
+            "active_profile_id": "default",
+            "profiles": [
+                {"id": "default", "name": "Default"},
+                {"id": "account-a", "name": "Account A"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            nodes_file = tmp_path / "nodes.json"
+            settings_file = tmp_path / "hub-settings.json"
+            nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "HUB_SETTINGS_FILE", settings_file
+            ), patch.object(app, "load_youtube_profiles_config", return_value=profile_config):
+                client = app.APP.test_client()
+                locked = client.post("/api/nodes/stream-lock", json={
+                    "node_id": "node-a",
+                    "youtube_stream_id": "stream-1",
+                    "profile_locked": True,
+                    "youtube_stream_locked": True,
+                })
+                stream_change = client.post("/api/nodes/stream-lock", json={
+                    "node_id": "node-a",
+                    "youtube_stream_id": "stream-2",
+                })
+                profile_change = client.post("/api/nodes/youtube-profile", json={
+                    "node_id": "node-a",
+                    "profile_id": "account-a",
+                })
+                client.post("/api/nodes/stream-lock", json={
+                    "node_id": "node-a",
+                    "profile_locked": False,
+                    "youtube_stream_locked": False,
+                })
+                unlocked_stream_change = client.post("/api/nodes/stream-lock", json={
+                    "node_id": "node-a",
+                    "youtube_stream_id": "stream-2",
+                })
+                unlocked_profile_change = client.post("/api/nodes/youtube-profile", json={
+                    "node_id": "node-a",
+                    "profile_id": "account-a",
+                })
+
+        self.assertTrue(locked.get_json()["stream_lock"]["profile_locked"])
+        self.assertTrue(locked.get_json()["stream_lock"]["youtube_stream_locked"])
+        self.assertEqual(stream_change.status_code, 409)
+        self.assertEqual(stream_change.get_json()["message"], "请先解锁直播流")
+        self.assertEqual(profile_change.status_code, 409)
+        self.assertEqual(profile_change.get_json()["message"], "请先解锁 Profile")
+        self.assertEqual(unlocked_stream_change.status_code, 200)
+        self.assertEqual(unlocked_profile_change.status_code, 200)
+
     def test_hub_refuses_to_revoke_profile_used_by_active_stream(self):
         from stream_control_hub import app
 

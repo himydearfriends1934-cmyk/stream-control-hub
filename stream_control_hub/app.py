@@ -587,8 +587,9 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 continue
             entry["last_check"] = now
             checked += 1
+            node_id = str(node.get("id") or "")
             event = {
-                "node_id": str(node.get("id") or ""),
+                "node_id": node_id,
                 "node_name": str(node.get("name") or node.get("id") or ""),
                 "profile_id": profile_id,
                 "stream_id": str(stream_config.get("youtube_stream_id") or ""),
@@ -1841,6 +1842,26 @@ HTML = r"""
       white-space: nowrap;
       color: #9fffe0;
     }
+    .node-lock-button {
+      min-width: 0;
+      min-height: 24px;
+      padding: 3px 6px;
+      border: 1px solid rgba(54, 211, 153, .42);
+      border-radius: 6px;
+      background: rgba(11, 31, 25, .92);
+      color: #9fffe0;
+      cursor: pointer;
+    }
+    .node-lock-button:hover { border-color: var(--accent); color: #fff; }
+    .node-lock-button.locked {
+      border-color: #ff3b4f;
+      background: rgba(255, 59, 79, .14);
+      color: #ffd1d7;
+    }
+    .node-live-field.field-locked select {
+      border-color: rgba(255, 59, 79, .55);
+      cursor: not-allowed;
+    }
     .node-live-select,
     .node-profile-select {
       width: 100%;
@@ -2282,7 +2303,7 @@ HTML = r"""
           <div class="resource-filter-chip" id="resourceFilterChip" hidden></div>
           <div class="media-list" id="mediaList">加载中...</div>
           <div class="media-context-menu" id="mediaContextMenu">
-            <div class="media-context-label">修改 Profile</div>
+            <div class="media-context-label">Agent Profile（自动继承）</div>
             <div class="media-context-targets" id="mediaProfileTargets"></div>
             <button data-media-menu-action="property">属性</button>
             <button data-media-menu-action="inspect">查看详情</button>
@@ -2729,6 +2750,7 @@ HTML = r"""
     let nodes = [];
     let mediaLibrary = { resources: [], nodes: [], duplicate_retention: [] };
     let openResourceNodeId = "";
+    let resourceAllMode = false;
     let resourceTableFilters = { name: "", size: "", age: "", profile: "", ownerNode: "" };
     let resourceNameFilterTimer = null;
     const PROFILE_FILTER_VISIBLE_SLOTS = 6;
@@ -3228,6 +3250,15 @@ HTML = r"""
       return node?.stream_lock || {};
     }
 
+    function nodeFieldLocked(node, field) {
+      const lock = nodeStreamLock(node);
+      return field === "profile" ? Boolean(lock.profile_locked) : Boolean(lock.youtube_stream_locked);
+    }
+
+    function nodeFieldLockLabel(field) {
+      return field === "profile" ? "Profile" : "直播流";
+    }
+
     function nodeRowProfileId(node) {
       const config = nodeStreamConfig(node);
       if (nodeStreaming(node) && config.youtube_profile_id) return String(config.youtube_profile_id);
@@ -3354,7 +3385,7 @@ HTML = r"""
         const selected = (selectedLibrary && item.name === selectedLibrary) || (!selectedLibrary && value === selectedVideo);
         if (selected) hasSelected = true;
         const copyHint = localCopy ? "本机" : "自动复制";
-        options.push(`<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}" data-media-local="${localCopy ? "1" : "0"}" data-source-node-id="${escapeHtml(sourceCopy.node_id || "")}" ${selected ? "selected" : ""}>[${escapeHtml(resourceProfileLabel(item))}] ${escapeHtml(item.name)} · ${copyHint}</option>`);
+        options.push(`<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}" data-media-local="${localCopy ? "1" : "0"}" data-source-node-id="${escapeHtml(sourceCopy.node_id || "")}" ${selected ? "selected" : ""}>[${escapeHtml(resourceProfileLabel(item, localCopy || sourceCopy))}] ${escapeHtml(item.name)} · ${copyHint}</option>`);
       });
       if ((selectedLibrary || selectedVideo) && !hasSelected) {
         options.push(`<option value="${escapeHtml(selectedVideo || selectedLibrary)}" selected>已锁定：${escapeHtml(lockedVideoLabel(node))}</option>`);
@@ -3586,6 +3617,8 @@ HTML = r"""
       const parameterSummary = nodeStreamParameterSummary(node);
       const lockHint = streaming ? "正在推流，停止后才能修改" : "停止状态，可调整下次推流参数";
       const lockAttr = streaming ? "disabled aria-disabled=\"true\"" : "";
+      const profileLocked = nodeFieldLocked(node, "profile");
+      const streamLocked = nodeFieldLocked(node, "stream");
       const smartTuneActive = youtubeProfileAutoTuneEnabled(rowProfileId);
       const smartTuneDisabled = rowStreamId ? "" : "disabled";
       const smartTuneTitle = rowStreamId
@@ -3614,12 +3647,14 @@ HTML = r"""
             <span class="node-version-pill" title="版本 ${escapeHtml(agentVersion)}">${escapeHtml(agentVersion)}</span>
           </span>
           <div class="node-live-locks">
-            <label class="node-live-field" title="${escapeHtml(lockHint)}：${escapeHtml(currentProfileName)}"><span class="node-live-label">Profile</span>
-              <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(lockHint)}：${escapeHtml(currentProfileName)}" ${lockAttr}>${profileOptions(rowProfileId)}</select>
-            </label>
-            <label class="node-live-field" title="${escapeHtml(lockHint)}：${escapeHtml(currentStreamName)}"><span class="node-live-label">直播流</span>
-              <select class="node-live-select" data-node-stream-select data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(lockHint)}：${escapeHtml(currentStreamName)}" ${lockAttr}>${nodeYoutubeStreamOptions(node, rowStreamId, rowProfileId)}</select>
-            </label>
+            <div class="node-live-field ${profileLocked ? "field-locked" : ""}" title="${escapeHtml(lockHint)}：${escapeHtml(currentProfileName)}">
+              <button type="button" class="node-live-label node-lock-button ${profileLocked ? "locked" : ""}" data-node-lock-toggle data-lock-field="profile" data-node-id="${escapeHtml(node.id)}" aria-pressed="${profileLocked ? "true" : "false"}" title="${profileLocked ? "点击解锁 Profile" : "点击锁定 Profile"}">Profile</button>
+              <select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" data-lock-field="profile" data-field-locked="${profileLocked ? "1" : "0"}" title="${profileLocked ? "请先解锁 Profile" : `${escapeHtml(lockHint)}：${escapeHtml(currentProfileName)}`}" ${lockAttr}>${profileOptions(rowProfileId)}</select>
+            </div>
+            <div class="node-live-field ${streamLocked ? "field-locked" : ""}" title="${escapeHtml(lockHint)}：${escapeHtml(currentStreamName)}">
+              <button type="button" class="node-live-label node-lock-button ${streamLocked ? "locked" : ""}" data-node-lock-toggle data-lock-field="stream" data-node-id="${escapeHtml(node.id)}" aria-pressed="${streamLocked ? "true" : "false"}" title="${streamLocked ? "点击解锁直播流" : "点击锁定直播流"}">直播流</button>
+              <select class="node-live-select" data-node-stream-select data-node-id="${escapeHtml(node.id)}" data-lock-field="stream" data-field-locked="${streamLocked ? "1" : "0"}" title="${streamLocked ? "请先解锁直播流" : `${escapeHtml(lockHint)}：${escapeHtml(currentStreamName)}`}" ${lockAttr}>${nodeYoutubeStreamOptions(node, rowStreamId, rowProfileId)}</select>
+            </div>
             <label class="node-live-field" title="${escapeHtml(lockHint)}：${escapeHtml(currentVideoName)}"><span class="node-live-label">视频</span>
               <select class="node-live-select" data-node-video-select data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(lockHint)}：${escapeHtml(currentVideoName)}" ${lockAttr}>${nodeVideoOptions(node, rowLock)}</select>
             </label>
@@ -3693,16 +3728,16 @@ HTML = r"""
     }
 
     function resourceProfileIds(item) {
-      if (item?.profile_id) return [String(item.profile_id)];
       const ids = new Set();
       (item?.copies || []).forEach((copy) => {
-        const node = nodes.find((entry) => String(entry.id) === String(copy.node_id || ""));
-        if (node) ids.add(nodeProfileId(node));
+        if (copy?.profile_id) ids.add(String(copy.profile_id));
       });
+      if (!ids.size && item?.profile_id) ids.add(String(item.profile_id));
       return [...ids].filter(Boolean);
     }
 
-    function resourceProfileLabel(item) {
+    function resourceProfileLabel(item, copy = null) {
+      if (copy?.profile_id) return profileName(copy.profile_id);
       const ids = resourceProfileIds(item);
       return ids.length ? ids.map(profileName).join("、") : "未绑定 Profile";
     }
@@ -3765,30 +3800,44 @@ HTML = r"""
       return copies.find((entry) => String(entry.node_id) === String(selectedNodeId)) || copies[0] || {};
     }
 
-    function resourceMatchesFilters(item) {
+    function resourceMatchesFilters(item, copy = resourceOwnerCopy(item)) {
       const filters = resourceTableFilters;
-      const copies = item.copies || [];
-      const owner = resourceOwnerCopy(item);
       const name = String(item.name || "").toLowerCase();
       if (filters.name && !name.includes(filters.name.toLowerCase())) return false;
-      if (filters.profile && !resourceProfileIds(item).includes(filters.profile)) return false;
-      if (filters.ownerNode && String(owner.node_id || "") !== String(filters.ownerNode)) return false;
-      const size = Number(item.size || 0);
+      if (filters.profile && String(copy?.profile_id || "") !== String(filters.profile)) return false;
+      if (filters.ownerNode && String(copy?.node_id || "") !== String(filters.ownerNode)) return false;
+      const size = Number(copy?.size || item.size || 0);
       if (filters.size === "small" && size >= 500 * 1024 * 1024) return false;
       if (filters.size === "medium" && (size < 500 * 1024 * 1024 || size >= 2 * 1024 * 1024 * 1024)) return false;
       if (filters.size === "large" && size < 2 * 1024 * 1024 * 1024) return false;
       if (filters.age) {
-        const modified = Number(item.modified || 0);
+        const modified = Number(copy?.modified || item.modified || 0);
         const days = modified ? (Date.now() / 1000 - modified) / 86400 : Infinity;
         if (days > Number(filters.age)) return false;
       }
       return true;
     }
 
+    function resourceEntriesForScope(resources) {
+      const scopeNodeId = resourceAllMode ? "" : String(selectedNodeId || "");
+      return resources.flatMap((item) => {
+        const copies = (item.copies || []).filter((copy) => !scopeNodeId || String(copy.node_id || "") === scopeNodeId);
+        return copies.map((copy) => ({ item, copy }));
+      });
+    }
+
     function clearResourceFilters() {
       resourceTableFilters = { name: "", size: "", age: "", profile: "", ownerNode: "" };
       openResourceNodeId = "";
+      resourceAllMode = true;
       refs.mediaProfileFilter.value = "";
+      renderMedia();
+    }
+
+    function selectResourceNodeScope(nodeId) {
+      openResourceNodeId = String(nodeId || "");
+      resourceAllMode = !openResourceNodeId;
+      resourceTableFilters.ownerNode = "";
       renderMedia();
     }
 
@@ -3807,15 +3856,19 @@ HTML = r"""
       if (refs.resourceFilterChip) refs.resourceFilterChip.hidden = true;
       renderProfileQuickBar();
 
-      const entries = allResources.filter(resourceMatchesFilters).sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
+      const entries = resourceEntriesForScope(allResources)
+        .filter((entry) => resourceMatchesFilters(entry.item, entry.copy))
+        .sort((a, b) => Number(b.copy?.modified || b.item.modified || 0) - Number(a.copy?.modified || a.item.modified || 0));
       const nodeOptions = `<option value="">全部节点</option>`
         + nodeDisks.map((item) => `<option value="${escapeHtml(item.node_id)}">${escapeHtml(item.node_name)}</option>`).join("");
       const selectedProfileOptions = profileFilterOptions(resourceTableFilters.profile);
       const selectedOwnerNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.ownerNode) + '"', 'value="' + escapeHtml(resourceTableFilters.ownerNode) + '" selected');
       const resourceNameOptions = allResources.map((item) => `<option value="${escapeHtml(item.name || "")}"></option>`).join("");
+      const scopeNode = resourceAllMode ? null : selectedNode();
+      const scopeLabel = scopeNode ? `${scopeNode.name || scopeNode.id} 的资源` : "全部 Agent 资源";
       refs.mediaList.innerHTML = `
         <div class="media-toolbar">
-          <strong>${resourceTableFilters.profile ? profileName(resourceTableFilters.profile) : "全部 Profile"} · 所有节点视频</strong>
+          <strong>${scopeLabel}${resourceTableFilters.profile ? ` · ${profileName(resourceTableFilters.profile)}` : ""}</strong>
           <span><small>共 ${entries.length} 个。表头可筛选；右键可操作。</small> <button class="tiny" data-clear-resource-filters>全部资源</button></span>
         </div>
         <div class="media-window">
@@ -3827,25 +3880,28 @@ HTML = r"""
             <label>归属节点 / 副本数<select data-resource-filter="ownerNode">${selectedOwnerNodeOptions}</select></label>
           </div>
           <datalist id="resourceNameOptions">${resourceNameOptions}</datalist>
-          ${entries.length ? entries.map((item) => {
+          ${entries.length ? entries.map((entry) => {
+            const item = entry.item;
             const copies = item.copies || [];
-            const copy = resourceOwnerCopy(item);
+            const copy = entry.copy;
             const videoPath = copy.video_path || item.name;
             const nodeId = String(copy.node_id || "");
             const selected = checkedPath && checkedNodeId === nodeId && checkedPath === videoPath;
             const current = nodeId === String(selectedNodeId);
             const name = item.name || videoPath;
+            const copySize = Number(copy.size || item.size || 0);
+            const copyModifiedLabel = copy.modified_label || item.modified_label || "--";
             const copyNames = copies.map((entry) => entry.node_name || entry.node_id).join("、");
             const lastUsedLabels = copies.map((entry) => `${entry.node_name || entry.node_id}: ${entry.last_used_label || "从未开播"}`).join("；");
-            const ageBase = Number(item.last_used_at || item.created_at || item.modified || 0);
+            const ageBase = Number(copy.last_used_at || copy.created_at || copy.modified || item.modified || 0);
             const ageDays = ageBase ? Math.max(0, (Date.now() / 1000 - ageBase) / 86400) : 0;
             const cleanupCandidate = Math.floor(ageDays / 3) >= 5;
             return `
-              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""} ${cleanupCandidate ? "cleanup-candidate" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-profile-names="${escapeHtml(resourceProfileLabel(item))}" data-copy-names="${escapeHtml(copyNames)}" data-copy-count="${escapeHtml(copies.length)}" data-last-used-label="${escapeHtml(lastUsedLabels || "从未开播")}" data-size="${escapeHtml(item.size || 0)}" data-modified-label="${escapeHtml(item.modified_label || "--")}">
+              <div role="button" tabindex="0" class="media-file-row ${current ? "current-agent" : ""} ${selected ? "selected" : ""} ${cleanupCandidate ? "cleanup-candidate" : ""}" data-media-row data-node-id="${escapeHtml(nodeId)}" data-media-name="${escapeHtml(name)}" data-video-path="${escapeHtml(videoPath)}" data-profile-names="${escapeHtml(resourceProfileLabel(item, copy))}" data-copy-names="${escapeHtml(copyNames)}" data-copy-count="${escapeHtml(copies.length)}" data-last-used-label="${escapeHtml(lastUsedLabels || "从未开播")}" data-size="${escapeHtml(copySize)}" data-modified-label="${escapeHtml(copyModifiedLabel)}">
                 <span class="media-name-cell" data-media-rename-name title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-                <span class="muted">${escapeHtml(fmtBytes(item.size || 0))}</span>
-                <span class="muted">${escapeHtml(item.modified_label || "--")}</span>
-                <span>${escapeHtml(resourceProfileLabel(item))}</span>
+                <span class="muted">${escapeHtml(fmtBytes(copySize))}</span>
+                <span class="muted">${escapeHtml(copyModifiedLabel)}</span>
+                <span>${escapeHtml(resourceProfileLabel(item, copy))}</span>
                 <span title="副本节点：${escapeHtml(copyNames || "--")}">${escapeHtml(copy.node_name || copy.node_id || "--")} · ${copies.length} 副本</span>
                 <input data-media-check type="radio" name="media" value="${escapeHtml(name)}" data-node-id="${escapeHtml(nodeId)}" data-video-path="${escapeHtml(videoPath)}" ${selected ? "checked" : ""} hidden>
               </div>
@@ -4688,7 +4744,7 @@ HTML = r"""
         const sourceCopy = localCopy || (item.copies || [])[0] || {};
         const value = localCopy?.video_path || item.name;
         const copyHint = localCopy ? "本机已有" : "开播前自动复制";
-        return `<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}" data-media-local="${localCopy ? "1" : "0"}" data-source-node-id="${escapeHtml(sourceCopy.node_id || "")}">[${escapeHtml(resourceProfileLabel(item))}] ${escapeHtml(item.name)} · ${copyHint} (${escapeHtml(fmtBytes(item.size || 0))})</option>`;
+        return `<option value="${escapeHtml(value)}" data-library-name="${escapeHtml(item.name)}" data-media-local="${localCopy ? "1" : "0"}" data-source-node-id="${escapeHtml(sourceCopy.node_id || "")}">[${escapeHtml(resourceProfileLabel(item, localCopy || sourceCopy))}] ${escapeHtml(item.name)} · ${copyHint} (${escapeHtml(fmtBytes(item.size || 0))})</option>`;
       }).join("") : `<option value="">媒体库暂无视频，请先上传</option>`;
       if (previousLibraryName) {
         const option = [...refs.streamVideoSelect.options].find((item) => item.dataset.libraryName === previousLibraryName);
@@ -6045,19 +6101,15 @@ HTML = r"""
       contextMediaRow = row;
       const sourceNodeId = String(row.dataset.nodeId || "");
       const resource = mediaResourceByName(row.dataset.mediaName || "");
-      const currentProfileId = resourceProfileIds(resource)[0] || "";
-      const profiles = youtubeProfiles.length ? youtubeProfiles : [{ id: "default", name: "Default YouTube Profile" }];
+      const sourceNode = nodes.find((node) => String(node.id) === sourceNodeId);
+      const currentProfileId = String(resource?.copies?.find((copy) => String(copy.node_id || "") === sourceNodeId)?.profile_id || nodeProfileId(sourceNode));
       const targets = nodes.filter((node) => node.roles?.agent?.enabled && String(node.id) !== sourceNodeId);
       const targetButtons = (action) => targets.length
         ? targets.map((node) => `<button data-media-menu-action="${action}" data-target-node-id="${escapeHtml(node.id)}">${escapeHtml(node.name || node.id)}</button>`).join("")
         : `<button disabled>没有其他在线节点</button>`;
       refs.mediaSendTargets.innerHTML = targetButtons("send-node");
       refs.mediaMoveTargets.innerHTML = targetButtons("move-node");
-      refs.mediaProfileTargets.innerHTML = profiles.map((profile) => `
-        <button class="${String(profile.id) === String(currentProfileId) ? "active" : ""}" data-media-menu-action="set-profile" data-profile-id="${escapeHtml(profile.id)}">
-          ${escapeHtml(profile.name || profile.id)}
-        </button>
-      `).join("");
+      refs.mediaProfileTargets.innerHTML = `<button class="active" disabled>${escapeHtml(profileName(currentProfileId))}</button>`;
       refs.mediaContextMenu.classList.add("open");
       const menuWidth = refs.mediaContextMenu.offsetWidth || 160;
       const menuHeight = refs.mediaContextMenu.offsetHeight || 170;
@@ -6464,6 +6516,16 @@ HTML = r"""
       const profileId = selectEl?.value || "";
       const node = nodes.find((item) => String(item.id) === String(nodeId));
       const previousProfileId = nodeProfileId(node);
+      if (nodeFieldLocked(node, "profile")) {
+        selectEl.value = previousProfileId;
+        alert("请先解锁 Profile");
+        return;
+      }
+      if (nodeFieldLocked(node, "stream")) {
+        selectEl.value = previousProfileId;
+        alert("请先解锁直播流");
+        return;
+      }
       if (!nodeId || !profileId || profileId === previousProfileId) return;
       selectEl.disabled = true;
       try {
@@ -6566,6 +6628,31 @@ HTML = r"""
       }
     }
 
+    async function toggleNodeFieldLock(button) {
+      const nodeId = String(button?.dataset?.nodeId || "");
+      const field = button?.dataset?.lockField === "profile" ? "profile" : "stream";
+      const node = nodes.find((item) => String(item.id) === nodeId);
+      if (!node) return;
+      const nextLocked = !nodeFieldLocked(node, field);
+      if (field === "stream" && nextLocked && !lockedYoutubeStreamId(node)) {
+        alert("请先选择直播流");
+        return;
+      }
+      const key = field === "profile" ? "profile_locked" : "youtube_stream_locked";
+      const data = await saveNodeStreamLock(nodeId, { [key]: nextLocked }, button);
+      if (!data) return;
+      alert(`${nextLocked ? "已锁定" : "已解锁"} ${nodeFieldLockLabel(field)}`);
+    }
+
+    function guardLockedNodeSelect(event) {
+      const selectEl = event.target.closest("[data-node-profile-select], [data-node-stream-select]");
+      if (!selectEl || selectEl.dataset.fieldLocked !== "1") return false;
+      event.preventDefault();
+      event.stopPropagation();
+      alert(`请先解锁${selectEl.dataset.lockField === "profile" ? " Profile" : "直播流"}`);
+      return true;
+    }
+
     function videoLockFromOption(option) {
       if (!option || !option.value) {
         return { video_path: "", library_media_name: "", media_local: false, source_node_id: "" };
@@ -6629,7 +6716,21 @@ HTML = r"""
       beginNodeNameEdit(nameEl);
     });
 
+    refs.nodeList.addEventListener("pointerdown", (event) => {
+      guardLockedNodeSelect(event);
+    }, true);
+    refs.nodeList.addEventListener("keydown", (event) => {
+      if (["Enter", " ", "ArrowDown", "ArrowUp"].includes(event.key)) guardLockedNodeSelect(event);
+    }, true);
+
     refs.nodeList.addEventListener("click", async (event) => {
+      const lockButton = event.target.closest("[data-node-lock-toggle]");
+      if (lockButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        await toggleNodeFieldLock(lockButton);
+        return;
+      }
       const smartTuneButton = event.target.closest("[data-node-smart-tune]");
       if (smartTuneButton) {
         event.preventDefault();
@@ -6681,6 +6782,9 @@ HTML = r"""
       const row = event.target.closest("[data-node-row]");
       if (!row) return;
       rememberSelectedNode(row.dataset.nodeId);
+      openResourceNodeId = String(row.dataset.nodeId || "");
+      resourceAllMode = false;
+      resourceTableFilters.ownerNode = "";
       renderNodes();
       renderMedia();
       renderStreamControls();
@@ -6690,12 +6794,22 @@ HTML = r"""
       const profileEl = event.target.closest("[data-node-profile-select]");
       if (profileEl) {
         if (profileEl.disabled) return;
+        if (profileEl.dataset.fieldLocked === "1") {
+          alert("请先解锁 Profile");
+          renderNodes();
+          return;
+        }
         saveNodeYouTubeProfile(profileEl);
         return;
       }
       const streamEl = event.target.closest("[data-node-stream-select]");
       if (streamEl) {
         if (streamEl.disabled) return;
+        if (streamEl.dataset.fieldLocked === "1") {
+          alert("请先解锁直播流");
+          renderNodes();
+          return;
+        }
         saveNodeStreamLock(streamEl.dataset.nodeId, { youtube_stream_id: streamEl.value || "" }, streamEl);
         return;
       }
@@ -6758,12 +6872,12 @@ HTML = r"""
     refs.mediaDiskList.addEventListener("dblclick", (event) => {
       const card = event.target.closest("[data-resource-node-id]");
       if (!card) return;
-      openResourceNodeId = card.dataset.resourceNodeId || "";
-      renderMedia();
+      openNodeResources(card.dataset.resourceNodeId);
     });
     function openNodeResources(nodeId) {
-      openResourceNodeId = String(nodeId || "");
-      renderMedia();
+      rememberSelectedNode(nodeId);
+      renderNodes();
+      selectResourceNodeScope(nodeId);
       document.querySelector(".resource-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
       refs.mediaList.querySelector('[data-resource-filter="ownerNode"]')?.focus({ preventScroll: true });
     }
@@ -6783,13 +6897,11 @@ HTML = r"""
       const card = event.target.closest("[data-resource-node-id]");
       if (!card) return;
       event.preventDefault();
-      openResourceNodeId = card.dataset.resourceNodeId || "";
-      renderMedia();
+      openNodeResources(card.dataset.resourceNodeId);
     });
     refs.resourceFilterChip.addEventListener("click", (event) => {
       if (!event.target.closest("[data-clear-resource-node]")) return;
-      openResourceNodeId = "";
-      renderMedia();
+      clearResourceFilters();
     });
     refs.profileQuickBar.addEventListener("click", (event) => {
       const button = event.target.closest("[data-profile-filter-id]");
@@ -6876,11 +6988,8 @@ HTML = r"""
       const row = contextMediaRow;
       const action = button.dataset.mediaMenuAction;
       const targetNodeId = button.dataset.targetNodeId || "";
-      const profileId = button.dataset.profileId || "";
       hideMediaMenu();
-      if (action === "set-profile") {
-        updateMediaProfile(row, profileId);
-      } else if (action === "send-node") {
+      if (action === "send-node") {
         selectMediaRow(row);
         pushSelectedMedia([targetNodeId]);
       } else if (action === "move-node") {
@@ -7065,7 +7174,11 @@ HTML = r"""
     refs.youtubeAgentList.addEventListener("click", (event) => {
       const card = event.target.closest("[data-youtube-agent-id]");
       if (!card || card.disabled) return;
-      rememberSelectedNode(card.dataset.youtubeAgentId || "");
+      const nodeId = card.dataset.youtubeAgentId || "";
+      rememberSelectedNode(nodeId);
+      openResourceNodeId = String(nodeId);
+      resourceAllMode = false;
+      resourceTableFilters.ownerNode = "";
       renderNodes();
       renderMedia();
       renderStreamControls();
@@ -7507,6 +7620,8 @@ def node_stream_lock_map() -> dict[str, dict[str, Any]]:
             "library_media_name": str(raw.get("library_media_name") or "").strip(),
             "media_local": bool(raw.get("media_local")),
             "source_node_id": str(raw.get("source_node_id") or "").strip(),
+            "profile_locked": bool(raw.get("profile_locked")),
+            "youtube_stream_locked": bool(raw.get("youtube_stream_locked")),
         }
     return result
 
@@ -7522,6 +7637,9 @@ def set_node_stream_lock(node_id: str, updates: dict[str, Any]) -> dict[str, Any
             current[key] = str(updates.get(key) or "").strip()
     if "media_local" in updates:
         current["media_local"] = bool(updates.get("media_local"))
+    for key in {"profile_locked", "youtube_stream_locked"}:
+        if key in updates:
+            current[key] = bool(updates.get(key))
     mapping[str(node_id)] = current
     settings["node_stream_locks"] = mapping
     save_hub_settings(settings)
@@ -7678,10 +7796,16 @@ def media_library_payload() -> dict[str, Any]:
     metadata = load_media_metadata()
     resources: dict[str, dict[str, Any]] = {}
     profiles = {profile["id"]: profile for profile in load_youtube_profiles_config()["profiles"]}
+    node_profiles = node_youtube_profile_map()
+    default_profile_id = active_youtube_profile_id()
     node_disks: list[dict[str, Any]] = []
     for node in load_nodes():
         if not node.get("enabled", True):
             continue
+        node_id = str(node.get("id") or "")
+        profile_id = safe_youtube_profile_id(node_profiles.get(node_id) or default_profile_id)
+        profile = profiles.get(profile_id) or {}
+        profile_name = str(profile.get("name") or profile_id)
         status = request_node_json(node, "/api/status", timeout=10)
         disk = status.get("disk") or {}
         node_disks.append({
@@ -7704,6 +7828,8 @@ def media_library_payload() -> dict[str, Any]:
                 "modified_label": str(video.get("modified_label") or "--"),
                 "created_at": float(video.get("created_at") or video.get("modified") or 0),
                 "last_used_at": float(video.get("last_used_at") or 0),
+                "profile_id": profile_id,
+                "profile_name": profile_name,
                 "copies": [],
             })
             if float(video.get("modified") or 0) > float(item.get("modified") or 0):
@@ -7713,17 +7839,30 @@ def media_library_payload() -> dict[str, Any]:
             item["copies"].append({
                 "node_id": str(node.get("id") or ""),
                 "node_name": str(node.get("name") or node.get("id") or "Agent"),
+                "profile_id": profile_id,
+                "profile_name": profile_name,
                 "video_path": str(video.get("video_path") or video.get("path") or name),
+                "size": int(video.get("size") or 0),
+                "modified": float(video.get("modified") or 0),
+                "modified_label": str(video.get("modified_label") or "--"),
                 "created_at": float(video.get("created_at") or video.get("modified") or 0),
                 "last_used_at": float(video.get("last_used_at") or 0),
                 "last_used_label": str(video.get("last_used_label") or "从未开播"),
             })
             item["last_used_at"] = max(float(item.get("last_used_at") or 0), float(video.get("last_used_at") or 0))
     for item in resources.values():
-        profile_id = assigned_media_profile_id(metadata, str(item.get("name") or ""))
-        if profile_id in profiles:
-            item["profile_id"] = profile_id
-            item["profile_name"] = str(profiles[profile_id].get("name") or profile_id)
+        profile_ids = sorted({
+            str(copy.get("profile_id") or "")
+            for copy in item.get("copies") or []
+            if copy.get("profile_id")
+        })
+        item["profile_ids"] = profile_ids
+        if len(profile_ids) == 1:
+            item["profile_id"] = profile_ids[0]
+            item["profile_name"] = str(profiles.get(profile_ids[0], {}).get("name") or profile_ids[0])
+        elif profile_ids:
+            item["profile_id"] = ""
+            item["profile_name"] = "多个 Agent Profile"
     return {
         "ok": True,
         "resources": sorted(resources.values(), key=lambda item: float(item.get("modified") or 0), reverse=True),
@@ -9356,6 +9495,11 @@ def api_node_youtube_profile():
     profile_id = safe_youtube_profile_id(str(payload.get("profile_id") or ""))
     if not node_by_id(node_id):
         return jsonify({"ok": False, "message": "node not found"}), 404
+    current_lock = node_stream_lock_map().get(node_id, {})
+    if current_lock.get("profile_locked"):
+        return jsonify({"ok": False, "message": "请先解锁 Profile"}), 409
+    if current_lock.get("youtube_stream_locked"):
+        return jsonify({"ok": False, "message": "请先解锁直播流"}), 409
     try:
         saved_profile_id = set_node_youtube_profile(node_id, profile_id)
     except Exception as exc:
@@ -9375,9 +9519,12 @@ def api_node_stream_lock():
     node_id = str(payload.get("node_id") or "").strip()
     if not node_by_id(node_id):
         return jsonify({"ok": False, "message": "node not found"}), 404
+    current_lock = node_stream_lock_map().get(node_id, {})
+    if "youtube_stream_id" in payload and current_lock.get("youtube_stream_locked"):
+        return jsonify({"ok": False, "message": "请先解锁直播流"}), 409
     lock = set_node_stream_lock(node_id, {
         key: payload.get(key)
-        for key in ("youtube_stream_id", "video_path", "library_media_name", "media_local", "source_node_id")
+        for key in ("youtube_stream_id", "video_path", "library_media_name", "media_local", "source_node_id", "profile_locked", "youtube_stream_locked")
         if key in payload
     })
     return jsonify({
