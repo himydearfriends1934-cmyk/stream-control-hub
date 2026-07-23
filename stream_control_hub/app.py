@@ -11060,9 +11060,16 @@ def api_youtube_profile_access_token():
     payload = request.get_json(silent=True) or {}
     purpose = str(payload.get("purpose") or "").strip()
     requester = str(payload.get("requester") or "").strip()
-    if purpose != "youtube-video-upload":
-        return jsonify({"ok": False, "message": "purpose must be youtube-video-upload"}), 400
-    if requester != "video-loop-manager":
+    allowed_purposes = {
+        "youtube-video-upload": "video-loop-manager",
+        "youtube-video-management": "video-loop-manager",
+    }
+    if purpose not in allowed_purposes:
+        return jsonify({
+            "ok": False,
+            "message": "purpose must be youtube-video-upload or youtube-video-management",
+        }), 400
+    if requester != allowed_purposes[purpose]:
         return jsonify({"ok": False, "message": "requester must be video-loop-manager"}), 400
     profile_id = safe_youtube_profile_id(str(payload.get("profile_id") or ""))
     try:
@@ -11079,6 +11086,7 @@ def api_youtube_profile_access_token():
     response = jsonify({
         "ok": True,
         "profile_id": str(profile.get("id") or profile_id),
+        "purpose": purpose,
         **delegated,
     })
     response.headers["Cache-Control"] = "no-store, max-age=0"

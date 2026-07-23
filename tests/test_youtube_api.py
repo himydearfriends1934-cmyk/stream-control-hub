@@ -660,6 +660,38 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertNotIn("client_secret", data)
         self.assertIn("no-store", response.headers["Cache-Control"])
 
+    def test_hub_delegates_short_lived_access_token_for_video_management(self):
+        from stream_control_hub import app
+
+        client = MagicMock()
+        client.local_status.return_value = {"configured": True, "authorized": True}
+        client.delegated_access_token.return_value = {
+            "access_token": "short-lived-management-token",
+            "token_type": "Bearer",
+            "expires_in": 3599,
+            "scope": "https://www.googleapis.com/auth/youtube",
+        }
+        profile = {"id": "account-a", "client_secret": "must-not-leak"}
+        with patch.object(app, "youtube_profile_by_id", return_value=profile), patch.object(
+            app, "youtube_client_for_id", return_value=client
+        ):
+            response = app.APP.test_client().post(
+                "/api/youtube/profiles/access-token",
+                json={
+                    "profile_id": "account-a",
+                    "purpose": "youtube-video-management",
+                    "requester": "video-loop-manager",
+                },
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["purpose"], "youtube-video-management")
+        self.assertEqual(data["access_token"], "short-lived-management-token")
+        self.assertNotIn("refresh_token", data)
+        self.assertNotIn("client_secret", data)
+        self.assertIn("no-store", response.headers["Cache-Control"])
+
     def test_hub_rejects_access_token_delegation_for_other_purposes(self):
         from stream_control_hub import app
 

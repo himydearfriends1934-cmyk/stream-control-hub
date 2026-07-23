@@ -188,11 +188,12 @@ POST /api/youtube/prepare
 
 Official references: [OAuth 2.0 for TV and limited-input devices](https://developers.google.com/youtube/v3/guides/auth/devices) and [YouTube Live Streaming API](https://developers.google.com/youtube/v3/live/getting-started).
 
-For Video Loop Manager uploads, Hub also exposes
+For Video Loop Manager uploads and metadata updates, Hub also exposes
 `POST /api/youtube/profiles/access-token`. The caller must identify the exact
-`youtube-video-upload` purpose and `video-loop-manager` requester. Hub refreshes
-the selected Profile internally and returns only a short-lived Access Token with
-`Cache-Control: no-store`; Client Secrets and Refresh Tokens never leave Hub.
+`youtube-video-upload` or `youtube-video-management` purpose and the
+`video-loop-manager` requester. Hub refreshes the selected Profile internally
+and returns only a short-lived Access Token with `Cache-Control: no-store`;
+Client Secrets and Refresh Tokens never leave Hub.
 
 The app does not write the Tailscale auth key to repo config or audit logs. The intended deployment model is local or trusted-network use, preferably behind Tailscale.
 
