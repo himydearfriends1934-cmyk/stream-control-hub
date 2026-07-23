@@ -313,6 +313,24 @@ def public_origin_from_ip(value: str) -> str:
     return f"http://{ip}:{PORT}"
 
 
+def configured_origin_from_host(value: str) -> str:
+    host = str(value or "").strip()
+    if not host:
+        return ""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        lowered = host.lower().rstrip(".")
+        if lowered.endswith((".ts.net", ".beta.tailscale.net")):
+            return host
+        return ""
+    if ip.version != 4:
+        return ""
+    if ip.is_global or ip in TAILSCALE_CGNAT:
+        return str(ip)
+    return ""
+
+
 def normalize_public_origin(value: str) -> str:
     raw = str(value or "").strip().rstrip("/")
     if not raw:
@@ -320,14 +338,14 @@ def normalize_public_origin(value: str) -> str:
     parsed = urlparse(raw if "://" in raw else f"http://{raw}")
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return ""
-    origin = public_origin_from_ip(parsed.hostname)
-    if not origin:
+    host = configured_origin_from_host(parsed.hostname)
+    if not host:
         return ""
     try:
         port = parsed.port or PORT
     except ValueError:
         return ""
-    return f"{parsed.scheme}://{parsed.hostname}:{port}"
+    return f"{parsed.scheme}://{host}:{port}"
 
 
 def is_public_transfer_url(value: str) -> bool:
@@ -1657,7 +1675,8 @@ def api_status():
         boot_time = 0.0
     quota_limit = int(os.environ.get("STREAM_AGENT_TRAFFIC_QUOTA_BYTES", "0") or 0)
     total_used = net["bytes_recv"] + net["bytes_sent"]
-    public_origin = discover_public_origin()
+    configured_public_origin = normalize_public_origin(PUBLIC_ORIGIN)
+    public_origin = configured_public_origin or discover_public_origin()
     cpu_percent = cpu_percent_sample()
     runtime = ffmpeg_runtime_status(state, processes, net, cpu_percent)
     with STREAM_LIFECYCLE_LOCK:
@@ -1742,7 +1761,11 @@ def api_status():
             "public_origin": public_origin,
             "restrict_public_to_upload": True,
             "ticket_required": True,
-            "last_reason": "auto-public-origin" if public_origin else "public-ip-discovery-unavailable",
+            "last_reason": (
+                "configured-origin"
+                if configured_public_origin
+                else "auto-public-origin" if public_origin else "public-ip-discovery-unavailable"
+            ),
         },
         "videos": list_media(),
         "tailscale": tailscale_status(),

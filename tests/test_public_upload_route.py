@@ -28,6 +28,15 @@ class PublicOriginDiscoveryTests(unittest.TestCase):
         self.assertEqual(headless_agent.public_origin_from_ip("<html>not an ip</html>"), "")
         self.assertEqual(headless_agent.normalize_public_origin("http://165.99.42.174:bad"), "")
 
+    def test_configured_public_origin_accepts_tailscale_cgnat(self):
+        from stream_control_hub import headless_agent
+
+        self.assertEqual(
+            headless_agent.normalize_public_origin("http://100.92.177.111:8787"),
+            "http://100.92.177.111:8787",
+        )
+        self.assertEqual(headless_agent.normalize_public_origin("http://10.0.145.3:8787"), "")
+
     def test_discovery_falls_back_to_ifconfig_me(self):
         from stream_control_hub import headless_agent
 
