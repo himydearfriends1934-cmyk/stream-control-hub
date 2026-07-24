@@ -5038,7 +5038,6 @@ HTML = r"""
       const title = refs.youtubeTitleInput.value.trim() || defaultYouTubeBroadcastTitle(node);
       refs.youtubePrepareBtn.disabled = true;
       try {
-        const resolutionMatch = refs.resolutionInput.value.match(/x(\d+)$/i);
         const data = await postNodeAction("/api/nodes/youtube/prepare", {
           node_id: node.id,
           profile_id: selectedYouTubeProfileId(),
@@ -5046,8 +5045,8 @@ HTML = r"""
           privacy_status: "private",
           scheduled_start_time: "",
           stream_id: refs.youtubePrepareStreamSelect.value,
-          resolution: resolutionMatch ? `${resolutionMatch[1]}p` : "720p",
-          frame_rate: Number(refs.fpsInput.value || 30) >= 50 ? "60fps" : "30fps",
+          resolution: "variable",
+          frame_rate: "variable",
           enable_auto_start: true,
           enable_auto_stop: false,
         });

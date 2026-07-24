@@ -233,6 +233,8 @@ class YouTubeAPIClientTests(unittest.TestCase):
             "liveBroadcasts",
             "liveBroadcasts/bind",
         ])
+        self.assertEqual(request.call_args_list[0].kwargs["body"]["cdn"]["resolution"], "variable")
+        self.assertEqual(request.call_args_list[0].kwargs["body"]["cdn"]["frameRate"], "variable")
         self.assertEqual(request.call_args_list[2].kwargs["params"]["streamId"], "stream-1")
         self.assertNotIn("selfDeclaredMadeForKids", request.call_args_list[1].kwargs["body"]["status"])
 
@@ -730,6 +732,8 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertIn("data-node-stream-select", app.HTML)
         self.assertIn("data-node-video-select", app.HTML)
         self.assertIn('refs.youtubeSmartStartBtn.addEventListener("click", smartStartFromYouTubeWizard)', app.HTML)
+        self.assertIn('resolution: "variable"', app.HTML)
+        self.assertIn('frame_rate: "variable"', app.HTML)
         self.assertIn('class="wizard-field youtube-profile-row"', app.HTML)
         self.assertIn('class="youtube-profile-actions"', app.HTML)
         self.assertIn('class="wizard-field youtube-agent-row"', app.HTML)

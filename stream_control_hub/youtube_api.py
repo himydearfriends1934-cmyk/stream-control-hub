@@ -598,8 +598,8 @@ class YouTubeAPIClient:
         stream_id = str(payload.get("stream_id") or "").strip()
         if not stream_id:
             stream_title = str(payload.get("stream_title") or f"{title} encoder").strip()[:128]
-            resolution = str(payload.get("resolution") or "720p").strip().lower()
-            frame_rate = str(payload.get("frame_rate") or "30fps").strip().lower()
+            resolution = str(payload.get("resolution") or "variable").strip().lower()
+            frame_rate = str(payload.get("frame_rate") or "variable").strip().lower()
             if resolution not in {"240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "variable"}:
                 raise YouTubeAPIError("unsupported YouTube stream resolution", status_code=400)
             if frame_rate not in {"30fps", "60fps", "variable"}:
