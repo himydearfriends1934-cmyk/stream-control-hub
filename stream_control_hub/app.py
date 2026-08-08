@@ -2108,7 +2108,6 @@ HTML = r"""
     .node strong, .media strong { display: block; }
     .node small, .media small { color: var(--muted); }
     .resource-card, .upload-card { display: grid; gap: 8px; }
-    .left-stack .resource-card { order: -1; }
     .resource-wide { grid-column: 1 / -1; }
     .upload-card .split { grid-template-columns: 1fr; gap: 8px; }
     .upload-card .actions { display: grid; grid-template-columns: 1fr; }
@@ -2334,10 +2333,12 @@ HTML = r"""
       grid-column: auto;
       grid-row: auto;
     }
+    .fixed-content-grid .resource-card { order: 0; }
     .dashboard-grid.fixed-dashboard-grid > .top-utility-strip,
     .dashboard-grid.fixed-dashboard-grid > .top-log-panel,
     .dashboard-grid.fixed-dashboard-grid > .fixed-content-grid { grid-column: 1 / -1; }
     .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: span 6; }
+    .dashboard-grid.fixed-dashboard-grid > .agent-control-panel { grid-column: span 6; }
     @media (max-width: 760px) {
       .node-space-rings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .media-window { overflow-x: auto; }
@@ -2346,6 +2347,7 @@ HTML = r"""
     @media (max-width: 1080px) {
       .dashboard-grid { grid-template-columns: 1fr; }
       .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: 1 / -1; }
+      .dashboard-grid.fixed-dashboard-grid > .agent-control-panel { grid-column: 1 / -1; }
       .grid, .split, .hero, .task-flow, .node-detail, .top-utility-strip, .top-log-grid, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .top-utility-item { border-right: 0; border-bottom: 1px solid var(--line); }
       .top-utility-item:last-child { border-bottom: 0; }
@@ -2547,6 +2549,34 @@ HTML = r"""
       </div>
     </section>
 
+    <div class="card node-table-card agent-control-panel">
+      <div class="node-table-toolbar">
+        <div>
+          <h2>Agent 控制模块</h2>
+          <p>Agent 与 Hub 的运行状态和开播目标。</p>
+        </div>
+        <span class="pill warn">protected</span>
+      </div>
+      <div class="node-space-inline">
+        <button type="button" class="node-space-toggle" id="nodeSpaceToggle" aria-expanded="false">
+          <span>节点空间</span><small>展开</small>
+        </button>
+        <div class="node-space-panel" id="nodeSpacePanel" hidden>
+          <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
+        </div>
+      </div>
+      <div class="node-role-split" id="nodeRoleSplit">
+      <div class="role-group node-role-pane agent-role-pane">
+        <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
+        <div class="node-table" id="nodeList">加载中...</div>
+      </div>
+      <details class="role-group node-role-pane hub-role-pane" id="hubNodePane">
+        <summary class="role-group-title"><span>Hub 节点 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></summary>
+        <div class="node-table" id="hubNodeList">加载中...</div>
+      </details>
+      </div>
+    </div>
+
     <section class="grid fixed-content-grid">
       <div class="left-stack">
       <div class="card monitor-card">
@@ -2594,33 +2624,6 @@ HTML = r"""
       </div>
 
       <div class="side-stack">
-        <div class="card node-table-card">
-          <div class="node-table-toolbar">
-            <div>
-              <h2>VPS 节点表</h2>
-              <p>Agent 与 Hub 的运行状态和开播目标。</p>
-            </div>
-            <span class="pill warn">protected</span>
-          </div>
-          <div class="node-space-inline">
-            <button type="button" class="node-space-toggle" id="nodeSpaceToggle" aria-expanded="false">
-              <span>节点空间</span><small>展开</small>
-            </button>
-            <div class="node-space-panel" id="nodeSpacePanel" hidden>
-              <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
-            </div>
-          </div>
-          <div class="node-role-split" id="nodeRoleSplit">
-          <div class="role-group node-role-pane agent-role-pane">
-            <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
-            <div class="node-table" id="nodeList">加载中...</div>
-          </div>
-          <details class="role-group node-role-pane hub-role-pane" id="hubNodePane">
-            <summary class="role-group-title"><span>Hub 节点 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></summary>
-            <div class="node-table" id="hubNodeList">加载中...</div>
-          </details>
-          </div>
-        </div>
         <div class="upload-stack">
           <details class="card upload-card">
             <summary class="upload-summary">
