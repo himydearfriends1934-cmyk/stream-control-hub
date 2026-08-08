@@ -615,17 +615,20 @@ class AgentUpgradeTests(unittest.TestCase):
                 self.assertEqual({item["id"] for item in saved}, {"old", "new"})
 
             with patch.object(app, "NODES_FILE", nodes_file), patch.object(
-                app, "post_url_json", return_value={"ok": True, "imported_count": 2}
-            ) as post:
+                app, "online_tailscale_peer_for_ip", return_value={"online": True}
+            ), patch.object(
+                app, "current_hub_source_url", return_value="http://100.64.0.1:8788"
+            ), patch.object(app, "post_url_json", return_value={"ok": True, "imported_count": 2}) as post:
                 response = app.APP.test_client().post(
                     "/api/hub-transfer/nodes",
-                    json={"target_hub_url": "http://100.64.0.9:8788", "target_token": "hub-token"},
+                    json={"target_hub_url": "100.64.0.9", "target_token": "hub-token"},
                     environ_base={"REMOTE_ADDR": "127.0.0.1"},
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertTrue(response.get_json()["ok"])
                 args, kwargs = post.call_args
                 self.assertEqual(args[0], "http://100.64.0.9:8788/api/nodes/import")
+                self.assertEqual(args[1]["source_hub"], "http://100.64.0.1:8788")
                 self.assertEqual(kwargs["headers"], {"X-Control-Token": "hub-token"})
 
     def test_hub_syncs_nodes_to_all_active_hubs(self):
@@ -696,17 +699,79 @@ class AgentUpgradeTests(unittest.TestCase):
             nodes_file = Path(tmp) / "nodes.json"
             nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
             with patch.object(app, "NODES_FILE", nodes_file), patch.object(
-                app, "post_node_json", return_value={"ok": True, "accepted": True}
+                app, "current_hub_source_url", return_value="http://100.64.0.1:8788"
+            ), patch.object(
+                app,
+                "post_node_json",
+                return_value={"ok": True, "accepted": True, "result": {"url": "http://100.64.0.10:8788"}},
             ) as post:
                 response = app.APP.test_client().post(
                     "/api/nodes/roles/hub/activate",
                     json={"node_id": "node-a"},
                     environ_base={"REMOTE_ADDR": "127.0.0.1"},
                 )
+            saved = json.loads(nodes_file.read_text(encoding="utf-8"))
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(post.call_args.args[1], "/api/roles/hub/activate")
         self.assertEqual(post.call_args.args[2]["nodes"], nodes)
+        self.assertEqual(post.call_args.args[2]["source_hub"], "http://100.64.0.1:8788")
+        self.assertEqual(saved[0]["hub_url"], "http://100.64.0.10:8788")
+        self.assertTrue(saved[0]["role_hints"]["hub"]["activation_pending"])
+
+    def test_agent_activation_generates_token_and_records_pending_hint(self):
+        from stream_control_hub import app
+
+        nodes = [{"id": "node-a", "name": "Node A", "base_url": "http://100.64.0.10:8787", "hub_url": "http://100.64.0.10:8788"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app.secrets, "token_urlsafe", return_value="generated-agent-token"
+            ), patch.object(
+                app, "current_hub_source_url", return_value="http://100.64.0.1:8788"
+            ), patch.object(app, "post_url_json", return_value={"ok": True, "accepted": True}) as post:
+                response = app.APP.test_client().post(
+                    "/api/nodes/roles/agent/activate",
+                    json={"node_id": "node-a"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+            saved = json.loads(nodes_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(post.call_args.args[0], "http://100.64.0.10:8788/api/roles/agent/activate")
+        self.assertEqual(post.call_args.args[1]["control_hub_url"], "http://100.64.0.1:8788")
+        self.assertEqual(post.call_args.args[1]["agent_token"], "generated-agent-token")
+        self.assertEqual(saved[0]["token"], "generated-agent-token")
+        self.assertTrue(saved[0]["role_hints"]["agent"]["activation_pending"])
+
+    def test_nodes_api_reports_pending_role_hints_until_services_are_online(self):
+        from stream_control_hub import app
+
+        nodes = [{
+            "id": "node-a",
+            "base_url": "http://100.64.0.10:8787",
+            "hub_url": "http://100.64.0.10:8788",
+            "role_hints": {
+                "agent": {"activation_pending": True, "prepared": True, "url": "http://100.64.0.10:8787"},
+                "hub": {"activation_pending": True, "prepared": True, "url": "http://100.64.0.10:8788"},
+            },
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "request_node_json", return_value={"ok": False, "message": "starting"}
+            ), patch.object(
+                app, "request_hub_role_status", return_value={"ok": False, "enabled": False, "url": "http://100.64.0.10:8788"}
+            ):
+                response = app.APP.test_client().get("/api/nodes", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+
+        roles = response.get_json()[0]["roles"]
+        self.assertTrue(roles["agent"]["activation_pending"])
+        self.assertTrue(roles["agent"]["prepared"])
+        self.assertTrue(roles["hub"]["activation_pending"])
+        self.assertEqual(roles["hub"]["url"], "http://100.64.0.10:8788")
 
     def test_hub_deletes_node_record_only_from_config(self):
         from stream_control_hub import app

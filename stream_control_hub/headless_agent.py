@@ -504,6 +504,57 @@ def configured_control_hub_ip() -> str:
     return str(ip) if ip in TAILSCALE_CGNAT else ""
 
 
+def normalize_control_hub_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "http"
+    hostname = (parsed.hostname or "").split("%", 1)[0]
+    if not hostname:
+        return ""
+    try:
+        port = parsed.port or 8788
+    except ValueError:
+        return ""
+    return f"{scheme}://{hostname}:{port}"
+
+
+def requested_control_hub_url(payload: dict[str, Any]) -> str:
+    raw = str(payload.get("hub_url") or payload.get("control_hub") or "").strip()
+    if not raw:
+        return ""
+    normalized = normalize_control_hub_url(raw)
+    if not normalized:
+        return ""
+    parsed = urlparse(normalized)
+    remote_text = (request.remote_addr or "").split("%", 1)[0]
+    try:
+        remote_ip = ipaddress.ip_address(remote_text)
+        requested_ip = ipaddress.ip_address((parsed.hostname or "").split("%", 1)[0])
+    except ValueError:
+        return ""
+    if remote_ip not in TAILSCALE_CGNAT or requested_ip != remote_ip:
+        return ""
+    return normalized
+
+
+def bind_control_hub(control_hub_url: str, *, rotate_token: bool = False) -> str:
+    global CONTROL_HUB, CONTROL_TOKEN
+    normalized = normalize_control_hub_url(control_hub_url)
+    if not normalized:
+        raise RuntimeError("valid Hub Tailscale URL required")
+    CONTROL_HUB = normalized
+    os.environ["STREAM_AGENT_CONTROL_HUB"] = normalized
+    updates = {"STREAM_AGENT_CONTROL_HUB": normalized}
+    if rotate_token:
+        CONTROL_TOKEN = secrets.token_urlsafe(32)
+        os.environ["STREAM_AGENT_CONTROL_TOKEN"] = CONTROL_TOKEN
+        updates["STREAM_AGENT_CONTROL_TOKEN"] = CONTROL_TOKEN
+    update_env_file_values(AGENT_ENV_FILE, updates)
+    return CONTROL_TOKEN
+
+
 def request_is_control_hub() -> bool:
     control_hub_ip = configured_control_hub_ip()
     if not control_hub_ip:
@@ -523,19 +574,27 @@ def request_is_verified_tailscale_peer() -> bool:
         return False
     if remote_ip not in TAILSCALE_CGNAT or not shutil.which("tailscale"):
         return False
+    remote_text = str(remote_ip)
     try:
         result = subprocess.run(
-            ["tailscale", "whois", "--json", str(remote_ip)],
+            ["tailscale", "whois", "--json", remote_text],
             text=True,
             capture_output=True,
             timeout=8,
         )
-        if result.returncode != 0:
-            return False
-        payload = json.loads(result.stdout or "{}")
-        return bool(payload.get("Node") or payload.get("UserProfile"))
+        if result.returncode == 0:
+            payload = json.loads(result.stdout or "{}")
+            if payload.get("Node") or payload.get("UserProfile"):
+                return True
     except Exception:
+        pass
+    status = tailscale_status()
+    if not status.get("ok"):
         return False
+    for peer in status.get("peers") or []:
+        if remote_text in (peer.get("tailscale_ips") or []):
+            return peer.get("online") is not False
+    return False
 
 
 @APP.before_request
@@ -1631,6 +1690,36 @@ def pair_over_tailscale():
         return jsonify({"ok": False, "message": "pairing requires a verified peer from the same tailnet"}), 403
     if not CONTROL_TOKEN:
         return jsonify({"ok": False, "message": "Agent control token is not configured"}), 503
+    payload = request.get_json(silent=True) or {}
+    requested_hub = requested_control_hub_url(payload)
+    if (payload.get("hub_url") or payload.get("control_hub")) and not requested_hub:
+        return jsonify({
+            "ok": False,
+            "message": "Hub URL must use the requesting Hub's Tailscale IP",
+        }), 400
+    current_hub = normalize_control_hub_url(CONTROL_HUB)
+    previous_hub = current_hub
+    confirm_rebind = bool(payload.get("confirm_rebind") or payload.get("force_rebind"))
+    rebound = False
+    token_rotated = False
+    if requested_hub:
+        if current_hub and current_hub != requested_hub and not confirm_rebind:
+            return jsonify({
+                "ok": False,
+                "message": "Agent is already bound to another Hub. Confirm before replacing that binding.",
+                "confirmation_required": True,
+                "action": "confirm_rebind",
+                "current_control_hub": current_hub,
+                "requested_control_hub": requested_hub,
+                "name": AGENT_NAME,
+                "hostname": platform.node(),
+                "mode": "headless-agent",
+            }), 409
+        if current_hub != requested_hub:
+            token_rotated = bool(previous_hub)
+            bind_control_hub(requested_hub, rotate_token=token_rotated)
+            current_hub = requested_hub
+            rebound = bool(previous_hub)
     return jsonify({
         "ok": True,
         "name": AGENT_NAME,
@@ -1638,6 +1727,10 @@ def pair_over_tailscale():
         "mode": "headless-agent",
         "token": CONTROL_TOKEN,
         "paired_via": "tailscale-whois",
+        "bound_control_hub": current_hub,
+        "previous_control_hub": previous_hub if rebound else "",
+        "rebound": rebound,
+        "token_rotated": token_rotated,
     })
 
 

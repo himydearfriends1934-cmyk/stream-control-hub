@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import shutil
+import secrets
 import subprocess
 import time
 import uuid
@@ -2708,7 +2709,7 @@ HTML = r"""
       <div class="control-transfer-box">
         <h3>Hub 控制转移 / 换平台</h3>
         <p>把当前 Hub 的节点信息合并导入到新 Hub，新 Hub 会接管这些 Agent / Hub 节点的控制入口。</p>
-        <input id="transferHubUrlInput" placeholder="新 Hub 地址，例如 http://100.x.x.x:8788">
+        <input id="transferHubUrlInput" placeholder="新 Hub Tailscale IP 或地址，例如 100.x.x.x">
         <input id="transferHubTokenInput" placeholder="新 Hub 控制 Token（如果新 Hub 设置了 Token）">
         <button id="transferHubNodesBtn" class="primary">转移当前 Hub 节点信息到新 Hub</button>
         <button id="syncAllHubsBtn">同步节点信息到所有已激活 Hub</button>
@@ -2772,7 +2773,11 @@ HTML = r"""
           <label>Tailscale IP</label>
           <input id="tailscaleExistingIpInput" type="text" autocomplete="off" placeholder="100.x.x.x">
         </div>
-        <button class="primary" id="tailscaleUseExistingIpBtn">检测并连接</button>
+        <div class="wizard-field">
+          <label>Agent Token</label>
+          <input id="tailscaleExistingTokenInput" type="password" autocomplete="off" placeholder="optional">
+        </div>
+        <button class="primary wide-action" id="tailscaleUseExistingIpBtn">检测并连接</button>
       </div>
       <div class="wizard-status">
         <div class="wizard-status-line"><strong>目标 VPS 尚未安装 Agent？</strong></div>
@@ -2980,6 +2985,7 @@ HTML = r"""
       tailscaleWizardClose: document.getElementById("tailscaleWizardClose"),
       tailscaleWizardLog: document.getElementById("tailscaleWizardLog"),
       tailscaleExistingIpInput: document.getElementById("tailscaleExistingIpInput"),
+      tailscaleExistingTokenInput: document.getElementById("tailscaleExistingTokenInput"),
       tailscaleUseExistingIpBtn: document.getElementById("tailscaleUseExistingIpBtn"),
       agentInstallCommand: document.getElementById("agentInstallCommand"),
       copyAgentInstallBtn: document.getElementById("copyAgentInstallBtn"),
@@ -5912,8 +5918,10 @@ HTML = r"""
       return showTailscaleStatus();
     }
 
-    async function connectExistingTailscaleIp() {
+    async function connectExistingTailscaleIp(confirm_rebind = false) {
+      confirm_rebind = confirm_rebind === true;
       const tailscale_ip = refs.tailscaleExistingIpInput.value.trim();
+      const token = refs.tailscaleExistingTokenInput.value.trim();
       if (!tailscale_ip) {
         setTailscaleWizardOpen(true);
         setTailscaleLog("请输入已有的 Tailscale IP，例如 100.x.x.x。");
@@ -5923,11 +5931,31 @@ HTML = r"""
         const resp = await fetch("/api/tailscale/connect-existing-ip", {
           method: "POST",
           headers: authHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ tailscale_ip }),
+          body: JSON.stringify({
+            tailscale_ip,
+            ...(token ? { token } : {}),
+            ...(confirm_rebind ? { confirm_rebind: true } : {}),
+          }),
         });
         return resp.json();
       });
+      if (data.confirmation_required) {
+        const currentHub = data.current_control_hub || "未记录";
+        const requestedHub = data.requested_control_hub || "当前 Hub";
+        const ok = window.confirm(`Agent 当前绑定 Hub：${currentHub}\n\n是否取消旧绑定，并重新绑定到新 Hub：${requestedHub}？`);
+        if (ok) {
+          return connectExistingTailscaleIp(true);
+        }
+        setTailscaleLog({
+          ok: false,
+          message: "已取消重新绑定，Agent 仍保持旧 Hub 绑定。",
+          current_control_hub: currentHub,
+          requested_control_hub: requestedHub,
+        });
+        return;
+      }
       if (data.ok) {
+        refs.tailscaleExistingTokenInput.value = "";
         if (data.hub_only) {
           if (data.node_id) rememberSelectedNode(data.node_id);
           log(`Hub-only 节点：${data.node_id || data.hub_url || tailscale_ip}，Agent 当前关闭`);
@@ -6603,10 +6631,13 @@ HTML = r"""
       refs.roleSettingsActions.innerHTML = streamTools + ["agent", "hub"].map((role) => {
         const info = node.roles?.[role] || {};
         const enabled = Boolean(info.enabled);
+        const pending = Boolean(info.activation_pending);
         const label = role === "hub" ? "Hub" : "Agent";
         return `<div class="role-settings-item">
           <span><strong>${label}</strong><small>当前状态：${enabled
             ? `已激活 · 版本 ${escapeHtml(info.version || "未识别")}`
+            : pending
+              ? `激活任务已提交 · 等待服务上线 · ${escapeHtml(info.url || "")}`
             : info.prepared
               ? `已准备 · 未激活 · 版本 ${escapeHtml(info.version || "未识别")}`
               : "未激活"}</small></span>
@@ -6710,8 +6741,14 @@ HTML = r"""
       refs.updateBox.textContent = JSON.stringify(data, null, 2);
       log(data.ok ? `${roleLabel} 任务已提交：${nodeName}` : `${roleLabel} 操作失败：${data.message || nodeName}`);
       if (data.ok) {
-        await new Promise((resolve) => setTimeout(resolve, 8000));
         await refreshAll();
+        for (const delay of [5000, 10000, 15000]) {
+          const updated = nodes.find((item) => String(item.id) === String(nodeId));
+          const updatedRole = updated?.roles?.[role] || {};
+          if (updatedRole.enabled) break;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          await refreshAll();
+        }
       } else if (sourceButton) {
         sourceButton.disabled = false;
       }
@@ -6878,8 +6915,8 @@ HTML = r"""
         const data = await postJson("/api/hub-transfer/nodes", { target_hub_url: target, target_token: token });
         refs.updateBox.textContent = JSON.stringify(data, null, 2);
         if (!data.ok) throw new Error(data.message || "控制转移失败");
-        log(`Hub 控制转移已完成：${data.imported_count || 0} 个节点 -> ${target}`);
-        alert(`转移完成：${data.imported_count || 0} 个节点已导入新 Hub。`);
+        log(`Hub 控制转移已完成：${data.imported_count || 0} 个节点 -> ${data.target_hub_url || target}`);
+        alert(`转移完成：${data.imported_count || 0} 个节点已导入新 Hub。\n\n${data.target_hub_url || target}`);
       } catch (error) {
         const message = friendlyError(error, "Hub 控制转移失败");
         log(message);
@@ -7861,9 +7898,56 @@ def online_tailscale_peer_for_ip(ip: str) -> dict[str, Any] | None:
     return None
 
 
-def pair_tailscale_agent(base_url: str, *, timeout: int = 12) -> dict[str, Any]:
+def local_tailscale_hub_url() -> str:
+    status = tailscale_status()
+    if not status.get("ok"):
+        return ""
+    tailscale_ips = (status.get("self") or {}).get("tailscale_ips") or []
+    tailscale_ip = next((str(item) for item in tailscale_ips if str(item).startswith("100.")), "")
+    return f"http://{tailscale_ip}:{PORT}" if tailscale_ip else ""
+
+
+def current_hub_source_url() -> str:
+    return local_tailscale_hub_url() or request.host_url.rstrip("/")
+
+
+def normalize_hub_transfer_target(value: str) -> tuple[str, str]:
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        return "", "new Hub Tailscale IP or URL is required"
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return "", "new Hub address must be a Tailscale IP or http(s) Hub URL"
     try:
-        response = requests.post(f"{base_url.rstrip('/')}/pair", json={"client": "stream-control-hub"}, timeout=timeout)
+        port = parsed.port or PORT
+    except ValueError:
+        return "", "new Hub URL has an invalid port"
+    host = parsed.hostname.split("%", 1)[0]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None and ip in TAILSCALE_CGNAT and not online_tailscale_peer_for_ip(str(ip)):
+        return "", "新 Hub 不在当前 Tailscale 内网或不在线；请先让两个 Hub 加入同一个 Tailnet"
+    return f"{parsed.scheme}://{host}:{port}", ""
+
+
+def pair_tailscale_agent(
+    base_url: str,
+    *,
+    hub_url: str = "",
+    confirm_rebind: bool = False,
+    timeout: int = 12,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"client": "stream-control-hub"}
+    if hub_url:
+        payload["hub_url"] = hub_url
+    if confirm_rebind:
+        payload["confirm_rebind"] = True
+    try:
+        response = requests.post(f"{base_url.rstrip('/')}/pair", json=payload, timeout=timeout)
         try:
             payload = response.json()
         except ValueError:
@@ -8311,6 +8395,39 @@ def node_by_id(node_id: str) -> dict[str, Any] | None:
     for node in load_nodes():
         if str(node.get("id")) == node_id:
             return node
+    return None
+
+
+def save_node_updates(node_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+    nodes = load_nodes()
+    for index, node in enumerate(nodes):
+        if str(node.get("id") or "") != str(node_id):
+            continue
+        updated = dict(node)
+        updated.update(updates)
+        nodes[index] = updated
+        save_nodes(nodes)
+        return updated
+    return None
+
+
+def save_node_role_hint(node_id: str, role: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+    if role not in {"agent", "hub"}:
+        return None
+    nodes = load_nodes()
+    for index, node in enumerate(nodes):
+        if str(node.get("id") or "") != str(node_id):
+            continue
+        updated = dict(node)
+        hints = dict(updated.get("role_hints") or {})
+        role_hint = dict(hints.get(role) or {})
+        role_hint.update(updates)
+        role_hint["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        hints[role] = role_hint
+        updated["role_hints"] = hints
+        nodes[index] = updated
+        save_nodes(nodes)
+        return updated
     return None
 
 
@@ -9905,20 +10022,33 @@ def api_nodes():
             lock["video_path"] = str(stream_config.get("video_path") or "")
         node_view["stream_lock"] = lock
         urls = node_role_urls(node)
+        role_hints = node.get("role_hints") if isinstance(node.get("role_hints"), dict) else {}
+        agent_hint = role_hints.get("agent") if isinstance(role_hints.get("agent"), dict) else {}
+        hub_hint = role_hints.get("hub") if isinstance(role_hints.get("hub"), dict) else {}
         agent_health = node_view["health"]
         agent_info = agent_health.get("agent") or {}
         hub_role = request_hub_role_status(node)
         prepared_agent = dict(hub_role.pop("_prepared_agent", {}) or {})
         agent_role_status = (agent_health.get("roles") or {}).get("agent") or {}
         prepared_hub = (agent_health.get("roles") or {}).get("hub") or {}
+        agent_enabled = bool(agent_health.get("ok"))
+        hub_view = hub_role if hub_role.get("enabled") else {**hub_hint, **prepared_hub, **hub_role}
+        if hub_view.get("enabled"):
+            hub_view["activation_pending"] = False
         node_view["roles"] = {
             "agent": {
-                "enabled": bool(agent_health.get("ok")),
-                "prepared": bool(agent_role_status.get("prepared") or prepared_agent.get("prepared")),
-                "version": str(agent_info.get("version") or prepared_agent.get("version") or "unrecognized"),
-                "url": urls["agent"],
+                "enabled": agent_enabled,
+                "prepared": bool(
+                    agent_role_status.get("prepared")
+                    or prepared_agent.get("prepared")
+                    or agent_hint.get("prepared")
+                    or agent_hint.get("activation_pending")
+                ),
+                "version": str(agent_info.get("version") or prepared_agent.get("version") or agent_hint.get("version") or "unrecognized"),
+                "url": str(agent_hint.get("url") or urls["agent"]),
+                "activation_pending": bool(agent_hint.get("activation_pending")) and not agent_enabled,
             },
-            "hub": hub_role if hub_role.get("enabled") else {**prepared_hub, **hub_role},
+            "hub": hub_view,
         }
         result.append(node_view)
     return jsonify(result)
@@ -10120,15 +10250,29 @@ def api_import_nodes():
 @APP.post("/api/hub-transfer/nodes")
 def api_transfer_nodes_to_hub():
     payload = request.get_json(silent=True) or {}
-    target = str(payload.get("target_hub_url") or "").strip().rstrip("/")
+    target_raw = str(payload.get("target_hub_url") or payload.get("target_hub_tailip") or payload.get("tailscale_ip") or "").strip()
     token = str(payload.get("target_token") or "").strip()
-    parsed = urlparse(target)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return jsonify({"ok": False, "message": "target_hub_url must be an http(s) Hub address"}), 400
+    target, error = normalize_hub_transfer_target(target_raw)
+    if error:
+        return jsonify({"ok": False, "message": error}), 400
     headers = {"X-Control-Token": token} if token else {}
-    result = post_url_json(f"{target}/api/nodes/import", {"nodes": load_nodes(), "source_hub": request.host_url.rstrip("/")}, timeout=30, headers=headers)
+    result = post_url_json(
+        f"{target}/api/nodes/import",
+        {
+            "nodes": load_nodes(),
+            "source_hub": current_hub_source_url(),
+            "transfer_mode": "tailnet-push",
+        },
+        timeout=30,
+        headers=headers,
+    )
+    if not result.get("ok") and int(result.get("status_code") or 0) in {401, 403}:
+        result.setdefault(
+            "message",
+            "新 Hub 拒绝导入；请填写新 Hub 控制 Token，或在可信 Tailnet 部署中开启 STREAM_HUB_TRUSTED_REMOTE_WRITES=1",
+        )
     status_code = 200 if result.get("ok") else int(result.get("status_code") or 502)
-    return jsonify({"target_hub_url": target, **result}), status_code
+    return jsonify({"target_hub_url": target, "target_input": target_raw, **result}), status_code
 
 
 @APP.post("/api/hubs/sync")
@@ -10421,7 +10565,9 @@ def api_tailscale_connect_existing_ip():
     payload = request.get_json(silent=True) or {}
     node_id = str(payload.get("node_id") or "").strip()
     agent_name = str(payload.get("name") or payload.get("agent_name") or "").strip()
-    supplied_token = str(payload.get("token") or "").strip()
+    manual_token = str(payload.get("token") or "").strip()
+    supplied_token = manual_token
+    confirm_rebind = bool(payload.get("confirm_rebind") or payload.get("force_rebind"))
     raw_ip = str(payload.get("tailscale_ip") or payload.get("ip") or "").strip()
     try:
         ip = ipaddress.ip_address(raw_ip.split("%", 1)[0])
@@ -10434,13 +10580,43 @@ def api_tailscale_connect_existing_ip():
     if not peer:
         return jsonify({
             "ok": False,
-            "message": "该 IP 不是当前 Tailnet 中的在线设备，请确认 Hub 与目标设备登录了同一 Tailscale 网络",
+            "message": "当前 Hub 与目标 Agent 不在同一个 Tailscale 内网；请先让新 Hub 和 Agent 加入同一个 Tailnet 后再连接",
             "tailscale_ip": str(ip),
         }), 400
 
     base_url = f"http://{ip}:8787"
-    pairing = pair_tailscale_agent(base_url)
-    if not pairing.get("ok"):
+    hub_url = local_tailscale_hub_url()
+    if not hub_url:
+        return jsonify({
+            "ok": False,
+            "message": "当前 Hub 尚未加入 Tailscale 内网；请先连接 Tailscale 后再绑定 Agent",
+            "tailscale_ip": str(ip),
+        }), 400
+    pairing = pair_tailscale_agent(base_url, hub_url=hub_url, confirm_rebind=confirm_rebind)
+    pairing_warning = ""
+    if pairing.get("confirmation_required") or pairing.get("action") == "confirm_rebind":
+        return jsonify({
+            "ok": False,
+            "confirmation_required": True,
+            "action": "confirm_rebind",
+            "message": pairing.get("message") or "Agent 当前已绑定其他 Hub，请确认是否取消旧绑定并绑定到当前 Hub",
+            "tailscale_ip": str(ip),
+            "current_control_hub": pairing.get("current_control_hub") or "",
+            "requested_control_hub": pairing.get("requested_control_hub") or hub_url,
+            "agent_name": pairing.get("name") or agent_name,
+            "hostname": pairing.get("hostname") or "",
+            "status_code": int(pairing.get("status_code") or 409),
+        }), 409
+    if pairing.get("ok"):
+        paired_token = str(pairing.get("token") or "").strip()
+        if paired_token:
+            supplied_token = paired_token
+        elif manual_token:
+            pairing_warning = "Automatic pairing did not return a token; using the supplied Agent token."
+        agent_name = str(pairing.get("name") or pairing.get("hostname") or agent_name).strip()
+    elif manual_token:
+        pairing_warning = str(pairing.get("message") or "Automatic pairing failed; using the supplied Agent token.")
+    else:
         hub_url = f"http://{ip}:8788"
         hub_status = request_hub_status_url(hub_url)
         if hub_status.get("ok") and (hub_status.get("roles") or {}).get("hub"):
@@ -10501,8 +10677,6 @@ def api_tailscale_connect_existing_ip():
             "peer": peer,
             "status_code": status_code,
         }), status_code
-    supplied_token = str(pairing.get("token") or "").strip()
-    agent_name = str(pairing.get("name") or pairing.get("hostname") or agent_name).strip()
     if not supplied_token:
         return jsonify({"ok": False, "message": "Agent 配对成功但未返回控制凭据，请升级 Agent"}), 502
 
@@ -10545,7 +10719,7 @@ def api_tailscale_connect_existing_ip():
         status_code = int(status.get("status_code") or 502)
         message = status.get("message") or "无法连接到这个 Tailscale IP 上的 Agent"
         if status_code == 403:
-            message = "Agent 已响应但未授权；请把 STREAM_AGENT_CONTROL_HUB 设置为当前 Hub 的 Tailscale URL"
+            message = "Agent 已响应但未授权；请确认 Agent Token 是否正确，或把 STREAM_AGENT_CONTROL_HUB 设置为当前 Hub 的 Tailscale URL"
         return jsonify({
             "ok": False,
             "message": message,
@@ -10576,6 +10750,9 @@ def api_tailscale_connect_existing_ip():
         "hostname": status.get("hostname"),
         "platform": status.get("platform"),
         "created": creating,
+        "paired_via": str(pairing.get("paired_via") or ("supplied-token" if manual_token else "tailscale")),
+        "pairing_warning": pairing_warning,
+        "token_rotated": bool(pairing.get("token_rotated")),
     })
 
 
@@ -11489,20 +11666,48 @@ def api_activate_node_role(role: str):
     if not node:
         return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
     if role == "hub":
-        result = post_node_json(node, "/api/roles/hub/activate", {"nodes": load_nodes(), "source_hub": request.host_url.rstrip("/")}, timeout=30)
+        hub_url = node_role_urls(node)["hub"]
+        result = post_node_json(
+            node,
+            "/api/roles/hub/activate",
+            {"nodes": load_nodes(), "source_hub": current_hub_source_url()},
+            timeout=30,
+        )
+        if result.get("ok"):
+            scheduled = result.get("result") if isinstance(result.get("result"), dict) else {}
+            role_url = str(scheduled.get("url") or hub_url).rstrip("/")
+            save_node_updates(node_id, {"hub_url": role_url})
+            save_node_role_hint(node_id, "hub", {
+                "activation_pending": True,
+                "prepared": True,
+                "enabled": False,
+                "url": role_url,
+                "message": result.get("message") or "Hub activation scheduled",
+            })
     else:
         hub_url = node_role_urls(node)["hub"]
         if not hub_url:
             return jsonify({"ok": False, "node_id": node_id, "message": "Hub role is unavailable; SSH bootstrap is required"}), 409
+        agent_token = str(node.get("token") or node.get("control_token") or "").strip() or secrets.token_urlsafe(32)
+        agent_url = node_role_urls(node)["agent"]
         result = post_url_json(
             f"{hub_url}/api/roles/agent/activate",
             {
-                "control_hub_url": request.host_url.rstrip("/"),
+                "control_hub_url": current_hub_source_url(),
                 "agent_name": str(node.get("name") or node.get("id") or ""),
-                "agent_token": str(node.get("token") or ""),
+                "agent_token": agent_token,
             },
             timeout=30,
         )
+        if result.get("ok"):
+            save_node_updates(node_id, {"token": agent_token, "base_url": agent_url})
+            save_node_role_hint(node_id, "agent", {
+                "activation_pending": True,
+                "prepared": True,
+                "enabled": False,
+                "url": agent_url,
+                "message": result.get("message") or "Agent activation scheduled",
+            })
     status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
     return jsonify({"node_id": node_id, "role": role, **result}), status_code
 
