@@ -289,7 +289,7 @@ resolve_action() {
   fi
   if [ "$ACTION" != "install" ] || [ -n "$CHOICE" ]; then
     :
-  elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  elif [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
     show_menu > /dev/tty
     read -r CHOICE < /dev/tty || CHOICE="1"
   else

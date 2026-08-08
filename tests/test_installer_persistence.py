@@ -109,6 +109,13 @@ class InstallerPersistenceTests(unittest.TestCase):
             self.assertIn(directive, hub)
             self.assertIn(directive, agent)
 
+    def test_installers_default_without_interactive_tty(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+        agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
+
+        self.assertIn("[ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]", hub)
+        self.assertIn("[ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]", agent)
+
     def test_agent_installer_ignores_its_transient_upgrade_unit(self):
         script = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
 
