@@ -2340,10 +2340,14 @@ HTML = r"""
     .dashboard-grid.fixed-dashboard-grid > .top-utility-strip,
     .dashboard-grid.fixed-dashboard-grid > .top-log-panel { grid-column: 1 / -1; }
     .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: 1 / -1; }
-    .dashboard-grid.fixed-dashboard-grid > .agent-control-panel { grid-column: 1 / span 6; grid-row: 2; }
-    .dashboard-grid.fixed-dashboard-grid > .monitor-card { grid-column: 7 / span 6; grid-row: 2; }
-    .dashboard-grid.fixed-dashboard-grid > .resource-card { grid-column: 7 / span 6; grid-row: 3; }
-    .dashboard-grid.fixed-dashboard-grid > .upload-card { grid-column: 1 / span 6; grid-row: 3; }
+    .dashboard-grid.fixed-dashboard-grid > .dashboard-column {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+      min-width: 0;
+    }
+    .dashboard-grid.fixed-dashboard-grid > .dashboard-left-column { grid-column: 1 / span 6; }
+    .dashboard-grid.fixed-dashboard-grid > .dashboard-right-column { grid-column: 7 / span 6; }
     @media (max-width: 760px) {
       .node-space-rings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .media-window { overflow-x: auto; }
@@ -2352,10 +2356,7 @@ HTML = r"""
     @media (max-width: 1080px) {
       .dashboard-grid { grid-template-columns: 1fr; }
       .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: 1 / -1; }
-      .dashboard-grid.fixed-dashboard-grid > .agent-control-panel,
-      .dashboard-grid.fixed-dashboard-grid > .monitor-card,
-      .dashboard-grid.fixed-dashboard-grid > .resource-card,
-      .dashboard-grid.fixed-dashboard-grid > .upload-card {
+      .dashboard-grid.fixed-dashboard-grid > .dashboard-column {
         grid-column: 1 / -1;
         grid-row: auto;
       }
@@ -2560,34 +2561,7 @@ HTML = r"""
       </div>
     </details>
 
-    <div class="card node-table-card agent-control-panel">
-      <div class="node-table-toolbar">
-        <div>
-          <h2>Agent 控制模块</h2>
-          <p>Agent 与 Hub 的运行状态和开播目标。</p>
-        </div>
-        <span class="pill warn">protected</span>
-      </div>
-      <div class="node-space-inline">
-        <button type="button" class="node-space-toggle" id="nodeSpaceToggle" aria-expanded="false">
-          <span>节点空间</span><small>展开</small>
-        </button>
-        <div class="node-space-panel" id="nodeSpacePanel" hidden>
-          <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
-        </div>
-      </div>
-      <div class="node-role-split" id="nodeRoleSplit">
-      <div class="role-group node-role-pane agent-role-pane">
-        <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
-        <div class="node-table" id="nodeList">加载中...</div>
-      </div>
-      <details class="role-group node-role-pane hub-role-pane" id="hubNodePane">
-        <summary class="role-group-title"><span>Hub 节点 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></summary>
-        <div class="node-table" id="hubNodeList">加载中...</div>
-      </details>
-      </div>
-    </div>
-
+    <div class="dashboard-column dashboard-left-column">
       <div class="card monitor-card">
         <div class="monitor-heading">
           <div>
@@ -2601,55 +2575,86 @@ HTML = r"""
         </div>
       </div>
 
-        <div class="card resource-card">
-          <div class="resource-header">
-            <div>
+      <div class="card resource-card">
+        <div class="resource-header">
+          <div>
             <h2>资源管理模块</h2>
-              <p>当前 Agent 媒体、副本位置与 Profile 归属。</p>
-            </div>
-            <span class="pill">resource table</span>
+            <p>当前 Agent 媒体、副本位置与 Profile 归属。</p>
           </div>
-          <div class="resource-tool-row">
-            <select id="mediaProfileFilter"><option value="">全部 Profile</option></select>
-            <div class="profile-filter-bar" id="profileQuickBar"></div>
-            <button id="resourceMoreBtn">其他功能</button>
+          <span class="pill">resource table</span>
+        </div>
+        <div class="resource-tool-row">
+          <select id="mediaProfileFilter"><option value="">全部 Profile</option></select>
+          <div class="profile-filter-bar" id="profileQuickBar"></div>
+          <button id="resourceMoreBtn">其他功能</button>
+        </div>
+        <div class="disk-grid" id="mediaDiskList" hidden></div>
+        <div class="resource-filter-chip" id="resourceFilterChip" hidden></div>
+        <div class="media-list" id="mediaList">加载中...</div>
+        <div class="media-context-menu" id="mediaContextMenu">
+          <div class="media-context-label">Agent Profile（自动继承）</div>
+          <div class="media-context-targets" id="mediaProfileTargets"></div>
+          <button data-media-menu-action="property">属性</button>
+          <button data-media-menu-action="inspect">查看详情</button>
+          <button data-media-menu-action="use">选用开播</button>
+          <button data-media-menu-action="rename">重命名 / 移动</button>
+          <button class="danger" data-media-menu-action="delete">删除文件</button>
+          <div class="media-context-label">发送到节点</div>
+          <div class="media-context-targets" id="mediaSendTargets"></div>
+          <div class="media-context-label">移动到节点（成功后删除源文件）</div>
+          <div class="media-context-targets" id="mediaMoveTargets"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dashboard-column dashboard-right-column">
+      <div class="card node-table-card agent-control-panel">
+        <div class="node-table-toolbar">
+          <div>
+            <h2>Agent 控制模块</h2>
+            <p>Agent 与 Hub 的运行状态和开播目标。</p>
           </div>
-          <div class="disk-grid" id="mediaDiskList" hidden></div>
-          <div class="resource-filter-chip" id="resourceFilterChip" hidden></div>
-          <div class="media-list" id="mediaList">加载中...</div>
-          <div class="media-context-menu" id="mediaContextMenu">
-            <div class="media-context-label">Agent Profile（自动继承）</div>
-            <div class="media-context-targets" id="mediaProfileTargets"></div>
-            <button data-media-menu-action="property">属性</button>
-            <button data-media-menu-action="inspect">查看详情</button>
-            <button data-media-menu-action="use">选用开播</button>
-            <button data-media-menu-action="rename">重命名 / 移动</button>
-            <button class="danger" data-media-menu-action="delete">删除文件</button>
-            <div class="media-context-label">发送到节点</div>
-            <div class="media-context-targets" id="mediaSendTargets"></div>
-            <div class="media-context-label">移动到节点（成功后删除源文件）</div>
-            <div class="media-context-targets" id="mediaMoveTargets"></div>
+          <span class="pill warn">protected</span>
+        </div>
+        <div class="node-space-inline">
+          <button type="button" class="node-space-toggle" id="nodeSpaceToggle" aria-expanded="false">
+            <span>节点空间</span><small>展开</small>
+          </button>
+          <div class="node-space-panel" id="nodeSpacePanel" hidden>
+            <div class="node-space-rings" id="nodeSpaceRings">加载中...</div>
           </div>
         </div>
+        <div class="node-role-split" id="nodeRoleSplit">
+        <div class="role-group node-role-pane agent-role-pane">
+          <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
+          <div class="node-table" id="nodeList">加载中...</div>
+        </div>
+        <details class="role-group node-role-pane hub-role-pane" id="hubNodePane">
+          <summary class="role-group-title"><span>Hub 节点 <strong class="role-count"><span id="hubNodeCount">0</span> 台</strong></span><small>控制台 / Hub 更新 / 切换</small></summary>
+          <div class="node-table" id="hubNodeList">加载中...</div>
+        </details>
+        </div>
+      </div>
 
       <details class="card upload-card">
-            <summary class="upload-summary">
-              <span><strong>上传模块</strong><small>浏览器直传当前 Agent</small></span>
-              <span class="pill">按需展开</span>
-            </summary>
-            <div class="upload-body">
-            <div class="split">
-              <div>
-                <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
-                <div class="actions" style="margin-top: 8px;">
-                  <button class="primary" id="uploadBtn">上传到当前 Agent</button>
-                  <button class="danger" id="cancelUploadBtn" disabled>取消上传</button>
-                </div>
-              </div>
-              <div id="uploadBox" class="transfer-box"></div>
+        <summary class="upload-summary">
+          <span><strong>上传模块</strong><small>浏览器直传当前 Agent</small></span>
+          <span class="pill">按需展开</span>
+        </summary>
+        <div class="upload-body">
+        <div class="split">
+          <div>
+            <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
+            <div class="actions" style="margin-top: 8px;">
+              <button class="primary" id="uploadBtn">上传到当前 Agent</button>
+              <button class="danger" id="cancelUploadBtn" disabled>取消上传</button>
             </div>
-            </div>
+          </div>
+          <div id="uploadBox" class="transfer-box"></div>
+        </div>
+        </div>
       </details>
+    </div>
     </main>
   </div>
 
