@@ -2232,6 +2232,8 @@ HTML = r"""
     .top-log-head::after { content: "展开"; color: var(--muted); font-size: 11px; font-weight: 800; }
     .top-log-panel[open] .top-log-head { border-bottom: 1px solid var(--line); }
     .top-log-panel[open] .top-log-head::after { content: "收起"; color: var(--accent); }
+    .top-log-panel:not([open]) { display: block; min-height: 0; }
+    .top-log-panel:not([open]) .top-log-grid { display: none; }
     .top-log-head h2 { font-size: 13px; }
     .top-log-grid { gap: 6px; padding: 0 8px 8px; }
     .top-log-panel.log-card pre { min-height: 46px; max-height: 86px; padding: 8px; border-radius: 6px; font-size: 11px; }

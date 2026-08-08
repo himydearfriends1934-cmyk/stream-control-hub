@@ -465,6 +465,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn(".dashboard-grid .command-strip .command-grid", app.HTML)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr));", app.HTML)
         self.assertIn(".dashboard-grid .command-strip .command-grid > .command-field:nth-child(3)", app.HTML)
+        self.assertIn(".top-log-panel:not([open]) .top-log-grid { display: none; }", app.HTML)
         self.assertIn('{ id: "command", selector: ".command-strip", title:', app.HTML)
         self.assertIn('selector: ".command-strip", title: "开播指挥条", span: 6', app.HTML)
         self.assertIn('id="dashboardEditBtn"', app.HTML)
