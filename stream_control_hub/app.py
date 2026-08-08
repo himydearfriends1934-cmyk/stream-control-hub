@@ -2241,6 +2241,26 @@ HTML = r"""
       background: var(--panel-bg);
       box-shadow: none;
     }
+    .command-summary {
+      cursor: pointer;
+      list-style: none;
+      padding-bottom: 0;
+    }
+    .command-summary::-webkit-details-marker { display: none; }
+    .command-summary::after {
+      content: "展开";
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .command-strip[open] .command-summary {
+      padding-bottom: 7px;
+      margin-bottom: 7px;
+      border-bottom: 1px solid var(--line);
+    }
+    .command-strip[open] .command-summary::after { content: "收起"; color: var(--accent); }
+    .command-summary > div { min-width: 0; }
     .command-head { margin-bottom: 6px; }
     .command-head h2 { font-size: 15px; }
     .command-head p { font-size: 11px; }
@@ -2297,7 +2317,6 @@ HTML = r"""
     }
     .dashboard-grid .top-utility-strip,
     .dashboard-grid .top-log-panel { grid-column: span 12; }
-    .dashboard-grid .command-strip { grid-column: span 6; }
     .dashboard-grid .command-strip .command-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       align-items: stretch;
@@ -2320,9 +2339,9 @@ HTML = r"""
     }
     .dashboard-grid.fixed-dashboard-grid > .top-utility-strip,
     .dashboard-grid.fixed-dashboard-grid > .top-log-panel { grid-column: 1 / -1; }
-    .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: span 6; }
+    .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: 1 / -1; }
     .dashboard-grid.fixed-dashboard-grid > .agent-control-panel { grid-column: span 6; }
-    .dashboard-grid.fixed-dashboard-grid > .monitor-card { grid-column: 1 / -1; }
+    .dashboard-grid.fixed-dashboard-grid > .monitor-card { grid-column: span 6; }
     .dashboard-grid.fixed-dashboard-grid > .resource-card { grid-column: span 8; order: 0; }
     .dashboard-grid.fixed-dashboard-grid > .upload-card { grid-column: span 4; order: 0; }
     @media (max-width: 760px) {
@@ -2400,7 +2419,7 @@ HTML = r"""
     </section>
 
     <section class="task-flow" aria-label="常用任务入口">
-      <button class="task-card" type="button" data-scroll-target=".command-strip">
+      <button class="task-card" type="button" data-scroll-target=".command-strip" data-open-details=".command-strip">
         <strong>开播控制</strong>
       </button>
       <button class="task-card" type="button" data-scroll-target=".upload-card" data-open-details=".upload-card">
@@ -2453,14 +2472,14 @@ HTML = r"""
       </div>
     </details>
 
-    <section class="card command-strip">
-      <div class="command-head">
+    <details class="card command-strip" id="commandStrip">
+      <summary class="command-head command-summary">
         <div>
           <h2>开播指挥条 / Smart Start</h2>
           <p>为当前 Agent 配置媒体、输出目标与编码参数。</p>
         </div>
         <span class="pill warn">核对节点后再开播</span>
-      </div>
+      </summary>
       <div class="checklist" id="smartStartChecklist" aria-live="polite"></div>
       <div class="command-grid">
         <div class="command-field">
@@ -2536,7 +2555,7 @@ HTML = r"""
           </div>
         </details>
       </div>
-    </section>
+    </details>
 
     <div class="card node-table-card agent-control-panel">
       <div class="node-table-toolbar">
