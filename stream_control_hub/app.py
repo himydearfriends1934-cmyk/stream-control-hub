@@ -2340,10 +2340,10 @@ HTML = r"""
     .dashboard-grid.fixed-dashboard-grid > .top-utility-strip,
     .dashboard-grid.fixed-dashboard-grid > .top-log-panel { grid-column: 1 / -1; }
     .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: 1 / -1; }
-    .dashboard-grid.fixed-dashboard-grid > .agent-control-panel { grid-column: span 6; }
-    .dashboard-grid.fixed-dashboard-grid > .monitor-card { grid-column: span 6; }
-    .dashboard-grid.fixed-dashboard-grid > .resource-card { grid-column: span 8; order: 0; }
-    .dashboard-grid.fixed-dashboard-grid > .upload-card { grid-column: span 4; order: 0; }
+    .dashboard-grid.fixed-dashboard-grid > .agent-control-panel { grid-column: 1 / span 6; grid-row: 2; }
+    .dashboard-grid.fixed-dashboard-grid > .monitor-card { grid-column: 7 / span 6; grid-row: 2; }
+    .dashboard-grid.fixed-dashboard-grid > .resource-card { grid-column: 7 / span 6; grid-row: 3; }
+    .dashboard-grid.fixed-dashboard-grid > .upload-card { grid-column: 1 / span 6; grid-row: 3; }
     @media (max-width: 760px) {
       .node-space-rings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .media-window { overflow-x: auto; }
@@ -2352,10 +2352,13 @@ HTML = r"""
     @media (max-width: 1080px) {
       .dashboard-grid { grid-template-columns: 1fr; }
       .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: 1 / -1; }
-      .dashboard-grid.fixed-dashboard-grid > .agent-control-panel { grid-column: 1 / -1; }
+      .dashboard-grid.fixed-dashboard-grid > .agent-control-panel,
       .dashboard-grid.fixed-dashboard-grid > .monitor-card,
       .dashboard-grid.fixed-dashboard-grid > .resource-card,
-      .dashboard-grid.fixed-dashboard-grid > .upload-card { grid-column: 1 / -1; }
+      .dashboard-grid.fixed-dashboard-grid > .upload-card {
+        grid-column: 1 / -1;
+        grid-row: auto;
+      }
       .grid, .split, .hero, .task-flow, .node-detail, .top-utility-strip, .top-log-grid, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .top-utility-item { border-right: 0; border-bottom: 1px solid var(--line); }
       .top-utility-item:last-child { border-bottom: 0; }
@@ -2597,6 +2600,7 @@ HTML = r"""
           <div class="empty-state">正在读取节点状态...</div>
         </div>
       </div>
+
         <div class="card resource-card">
           <div class="resource-header">
             <div>
@@ -2627,7 +2631,6 @@ HTML = r"""
             <div class="media-context-targets" id="mediaMoveTargets"></div>
           </div>
         </div>
-      </div>
 
       <details class="card upload-card">
             <summary class="upload-summary">
