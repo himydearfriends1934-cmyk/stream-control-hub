@@ -853,8 +853,6 @@ HTML = r"""
     h1 { margin: 0; font-size: 26px; letter-spacing: 0; }
     p { color: var(--muted); margin: 5px 0 0; line-height: 1.45; }
     .grid { display: grid; grid-template-columns: minmax(520px, 0.92fr) minmax(600px, 1.08fr); gap: 12px; margin-top: 10px; align-items: start; }
-    .left-stack, .side-stack { display: grid; gap: 10px; align-content: start; min-width: 0; }
-    .grid > .side-stack { align-self: start; grid-template-rows: auto; }
     .top-utility-strip {
       display: grid;
       grid-template-columns: minmax(250px, .8fr) minmax(390px, 1.25fr) minmax(230px, .7fr);
@@ -1119,7 +1117,6 @@ HTML = r"""
     .resource-tool-row { display: grid; grid-template-columns: 132px minmax(0, 1fr) auto; gap: 7px; align-items: center; }
     .resource-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
     .resource-header p { margin: 0; font-size: 12px; }
-    .upload-stack { display: grid; gap: 12px; align-content: start; min-width: 0; }
     .node-space-card { padding-bottom: 10px; }
     .node-space-card h2 { margin-bottom: 2px; }
     .node-space-card p { margin: 0 0 5px; font-size: 12px; line-height: 1.35; }
@@ -2250,7 +2247,6 @@ HTML = r"""
     .checklist { margin-top: 5px; }
     .check-step { padding: 4px 7px; border-radius: 6px; font-size: 10px; }
     .grid { grid-template-columns: minmax(520px, 1fr) minmax(620px, 1.18fr); gap: 8px; margin-top: 8px; }
-    .left-stack, .side-stack { gap: 8px; }
     .card {
       padding: 9px;
       border-radius: 8px;
@@ -2261,7 +2257,6 @@ HTML = r"""
     button, input, select, textarea { border-radius: 6px; }
     .monitor-heading, .resource-header, .node-table-toolbar { align-items: center; }
     .monitor-heading p, .node-table-toolbar p { margin-top: 2px; font-size: 11px; }
-    .upload-stack { gap: 0; }
     .upload-card { display: block; padding: 0; overflow: hidden; }
     .upload-summary {
       display: flex;
@@ -2323,22 +2318,13 @@ HTML = r"""
     .dashboard-grid .command-strip .command-advanced-grid > .command-actions {
       grid-column: 1 / -1;
     }
-    .fixed-content-grid {
-      grid-column: 1 / -1;
-      grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr);
-      margin-top: 0;
-    }
-    .fixed-content-grid .left-stack,
-    .fixed-content-grid .side-stack {
-      grid-column: auto;
-      grid-row: auto;
-    }
-    .fixed-content-grid .resource-card { order: 0; }
     .dashboard-grid.fixed-dashboard-grid > .top-utility-strip,
-    .dashboard-grid.fixed-dashboard-grid > .top-log-panel,
-    .dashboard-grid.fixed-dashboard-grid > .fixed-content-grid { grid-column: 1 / -1; }
+    .dashboard-grid.fixed-dashboard-grid > .top-log-panel { grid-column: 1 / -1; }
     .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: span 6; }
     .dashboard-grid.fixed-dashboard-grid > .agent-control-panel { grid-column: span 6; }
+    .dashboard-grid.fixed-dashboard-grid > .monitor-card { grid-column: 1 / -1; }
+    .dashboard-grid.fixed-dashboard-grid > .resource-card { grid-column: span 8; order: 0; }
+    .dashboard-grid.fixed-dashboard-grid > .upload-card { grid-column: span 4; order: 0; }
     @media (max-width: 760px) {
       .node-space-rings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .media-window { overflow-x: auto; }
@@ -2348,6 +2334,9 @@ HTML = r"""
       .dashboard-grid { grid-template-columns: 1fr; }
       .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: 1 / -1; }
       .dashboard-grid.fixed-dashboard-grid > .agent-control-panel { grid-column: 1 / -1; }
+      .dashboard-grid.fixed-dashboard-grid > .monitor-card,
+      .dashboard-grid.fixed-dashboard-grid > .resource-card,
+      .dashboard-grid.fixed-dashboard-grid > .upload-card { grid-column: 1 / -1; }
       .grid, .split, .hero, .task-flow, .node-detail, .top-utility-strip, .top-log-grid, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .top-utility-item { border-right: 0; border-bottom: 1px solid var(--line); }
       .top-utility-item:last-child { border-bottom: 0; }
@@ -2577,8 +2566,6 @@ HTML = r"""
       </div>
     </div>
 
-    <section class="grid fixed-content-grid">
-      <div class="left-stack">
       <div class="card monitor-card">
         <div class="monitor-heading">
           <div>
@@ -2623,9 +2610,7 @@ HTML = r"""
         </div>
       </div>
 
-      <div class="side-stack">
-        <div class="upload-stack">
-          <details class="card upload-card">
+      <details class="card upload-card">
             <summary class="upload-summary">
               <span><strong>上传模块</strong><small>浏览器直传当前 Agent</small></span>
               <span class="pill">按需展开</span>
@@ -2642,11 +2627,7 @@ HTML = r"""
               <div id="uploadBox" class="transfer-box"></div>
             </div>
             </div>
-          </details>
-        </div>
-      </div>
-
-    </section>
+      </details>
     </main>
   </div>
 
