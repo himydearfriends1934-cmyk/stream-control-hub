@@ -10623,7 +10623,7 @@ def api_tailscale_connect_existing_ip():
             return jsonify({
                 "ok": True,
                 "hub_only": True,
-                "message": "?? VPS ? Hub ???? Agent 8787 ?????? Hub-only ?????????????/??/???????????? Agent?",
+                "message": "目标 VPS 的 Hub 在线，但 Agent 8787 未响应；已按 Hub-only 节点接入。后续可在该 VPS 上激活或升级 Agent。",
                 "tailscale_ip": str(ip),
                 "node_id": node_id_for_ip,
                 "hub_url": hub_url,

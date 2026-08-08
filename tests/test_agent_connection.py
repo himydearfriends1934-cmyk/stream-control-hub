@@ -390,6 +390,8 @@ class HubAgentConnectionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertTrue(data["hub_only"])
+        self.assertIn("Hub 在线", data["message"])
+        self.assertNotIn("??", data["message"])
         self.assertEqual(data["node_id"], "tokyo")
         self.assertEqual(data["hub_url"], "http://100.98.19.85:8788")
         self.assertEqual(saved[0]["hub_url"], "http://100.98.19.85:8788")
