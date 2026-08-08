@@ -5527,7 +5527,7 @@ HTML = r"""
 
     async function checkUpdates({ silent = false } = {}) {
       if (!silent) refs.updateBox.textContent = "正在检查 GitHub...";
-      const resp = await fetch("/api/github/check", { method: "POST", headers: authHeaders() });
+      const resp = await fetch("/api/github/check", { method: "GET", headers: authHeaders() });
       const data = await resp.json();
       if (!silent) refs.updateBox.textContent = renderGithubUpdateSummary(data);
       return data;
@@ -7770,6 +7770,8 @@ def reject_forbidden(message: str = "control token or localhost access required"
 @APP.before_request
 def protect_write_requests():
     if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return None
+    if request.path == "/api/github/check":
         return None
     if not write_request_allowed():
         return reject_forbidden()
@@ -11589,7 +11591,7 @@ def run_git(args: list[str], cwd: Path | None = None, timeout: int = 60) -> dict
     }
 
 
-@APP.post("/api/github/check")
+@APP.route("/api/github/check", methods=["GET", "POST"])
 def api_github_check():
     ensure_dirs()
     if not (ROOT / ".git").exists():

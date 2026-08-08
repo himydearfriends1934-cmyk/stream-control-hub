@@ -53,7 +53,7 @@ class GitHubUpdateCheckTests(unittest.TestCase):
             with patch.object(app, "ROOT", root), patch.object(app, "SOURCE_REPO", source_repo), patch.object(
                 app, "SOURCE_BRANCH", "main"
             ), patch.object(app, "run_git", side_effect=fake_run_git):
-                response = app.APP.test_client().post("/api/github/check")
+                response = app.APP.test_client().get("/api/github/check", environ_base={"REMOTE_ADDR": "100.64.0.50"})
 
         data = response.get_json()
         self.assertEqual(response.status_code, 200)
@@ -62,6 +62,40 @@ class GitHubUpdateCheckTests(unittest.TestCase):
         self.assertEqual(data["behind_count"], 1)
         self.assertEqual(data["local"], "local-commit")
         self.assertEqual(data["remote"], "remote-commit")
+
+    def test_check_post_is_allowed_without_control_token_for_cached_clients(self):
+        from stream_control_hub import app
+
+        source_repo = "https://github.com/example/stream-control-hub.git"
+
+        def fake_run_git(args, cwd=None, timeout=60):
+            command = tuple(args)
+            results = {
+                ("fetch", "--quiet", "--no-tags", source_repo, "main"): git_result(),
+                ("rev-parse", "HEAD"): git_result("same-commit"),
+                ("rev-parse", "FETCH_HEAD"): git_result("same-commit"),
+                ("rev-list", "--count", "HEAD..FETCH_HEAD"): git_result("0"),
+                ("rev-list", "--count", "FETCH_HEAD..HEAD"): git_result("0"),
+                ("diff", "--stat", "HEAD", "FETCH_HEAD"): git_result(""),
+                ("log", "-1", "--format=%h %s", "HEAD"): git_result("same current"),
+                ("log", "-1", "--format=%h %s", "FETCH_HEAD"): git_result("same current"),
+            }
+            return results[command]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            with patch.object(app, "ROOT", root), patch.object(app, "SOURCE_REPO", source_repo), patch.object(
+                app, "SOURCE_BRANCH", "main"
+            ), patch.object(app, "CONTROL_TOKEN", "configured-token"), patch.object(
+                app, "TRUSTED_REMOTE_WRITES", False
+            ), patch.object(app, "run_git", side_effect=fake_run_git):
+                response = app.APP.test_client().post("/api/github/check", environ_base={"REMOTE_ADDR": "100.64.0.50"})
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(data["ok"])
+        self.assertFalse(data["has_updates"])
 
     def test_fetch_failure_is_reported_without_falling_back_to_old_cache(self):
         from stream_control_hub import app
