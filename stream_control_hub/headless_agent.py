@@ -25,25 +25,12 @@ import requests
 from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
 
+from .env_file import load_env_file, update_env_file_values
 from .youtube_api import YouTubeAPIClient, YouTubeAPIError
 from .stream_tuning import initial_stream_recommendation, parse_fraction, source_copy_compatible
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def load_env_file(path: Path) -> None:
-    if not path.exists():
-        return
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
 
 
 load_env_file(ROOT / ".agent.env")
@@ -642,36 +629,6 @@ def write_private_json(path: Path, data: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.chmod(0o600)
-        temporary.replace(path)
-        path.chmod(0o600)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def update_env_file_values(path: Path, updates: dict[str, str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing: list[tuple[str, str | None]] = []
-    seen: set[str] = set()
-    if path.exists():
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            stripped = raw_line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in raw_line:
-                existing.append((raw_line, None))
-                continue
-            key, _ = raw_line.split("=", 1)
-            key = key.strip()
-            if key in updates:
-                existing.append((f"{key}={updates[key]}", key))
-                seen.add(key)
-            else:
-                existing.append((raw_line, key))
-    for key, value in updates.items():
-        if key not in seen:
-            existing.append((f"{key}={value}", key))
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text("\n".join(line for line, _ in existing) + "\n", encoding="utf-8")
         temporary.chmod(0o600)
         temporary.replace(path)
         path.chmod(0o600)

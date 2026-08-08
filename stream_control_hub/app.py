@@ -28,25 +28,12 @@ import requests
 from flask import Flask, jsonify, make_response, request
 from werkzeug.utils import secure_filename
 
+from .env_file import load_env_file, update_env_file_values
 from .youtube_api import YouTubeAPIClient, YouTubeAPIError
 from .stream_tuning import youtube_live_bitrate_for_payload
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def load_env_file(path: Path) -> None:
-    if not path.exists():
-        return
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
 
 
 def write_json_atomic(path: Path, payload: Any, *, mode: int | None = None) -> None:
@@ -8433,36 +8420,6 @@ def save_node_role_hint(node_id: str, role: str, updates: dict[str, Any]) -> dic
     return None
 
 
-def update_env_file_values(path: Path, updates: dict[str, str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing: list[tuple[str, str | None]] = []
-    seen: set[str] = set()
-    if path.exists():
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            stripped = raw_line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in raw_line:
-                existing.append((raw_line, None))
-                continue
-            key, _ = raw_line.split("=", 1)
-            key = key.strip()
-            if key in updates:
-                existing.append((f"{key}={updates[key]}", key))
-                seen.add(key)
-            else:
-                existing.append((raw_line, key))
-    for key, value in updates.items():
-        if key not in seen:
-            existing.append((f"{key}={value}", key))
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text("\n".join(line for line, _ in existing) + "\n", encoding="utf-8")
-        temporary.chmod(0o600)
-        temporary.replace(path)
-        path.chmod(0o600)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def reload_hub_youtube_client(*, client_id: str, client_secret: str) -> None:
     global YOUTUBE_CLIENT
     os.environ["YOUTUBE_CLIENT_ID"] = client_id
@@ -8667,21 +8624,7 @@ def offline_node_retention_loop() -> None:
 
 
 def update_private_env_file(path: Path, updates: dict[str, str]) -> None:
-    values = {str(key): str(value).replace("\r", "").replace("\n", "") for key, value in updates.items() if value is not None}
-    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    retained = []
-    written = set()
-    for line in existing:
-        key = line.split("=", 1)[0].strip() if "=" in line else ""
-        if key in values:
-            retained.append(f"{key}={values[key]}")
-            written.add(key)
-        else:
-            retained.append(line)
-    retained.extend(f"{key}={value}" for key, value in values.items() if key not in written)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(retained) + "\n", encoding="utf-8")
-    path.chmod(0o600)
+    update_env_file_values(path, updates)
 
 
 def schedule_agent_role_activation(

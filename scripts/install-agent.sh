@@ -24,7 +24,42 @@ ENV_FILE="$INSTALL_DIR/.agent.env"
 
 existing_env_value() {
   key="$1"
-  if [ -f "$ENV_FILE" ]; then
+  [ -f "$ENV_FILE" ] || return 0
+  if command -v python3 >/dev/null 2>&1; then
+    ENV_FILE="$ENV_FILE" ENV_KEY="$key" python3 - <<'PY'
+import os
+import re
+from pathlib import Path
+
+path = Path(os.environ["ENV_FILE"])
+target = os.environ["ENV_KEY"]
+text = path.read_text(errors="replace")
+text = (
+    text.replace("\\r\\n", "\n")
+    .replace("\\n", "\n")
+    .replace("\\r", "\n")
+    .replace("\r\n", "\n")
+    .replace("\r", "\n")
+)
+pattern = re.compile(r"(?:STREAM_[A-Z0-9_]+|YOUTUBE_[A-Z0-9_]+)=")
+for raw_line in text.split("\n"):
+    if not raw_line.strip() or raw_line.lstrip().startswith("#") or "=" not in raw_line:
+        continue
+    matches = list(pattern.finditer(raw_line))
+    if len(matches) > 1:
+        segments = [
+            raw_line[match.start(): matches[index + 1].start() if index + 1 < len(matches) else len(raw_line)]
+            for index, match in enumerate(matches)
+        ]
+    else:
+        segments = [raw_line]
+    for segment in segments:
+        current_key, sep, value = segment.partition("=")
+        if sep and current_key.strip() == target:
+            print(value.strip().strip("\"'"), end="")
+            raise SystemExit(0)
+PY
+  else
     sed -n "s/^${key}=//p" "$ENV_FILE" | head -n 1
   fi
 }
@@ -351,10 +386,10 @@ print(value if value and value.version == 4 and value.is_global else "")
 PY
 )"
 if [ -f "$ENV_FILE" ]; then
-  TOKEN="$(sed -n 's/^STREAM_AGENT_CONTROL_TOKEN=//p' "$ENV_FILE" | head -n 1)"
-  EXISTING_PUBLIC_ORIGIN="$(sed -n 's/^STREAM_AGENT_PUBLIC_ORIGIN=//p' "$ENV_FILE" | head -n 1)"
-  EXISTING_YOUTUBE_CLIENT_ID="$(sed -n 's/^YOUTUBE_CLIENT_ID=//p' "$ENV_FILE" | head -n 1)"
-  EXISTING_YOUTUBE_CLIENT_SECRET="$(sed -n 's/^YOUTUBE_CLIENT_SECRET=//p' "$ENV_FILE" | head -n 1)"
+  TOKEN="$(existing_env_value STREAM_AGENT_CONTROL_TOKEN)"
+  EXISTING_PUBLIC_ORIGIN="$(existing_env_value STREAM_AGENT_PUBLIC_ORIGIN)"
+  EXISTING_YOUTUBE_CLIENT_ID="$(existing_env_value YOUTUBE_CLIENT_ID)"
+  EXISTING_YOUTUBE_CLIENT_SECRET="$(existing_env_value YOUTUBE_CLIENT_SECRET)"
 fi
 [ -n "$TOKEN" ] || TOKEN="$(new_token)"
 if [ -z "$STREAM_AGENT_PUBLIC_ORIGIN" ]; then

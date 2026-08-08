@@ -69,6 +69,47 @@ function Uninstall-Hub {
   Write-Host "Use -RemoveData or STREAM_HUB_REMOVE_DATA=1 to remove saved data and local config too."
 }
 
+function Read-EnvFileValues([string]$Path) {
+  $values = @{}
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return $values
+  }
+  $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+  if ($null -eq $raw) {
+    return $values
+  }
+  $normalized = $raw.Replace("\r\n", "`n").Replace("\n", "`n").Replace("\r", "`n").Replace("`r`n", "`n").Replace("`r", "`n")
+  $pattern = [regex]'(?:STREAM_[A-Z0-9_]+|YOUTUBE_[A-Z0-9_]+)='
+  foreach ($rawLine in ($normalized -split "`n")) {
+    $trimmed = $rawLine.Trim()
+    if (-not $trimmed -or $trimmed.StartsWith("#") -or -not $rawLine.Contains("=")) {
+      continue
+    }
+    $matches = $pattern.Matches($rawLine)
+    $segments = @()
+    if ($matches.Count -gt 1) {
+      for ($i = 0; $i -lt $matches.Count; $i++) {
+        $start = $matches[$i].Index
+        $end = if ($i + 1 -lt $matches.Count) { $matches[$i + 1].Index } else { $rawLine.Length }
+        $segments += $rawLine.Substring($start, $end - $start)
+      }
+    } else {
+      $segments = @($rawLine)
+    }
+    foreach ($segment in $segments) {
+      $parts = $segment.Split("=", 2)
+      if ($parts.Count -ne 2) {
+        continue
+      }
+      $key = $parts[0].Trim()
+      if ($key -and -not $values.ContainsKey($key)) {
+        $values[$key] = $parts[1].Trim().Trim('"').Trim("'")
+      }
+    }
+  }
+  return $values
+}
+
 if ($Action -eq "uninstall") {
   Uninstall-Hub
   exit 0
@@ -112,20 +153,19 @@ $existingYoutubeClientId = ""
 $existingYoutubeClientSecret = ""
 $existingYoutubeCredentialFile = ""
 if (Test-Path $envFile) {
-  $existing = Select-String -LiteralPath $envFile -Pattern "^STREAM_HUB_CONTROL_TOKEN=(.+)$" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($existing) { $token = $existing.Matches[0].Groups[1].Value }
-  $existing = Select-String -LiteralPath $envFile -Pattern "^STREAM_HUB_HOST=(.+)$" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($existing) { $existingHost = $existing.Matches[0].Groups[1].Value }
-  $existing = Select-String -LiteralPath $envFile -Pattern "^STREAM_HUB_PORT=(\d+)$" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($existing) { $existingPort = [int]$existing.Matches[0].Groups[1].Value }
-  $existing = Select-String -LiteralPath $envFile -Pattern "^STREAM_HUB_TRUSTED_REMOTE_WRITES=(.+)$" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($existing) { $existingTrustedRemoteWrites = $existing.Matches[0].Groups[1].Value }
-  $existing = Select-String -LiteralPath $envFile -Pattern "^YOUTUBE_CLIENT_ID=(.*)$" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($existing) { $existingYoutubeClientId = $existing.Matches[0].Groups[1].Value }
-  $existing = Select-String -LiteralPath $envFile -Pattern "^YOUTUBE_CLIENT_SECRET=(.*)$" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($existing) { $existingYoutubeClientSecret = $existing.Matches[0].Groups[1].Value }
-  $existing = Select-String -LiteralPath $envFile -Pattern "^YOUTUBE_CREDENTIAL_FILE=(.*)$" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($existing) { $existingYoutubeCredentialFile = $existing.Matches[0].Groups[1].Value }
+  $existingValues = Read-EnvFileValues $envFile
+  if ($existingValues.ContainsKey("STREAM_HUB_CONTROL_TOKEN")) { $token = $existingValues["STREAM_HUB_CONTROL_TOKEN"] }
+  if ($existingValues.ContainsKey("STREAM_HUB_HOST")) { $existingHost = $existingValues["STREAM_HUB_HOST"] }
+  if ($existingValues.ContainsKey("STREAM_HUB_PORT")) {
+    $parsedPort = 0
+    if ([int]::TryParse($existingValues["STREAM_HUB_PORT"], [ref]$parsedPort)) {
+      $existingPort = $parsedPort
+    }
+  }
+  if ($existingValues.ContainsKey("STREAM_HUB_TRUSTED_REMOTE_WRITES")) { $existingTrustedRemoteWrites = $existingValues["STREAM_HUB_TRUSTED_REMOTE_WRITES"] }
+  if ($existingValues.ContainsKey("YOUTUBE_CLIENT_ID")) { $existingYoutubeClientId = $existingValues["YOUTUBE_CLIENT_ID"] }
+  if ($existingValues.ContainsKey("YOUTUBE_CLIENT_SECRET")) { $existingYoutubeClientSecret = $existingValues["YOUTUBE_CLIENT_SECRET"] }
+  if ($existingValues.ContainsKey("YOUTUBE_CREDENTIAL_FILE")) { $existingYoutubeCredentialFile = $existingValues["YOUTUBE_CREDENTIAL_FILE"] }
 }
 if (-not $token) { $token = New-Token }
 if (-not $HostName) { $HostName = if ($existingHost) { $existingHost } else { "127.0.0.1" } }

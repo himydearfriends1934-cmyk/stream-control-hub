@@ -192,15 +192,52 @@ EXISTING_TRUSTED_REMOTE_WRITES=""
 EXISTING_YOUTUBE_CLIENT_ID=""
 EXISTING_YOUTUBE_CLIENT_SECRET=""
 EXISTING_YOUTUBE_CREDENTIAL_FILE=""
+existing_env_value() {
+  key="$1"
+  [ -f "$ENV_FILE" ] || return 0
+  ENV_FILE="$ENV_FILE" ENV_KEY="$key" python3 - <<'PY'
+import os
+import re
+from pathlib import Path
+
+path = Path(os.environ["ENV_FILE"])
+target = os.environ["ENV_KEY"]
+text = path.read_text(errors="replace")
+text = (
+    text.replace("\\r\\n", "\n")
+    .replace("\\n", "\n")
+    .replace("\\r", "\n")
+    .replace("\r\n", "\n")
+    .replace("\r", "\n")
+)
+pattern = re.compile(r"(?:STREAM_[A-Z0-9_]+|YOUTUBE_[A-Z0-9_]+)=")
+for raw_line in text.split("\n"):
+    if not raw_line.strip() or raw_line.lstrip().startswith("#") or "=" not in raw_line:
+        continue
+    matches = list(pattern.finditer(raw_line))
+    if len(matches) > 1:
+        segments = [
+            raw_line[match.start(): matches[index + 1].start() if index + 1 < len(matches) else len(raw_line)]
+            for index, match in enumerate(matches)
+        ]
+    else:
+        segments = [raw_line]
+    for segment in segments:
+        key, sep, value = segment.partition("=")
+        if sep and key.strip() == target:
+            print(value.strip().strip("\"'"), end="")
+            raise SystemExit(0)
+PY
+}
 if [ -f "$ENV_FILE" ]; then
-  TOKEN="$(sed -n 's/^STREAM_HUB_CONTROL_TOKEN=//p' "$ENV_FILE" | head -n 1)"
-  EXISTING_HOST="$(sed -n 's/^STREAM_HUB_HOST=//p' "$ENV_FILE" | head -n 1)"
-  EXISTING_PORT="$(sed -n 's/^STREAM_HUB_PORT=//p' "$ENV_FILE" | head -n 1)"
-  EXISTING_NODES_FILE="$(sed -n 's/^STREAM_HUB_NODES_FILE=//p' "$ENV_FILE" | head -n 1)"
-  EXISTING_TRUSTED_REMOTE_WRITES="$(sed -n 's/^STREAM_HUB_TRUSTED_REMOTE_WRITES=//p' "$ENV_FILE" | head -n 1)"
-  EXISTING_YOUTUBE_CLIENT_ID="$(sed -n 's/^YOUTUBE_CLIENT_ID=//p' "$ENV_FILE" | head -n 1)"
-  EXISTING_YOUTUBE_CLIENT_SECRET="$(sed -n 's/^YOUTUBE_CLIENT_SECRET=//p' "$ENV_FILE" | head -n 1)"
-  EXISTING_YOUTUBE_CREDENTIAL_FILE="$(sed -n 's/^YOUTUBE_CREDENTIAL_FILE=//p' "$ENV_FILE" | head -n 1)"
+  TOKEN="$(existing_env_value STREAM_HUB_CONTROL_TOKEN)"
+  EXISTING_HOST="$(existing_env_value STREAM_HUB_HOST)"
+  EXISTING_PORT="$(existing_env_value STREAM_HUB_PORT)"
+  EXISTING_NODES_FILE="$(existing_env_value STREAM_HUB_NODES_FILE)"
+  EXISTING_TRUSTED_REMOTE_WRITES="$(existing_env_value STREAM_HUB_TRUSTED_REMOTE_WRITES)"
+  EXISTING_YOUTUBE_CLIENT_ID="$(existing_env_value YOUTUBE_CLIENT_ID)"
+  EXISTING_YOUTUBE_CLIENT_SECRET="$(existing_env_value YOUTUBE_CLIENT_SECRET)"
+  EXISTING_YOUTUBE_CREDENTIAL_FILE="$(existing_env_value YOUTUBE_CREDENTIAL_FILE)"
 fi
 [ -n "$STREAM_HUB_HOST" ] || STREAM_HUB_HOST="${EXISTING_HOST:-127.0.0.1}"
 [ -n "$STREAM_HUB_PORT" ] || STREAM_HUB_PORT="${EXISTING_PORT:-8788}"
