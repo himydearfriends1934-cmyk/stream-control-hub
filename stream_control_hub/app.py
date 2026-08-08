@@ -2292,63 +2292,9 @@ HTML = r"""
       margin-top: 8px;
       align-items: start;
     }
-    .dashboard-module { position: relative; min-width: 0; grid-column: span 6; min-height: 120px; }
-    .dashboard-module-handle {
-      display: none;
-      align-items: center;
-      gap: 7px;
-      min-height: 26px;
-      margin: -2px -2px 7px;
-      padding: 3px 5px;
-      border-bottom: 1px solid var(--line);
-      color: var(--muted);
-      font-size: 10px;
-      font-weight: 900;
-      cursor: grab;
-      user-select: none;
-      touch-action: none;
-    }
-    .dashboard-module-handle::before { content: "⋮⋮"; color: var(--accent-2); letter-spacing: 1px; }
-    .dashboard-module-handle:active { cursor: grabbing; }
-    .dashboard-module-resize {
-      display: none;
-      position: absolute;
-      right: 5px;
-      bottom: 5px;
-      width: 22px;
-      height: 22px;
-      padding: 0;
-      border: 0;
-      background: transparent;
-      color: var(--accent-2);
-      cursor: nwse-resize;
-      font-size: 15px;
-      line-height: 1;
-    }
-    .dashboard-grid.is-editing .dashboard-module { outline: 1px dashed rgba(88, 185, 210, .55); outline-offset: 2px; }
-    .dashboard-grid.is-editing .dashboard-module-handle,
-    .dashboard-grid.is-editing .dashboard-module-resize { display: flex; }
-    .dashboard-module--dragging { opacity: .55; }
-    .dashboard-module--target { outline-color: var(--accent) !important; background-color: rgba(53, 196, 135, .06); }
-    .dashboard-drag-active { user-select: none; cursor: grabbing; }
-    .dashboard-drag-ghost {
-      position: fixed;
-      z-index: 1000;
-      display: grid;
-      place-items: center;
-      pointer-events: none;
-      border: 1px solid var(--accent-2);
-      border-radius: 7px;
-      background: rgba(17, 25, 30, .92);
-      color: var(--text);
-      box-shadow: 0 14px 40px rgba(0, 0, 0, .42);
-      font-size: 13px;
-      font-weight: 900;
-    }
     .dashboard-grid .top-utility-strip,
     .dashboard-grid .top-log-panel,
     .dashboard-grid .command-strip { margin-top: 0; }
-    .dashboard-source-utility { display: none; }
     .dashboard-grid .top-utility-item {
       min-height: 74px;
       border: 1px solid var(--line);
@@ -2378,12 +2324,20 @@ HTML = r"""
     .dashboard-grid .command-strip .command-advanced-grid > .command-actions {
       grid-column: 1 / -1;
     }
-    .dashboard-grid .resource-card { grid-column: span 7; order: initial; }
-    .dashboard-grid .monitor-card { grid-column: span 7; }
-    .dashboard-grid .node-table-card { grid-column: span 5; grid-row: span 2; }
-    .dashboard-grid .upload-card { grid-column: span 12; }
-    .dashboard-grid .upload-stack { display: contents; }
-    .dashboard-source-grid { display: none; }
+    .fixed-content-grid {
+      grid-column: 1 / -1;
+      grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr);
+      margin-top: 0;
+    }
+    .fixed-content-grid .left-stack,
+    .fixed-content-grid .side-stack {
+      grid-column: auto;
+      grid-row: auto;
+    }
+    .dashboard-grid.fixed-dashboard-grid > .top-utility-strip,
+    .dashboard-grid.fixed-dashboard-grid > .top-log-panel,
+    .dashboard-grid.fixed-dashboard-grid > .fixed-content-grid { grid-column: 1 / -1; }
+    .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: span 6; }
     @media (max-width: 760px) {
       .node-space-rings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .media-window { overflow-x: auto; }
@@ -2391,7 +2345,7 @@ HTML = r"""
     }
     @media (max-width: 1080px) {
       .dashboard-grid { grid-template-columns: 1fr; }
-      .dashboard-grid .dashboard-module { grid-column: span 12 !important; grid-row: auto !important; height: auto !important; }
+      .dashboard-grid.fixed-dashboard-grid > .command-strip { grid-column: 1 / -1; }
       .grid, .split, .hero, .task-flow, .node-detail, .top-utility-strip, .top-log-grid, .health-strip, .monitor-panel-grid, .command-grid, .command-advanced-grid, .monitor-compact-row { grid-template-columns: 1fr; }
       .top-utility-item { border-right: 0; border-bottom: 1px solid var(--line); }
       .top-utility-item:last-child { border-bottom: 0; }
@@ -2450,8 +2404,6 @@ HTML = r"""
           <button class="primary" id="refreshBtn">刷新状态</button>
           <button id="policyBtn">Upload Policy</button>
           <button id="auditBtn">Push Audit</button>
-          <button id="dashboardEditBtn" title="拖动模块或调整模块尺寸">布局调整</button>
-          <button id="dashboardResetBtn" aria-label="恢复默认布局" title="恢复默认布局">↺</button>
         </div>
       </div>
     </section>
@@ -2472,7 +2424,7 @@ HTML = r"""
     </section>
     <div class="flow-status" id="flowStatus" aria-live="polite">先接入或选择一台推流服务器，然后上传/选择视频即可开播。</div>
 
-    <main class="dashboard-grid" id="dashboardGrid" aria-label="可组合工作区"></main>
+    <main class="dashboard-grid fixed-dashboard-grid" id="dashboardGrid" aria-label="固定工作区">
 
     <section class="top-utility-strip" aria-label="系统快捷操作">
       <div class="top-utility-item utility-connect">
@@ -2595,7 +2547,7 @@ HTML = r"""
       </div>
     </section>
 
-    <section class="grid">
+    <section class="grid fixed-content-grid">
       <div class="left-stack">
       <div class="card monitor-card">
         <div class="monitor-heading">
@@ -2692,6 +2644,7 @@ HTML = r"""
       </div>
 
     </section>
+    </main>
   </div>
 
   <div class="modal-backdrop" id="roleSettingsModal" aria-hidden="true">
@@ -2959,8 +2912,6 @@ HTML = r"""
       themeSelect: document.getElementById("themeSelect"),
       flowStatus: document.getElementById("flowStatus"),
       dashboardGrid: document.getElementById("dashboardGrid"),
-      dashboardEditBtn: document.getElementById("dashboardEditBtn"),
-      dashboardResetBtn: document.getElementById("dashboardResetBtn"),
       smartStartChecklist: document.getElementById("smartStartChecklist"),
       nodeMonitor: document.getElementById("nodeMonitor"),
       mediaList: document.getElementById("mediaList"),
@@ -3095,203 +3046,9 @@ HTML = r"""
         // Browser storage may be unavailable in private or restricted contexts.
       }
     }
-    const DASHBOARD_LAYOUT_STORAGE_KEY = "streamHub.dashboardLayout.v4";
-    const DASHBOARD_MODULES = [
-      { id: "connect", selector: ".utility-connect", title: "Agent 快速连接", span: 4 },
-      { id: "github", selector: ".github-utility-item", title: "GitHub 更新", span: 5 },
-      { id: "youtube", selector: ".utility-api", title: "YouTube API", span: 3 },
-      { id: "logs", selector: ".top-log-panel", title: "审计与操作日志", span: 12 },
-      { id: "command", selector: ".command-strip", title: "开播指挥条", span: 6 },
-      { id: "monitor", selector: ".monitor-card", title: "节点监控", span: 7 },
-      { id: "nodes", selector: ".node-table-card", title: "VPS 节点表", span: 5, rowSpan: 2 },
-      { id: "resources", selector: ".resource-card", title: "资源管理", span: 7 },
-      { id: "upload", selector: ".upload-card", title: "上传模块", span: 12 },
-    ];
-    let dashboardEditMode = false;
-    let dashboardResizeState = null;
-
-    function readDashboardLayout() {
-      try {
-        const layout = JSON.parse(localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY) || "{}");
-        return layout && typeof layout === "object" ? layout : {};
-      } catch (_) {
-        return {};
-      }
-    }
-
-    function writeDashboardLayout() {
-      if (!refs.dashboardGrid) return;
-      const modules = {};
-      [...refs.dashboardGrid.querySelectorAll("[data-dashboard-module]")].forEach((module) => {
-        modules[module.dataset.dashboardModule] = {
-          span: Number(module.dataset.dashboardSpan || 6),
-          rowSpan: Number(module.dataset.dashboardRowSpan || 1),
-          height: module.dataset.dashboardHeight ? Number(module.dataset.dashboardHeight) : null,
-        };
-      });
-      try {
-        localStorage.setItem(DASHBOARD_LAYOUT_STORAGE_KEY, JSON.stringify({
-          order: [...refs.dashboardGrid.querySelectorAll("[data-dashboard-module]")].map((module) => module.dataset.dashboardModule),
-          modules,
-        }));
-      } catch (_) {
-        // Browser storage may be unavailable in private or restricted contexts.
-      }
-    }
-
-    function setDashboardEditMode(enabled) {
-      dashboardEditMode = Boolean(enabled);
-      refs.dashboardGrid.classList.toggle("is-editing", dashboardEditMode);
-      refs.dashboardEditBtn.textContent = dashboardEditMode ? "完成布局" : "布局调整";
-      refs.dashboardEditBtn.classList.toggle("primary", dashboardEditMode);
-      refs.dashboardEditBtn.setAttribute("aria-pressed", dashboardEditMode ? "true" : "false");
-    }
-
-    function dashboardMoveBefore(dragged, target, event) {
-      if (!dragged || !target || dragged === target) return;
-      const rect = target.getBoundingClientRect();
-      const verticalDistance = Math.abs(event.clientY - (rect.top + rect.height / 2));
-      const horizontalDistance = Math.abs(event.clientX - (rect.left + rect.width / 2));
-      const before = verticalDistance > horizontalDistance
-        ? event.clientY < rect.top + rect.height / 2
-        : event.clientX < rect.left + rect.width / 2;
-      refs.dashboardGrid.insertBefore(dragged, before ? target : target.nextSibling);
-    }
-
-    function beginDashboardDrag(event, module, title) {
-      if (!dashboardEditMode || event.button !== 0) return;
-      event.preventDefault();
-      const startX = event.clientX;
-      const startY = event.clientY;
-      const rect = module.getBoundingClientRect();
-      let ghost = null;
-      let activeTarget = null;
-      const clearTarget = () => {
-        if (activeTarget) activeTarget.classList.remove("dashboard-module--target");
-        activeTarget = null;
-      };
-      const onMove = (moveEvent) => {
-        const dx = moveEvent.clientX - startX;
-        const dy = moveEvent.clientY - startY;
-        if (!ghost && Math.hypot(dx, dy) < 4) return;
-        if (!ghost) {
-          ghost = document.createElement("div");
-          ghost.className = "dashboard-drag-ghost";
-          ghost.textContent = title;
-          ghost.style.width = `${Math.min(rect.width, window.innerWidth - 24)}px`;
-          ghost.style.height = `${Math.min(rect.height, 180)}px`;
-          document.body.append(ghost);
-          module.classList.add("dashboard-module--dragging");
-          document.body.classList.add("dashboard-drag-active");
-        }
-        ghost.style.left = `${Math.max(8, Math.min(window.innerWidth - ghost.offsetWidth - 8, moveEvent.clientX - Math.min(80, rect.width / 3)))}px`;
-        ghost.style.top = `${Math.max(8, Math.min(window.innerHeight - ghost.offsetHeight - 8, moveEvent.clientY - 22))}px`;
-        const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest("[data-dashboard-module]");
-        if (!target || target === module) {
-          clearTarget();
-          return;
-        }
-        if (target !== activeTarget) {
-          clearTarget();
-          activeTarget = target;
-          activeTarget.classList.add("dashboard-module--target");
-        }
-        dashboardMoveBefore(module, target, moveEvent);
-      };
-      const onEnd = () => {
-        document.removeEventListener("pointermove", onMove);
-        document.removeEventListener("pointerup", onEnd);
-        clearTarget();
-        if (ghost) ghost.remove();
-        module.classList.remove("dashboard-module--dragging");
-        document.body.classList.remove("dashboard-drag-active");
-        writeDashboardLayout();
-      };
-      document.addEventListener("pointermove", onMove);
-      document.addEventListener("pointerup", onEnd, { once: true });
-    }
-
-    function beginDashboardResize(event, module) {
-      if (!dashboardEditMode) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const rect = module.getBoundingClientRect();
-      dashboardResizeState = {
-        module,
-        startX: event.clientX,
-        startY: event.clientY,
-        startWidth: rect.width,
-        startHeight: rect.height,
-        startSpan: Number(module.dataset.dashboardSpan || 6),
-      };
-      const onMove = (moveEvent) => {
-        if (!dashboardResizeState) return;
-        const gridRect = refs.dashboardGrid.getBoundingClientRect();
-        const gap = 8;
-        const cellWidth = (gridRect.width - gap * 11) / 12;
-        const nextSpan = Math.max(3, Math.min(12, Math.round((dashboardResizeState.startWidth + moveEvent.clientX - dashboardResizeState.startX + gap) / (cellWidth + gap))));
-        const nextHeight = Math.max(120, Math.round(dashboardResizeState.startHeight + moveEvent.clientY - dashboardResizeState.startY));
-        module.dataset.dashboardSpan = String(nextSpan);
-        module.style.gridColumn = `span ${nextSpan}`;
-        module.dataset.dashboardHeight = String(nextHeight);
-        module.style.height = `${nextHeight}px`;
-      };
-      const onEnd = () => {
-        document.removeEventListener("pointermove", onMove);
-        document.removeEventListener("pointerup", onEnd);
-        if (dashboardResizeState) writeDashboardLayout();
-        dashboardResizeState = null;
-      };
-      document.addEventListener("pointermove", onMove);
-      document.addEventListener("pointerup", onEnd, { once: true });
-    }
-
     function initializeDashboardLayout() {
       if (!refs.dashboardGrid) return;
-      const sourceGrid = document.querySelector(".grid");
-      const saved = readDashboardLayout();
-      const savedModules = saved.modules || {};
-      const byId = new Map(DASHBOARD_MODULES.map((config) => [config.id, config]));
-      const ordered = [...DASHBOARD_MODULES].sort((a, b) => {
-        const ai = Array.isArray(saved.order) ? saved.order.indexOf(a.id) : -1;
-        const bi = Array.isArray(saved.order) ? saved.order.indexOf(b.id) : -1;
-        return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi);
-      });
-      ordered.forEach((config) => {
-        const module = document.querySelector(config.selector);
-        if (!module) return;
-        module.classList.add("dashboard-module");
-        module.dataset.dashboardModule = config.id;
-        const savedModule = savedModules[config.id] || {};
-        const span = Math.max(3, Math.min(12, Number(savedModule.span || config.span)));
-        module.dataset.dashboardSpan = String(span);
-        module.style.gridColumn = `span ${span}`;
-        const rowSpan = Math.max(1, Math.min(4, Number(savedModule.rowSpan || config.rowSpan || 1)));
-        module.dataset.dashboardRowSpan = String(rowSpan);
-        module.style.gridRow = `span ${rowSpan}`;
-        if (savedModule.height) {
-          module.dataset.dashboardHeight = String(Math.max(120, Number(savedModule.height)));
-          module.style.height = `${module.dataset.dashboardHeight}px`;
-        }
-        const handle = document.createElement("div");
-        handle.className = "dashboard-module-handle";
-        handle.textContent = config.title;
-        handle.addEventListener("pointerdown", (event) => beginDashboardDrag(event, module, config.title));
-        module.prepend(handle);
-        const resize = document.createElement("button");
-        resize.type = "button";
-        resize.className = "dashboard-module-resize";
-        resize.textContent = "↘";
-        resize.title = "调整模块大小";
-        resize.setAttribute("aria-label", "调整模块大小");
-        resize.addEventListener("pointerdown", (event) => beginDashboardResize(event, module));
-        module.append(resize);
-        refs.dashboardGrid.append(module);
-      });
-      if (sourceGrid) sourceGrid.classList.add("dashboard-source-grid");
-      const sourceUtility = document.querySelector(".top-utility-strip");
-      if (sourceUtility) sourceUtility.classList.add("dashboard-source-utility");
-      setDashboardEditMode(false);
+      refs.dashboardGrid.classList.add("fixed-layout-ready");
     }
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
@@ -7676,11 +7433,6 @@ HTML = r"""
     });
     refs.tailscaleUseExistingIpBtn.addEventListener("click", connectExistingTailscaleIp);
     refs.copyAgentInstallBtn.addEventListener("click", copyAgentInstallCommand);
-    refs.dashboardEditBtn.addEventListener("click", () => setDashboardEditMode(!dashboardEditMode));
-    refs.dashboardResetBtn.addEventListener("click", () => {
-      localStorage.removeItem(DASHBOARD_LAYOUT_STORAGE_KEY);
-      window.location.reload();
-    });
     if (refs.pushSelectedBtn) refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
     refs.previewTuneBtn.addEventListener("click", previewTune);
     refs.applyTuneBtn.addEventListener("click", applyLastTune);
