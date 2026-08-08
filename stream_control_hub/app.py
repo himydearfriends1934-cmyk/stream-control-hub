@@ -2356,6 +2356,26 @@ HTML = r"""
     .dashboard-grid .top-utility-strip,
     .dashboard-grid .top-log-panel { grid-column: span 12; }
     .dashboard-grid .command-strip { grid-column: span 6; }
+    .dashboard-grid .command-strip .command-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-items: stretch;
+    }
+    .dashboard-grid .command-strip .command-grid > .command-field:nth-child(3),
+    .dashboard-grid .command-strip .command-advanced,
+    .dashboard-grid .command-strip .tune-output {
+      grid-column: 1 / -1;
+    }
+    .dashboard-grid .command-strip .command-actions {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-self: stretch;
+    }
+    .dashboard-grid .command-strip .command-actions button { min-height: 44px; }
+    .dashboard-grid .command-strip .command-advanced-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .dashboard-grid .command-strip .command-advanced-grid > .command-actions {
+      grid-column: 1 / -1;
+    }
     .dashboard-grid .resource-card { grid-column: span 7; order: initial; }
     .dashboard-grid .monitor-card { grid-column: span 7; }
     .dashboard-grid .node-table-card { grid-column: span 5; grid-row: span 2; }
