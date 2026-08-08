@@ -3026,6 +3026,7 @@ HTML = r"""
     }, true);
     let nodes = [];
     let mediaLibrary = { resources: [], nodes: [], duplicate_retention: [] };
+    const AGENT_SLOT_COUNT = 10;
     let openResourceNodeId = "";
     let resourceAllMode = false;
     let resourceTableFilters = { name: "", size: "", age: "", profile: "", ownerNode: "" };
@@ -3898,7 +3899,8 @@ HTML = r"""
       const agentRows = nodes.filter(shouldShowAgentRow);
       const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
       const onlineAgentCount = agentRows.filter((node) => Boolean(node.roles?.agent?.enabled)).length;
-      refs.agentNodeCount.textContent = `${onlineAgentCount}/${agentRows.length}`;
+      const agentCapacity = Math.max(AGENT_SLOT_COUNT, agentRows.length);
+      refs.agentNodeCount.textContent = `${onlineAgentCount}/${agentCapacity}`;
       refs.hubNodeCount.textContent = String(activeHubs.length);
       if (!nodes.length) {
         refs.nodeMonitor.innerHTML = renderMonitor(null);
