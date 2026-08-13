@@ -70,6 +70,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(result["role"], "hub")
         self.assertIn(str(root), command)
         self.assertIn("INSTALL_DIR=", command)
+        self.assertIn("STREAM_HUB_SERVICE_MODE=system", command)
         self.assertNotIn("INSTALL_DIR=/opt/stream-control-hub ", command)
 
     def test_role_status_reports_inactive_counterpart_as_prepared(self):

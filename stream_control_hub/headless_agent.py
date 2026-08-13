@@ -212,7 +212,8 @@ def schedule_hub_activation(seed_nodes: list[dict[str, Any]] | None = None) -> d
     script = (
         "set -eu; sleep 2; "
         f"env INSTALL_DIR={root} STREAM_HUB_HOST={host} "
-        "STREAM_HUB_TRUSTED_REMOTE_WRITES=1 STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 "
+        "STREAM_HUB_SERVICE_MODE=system STREAM_HUB_TRUSTED_REMOTE_WRITES=1 "
+        "STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 "
         f"CHOICE=1 sh {root}/scripts/install-hub.sh; "
         f"if [ -s {seed_path} ]; then "
         f"mkdir -p {root}/data; "
@@ -240,7 +241,8 @@ def schedule_hub_deactivation() -> dict[str, Any]:
     script = (
         "set -eu; sleep 2; "
         f"if [ -x {root}/scripts/install-hub.sh ]; then "
-        f"ACTION=uninstall REMOVE_DATA=0 INSTALL_DIR={root} sh {root}/scripts/install-hub.sh; "
+        f"ACTION=uninstall REMOVE_DATA=0 INSTALL_DIR={root} "
+        f"STREAM_HUB_SERVICE_MODE=system sh {root}/scripts/install-hub.sh; "
         "else systemctl disable --now stream-control-hub.service >/dev/null 2>&1 || true; fi"
     )
     result = subprocess.run(
