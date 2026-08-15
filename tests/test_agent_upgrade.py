@@ -17,9 +17,11 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("stream-control-agent-activate-*.service) continue", script)
         self.assertIn('git -C "$INSTALL_DIR" init', script)
         self.assertIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" FETCH_HEAD', script)
-        self.assertIn("systemctl restart stream-control-hub.service", script)
+        self.assertIn("transactional_refresh_agent", script)
+        self.assertNotIn("systemctl restart stream-control-hub.service", script)
         self.assertIn('git -C "$INSTALL_DIR" init', hub_script)
-        self.assertIn("systemctl restart stream-control-headless-agent.service", hub_script)
+        self.assertIn("transactional_refresh_hub", hub_script)
+        self.assertNotIn("systemctl restart stream-control-headless-agent.service", hub_script)
         self.assertNotIn('INSTALL_DIR exists but is not a git checkout', script)
         self.assertNotIn('INSTALL_DIR exists but is not a git checkout', hub_script)
 
@@ -33,6 +35,8 @@ class AgentUpgradeTests(unittest.TestCase):
             (root / "scripts" / "install-agent.sh").write_text("#!/bin/sh\n", encoding="utf-8")
             with patch.object(app, "ROOT", root), patch.object(
                 app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(
+                app, "service_active", return_value=False
             ), patch.object(app.subprocess, "run", return_value=completed) as run:
                 result = app.schedule_agent_role_activation(
                     "http://100.64.0.1:8788",
@@ -77,7 +81,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("STREAM_HUB_SERVICE_MODE=system", command)
         self.assertNotIn("INSTALL_DIR=/opt/stream-control-hub ", command)
 
-    def test_agent_hub_activation_is_idempotent_when_service_is_active(self):
+    def test_agent_hub_activation_refuses_when_agent_service_is_active(self):
         from stream_control_hub import headless_agent
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,13 +96,13 @@ class AgentUpgradeTests(unittest.TestCase):
             ), patch.object(
                 headless_agent, "systemd_service_active", return_value=True
             ), patch.object(headless_agent.subprocess, "run") as run:
-                result = headless_agent.schedule_hub_activation([{
-                    "id": "node-a",
-                    "hub_url": "http://old-hub:8788",
-                    "role_hints": {"hub": {"activation_pending": True}},
-                }])
+                with self.assertRaisesRegex(RuntimeError, "Agent service is active"):
+                    headless_agent.schedule_hub_activation([{
+                        "id": "node-a",
+                        "hub_url": "http://old-hub:8788",
+                        "role_hints": {"hub": {"activation_pending": True}},
+                    }])
 
-        self.assertTrue(result["already_active"])
         self.assertFalse(run.called)
         self.assertFalse((data_dir / "hub-seed-nodes.json").exists())
 
@@ -228,7 +232,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         schedule.assert_called_once_with(seed)
 
-    def test_unmanaged_agent_can_bootstrap_in_place(self):
+    def test_unmanaged_agent_upgrade_is_refused_without_rollback_support(self):
         from stream_control_hub import headless_agent
 
         version = {
@@ -236,19 +240,11 @@ class AgentUpgradeTests(unittest.TestCase):
             "managed_install": False,
             "upgrade_supported": True,
         }
-        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
         with patch.object(headless_agent, "agent_version_status", return_value=version), patch.object(
             headless_agent, "current_systemd_service", return_value="stream-control-headless-agent-local.service"
-        ), patch.object(headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"), patch.object(
-            headless_agent.subprocess, "run", return_value=completed
-        ) as run:
-            result = headless_agent.schedule_agent_upgrade()
-
-        self.assertEqual(result["install_mode"], "in-place-bootstrap")
-        command = run.call_args.args[0]
-        self.assertEqual(command[0], "systemd-run")
-        self.assertIn("git clone", command[-1])
-        self.assertIn("stream-control-headless-agent-local.service", command[-1])
+        ), patch.object(headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"):
+            with self.assertRaisesRegex(RuntimeError, "managed stream-control-headless-agent.service"):
+                headless_agent.schedule_agent_upgrade()
 
     def test_hub_upgrades_only_requested_agent(self):
         from stream_control_hub import app

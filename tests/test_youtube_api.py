@@ -1135,64 +1135,39 @@ class YouTubeAPIClientTests(unittest.TestCase):
         client.stream_health.assert_not_called()
         post.assert_not_called()
 
-    def test_autotune_restores_recommended_bitrate_on_third_persistent_adjustment(self):
+    def test_autotune_waits_twenty_minutes_then_restores_one_level(self):
         from stream_control_hub import app
 
-        def stream_config(bitrate):
-            return {
-                "stream_output_mode": "youtube_api",
-                "youtube_stream_id": "stream-a",
-                "youtube_profile_id": "account-a",
-                "youtube_ingestion_url": "rtmp://example.invalid/live",
-                "resolution": "720x1280",
-                "fps": 30,
-                "video_bitrate": bitrate,
-                "audio_bitrate": 192,
-                "preset": "superfast",
-                "keyframe_seconds": 2,
-            }
-
-        def starvation_health(current_bitrate, next_bitrate):
-            return {
-                "ok": True,
-                "severity": "critical",
-                "analysis": {
-                    "configuration_issues": [{"type": "videoIngestionStarved", "severity": "error"}],
-                    "recommended_video_bitrate": 2500,
-                    "reasons": ["Reduce encoder load"],
-                    "warnings": [],
-                },
-                "recommendation": {**stream_config(current_bitrate), "video_bitrate": next_bitrate},
-            }
+        stream_config = {
+            "stream_output_mode": "youtube_api",
+            "youtube_stream_id": "stream-a",
+            "youtube_profile_id": "account-a",
+            "youtube_ingestion_url": "rtmp://example.invalid/live",
+            "resolution": "720x1280",
+            "fps": 30,
+            "video_bitrate": 2880,
+            "audio_bitrate": 192,
+            "preset": "superfast",
+            "keyframe_seconds": 2,
+        }
+        healthy = {"ok": True, "severity": "ok", "analysis": {"reasons": [], "warnings": []}, "recommendation": {}}
 
         client = MagicMock()
         client.local_status.return_value = {"authorized": True}
-        client.stream_health.side_effect = [
-            starvation_health(4500, 3600),
-            starvation_health(4500, 3600),
-            starvation_health(3600, 2880),
-            starvation_health(3600, 2880),
-            starvation_health(2880, 2304),
-            starvation_health(2880, 2304),
-            starvation_health(2500, 2000),
-        ]
-        statuses = MagicMock(side_effect=[
-            {"ok": True, "stream": {"running": True}, "stream_config": stream_config(4500)},
-            {"ok": True, "stream": {"running": True}, "stream_config": stream_config(4500)},
-            {"ok": True, "stream_config": stream_config(3600)},
-            {"ok": True, "stream": {"running": True}, "stream_config": stream_config(3600)},
-            {"ok": True, "stream": {"running": True}, "stream_config": stream_config(3600)},
-            {"ok": True, "stream_config": stream_config(2880)},
-            {"ok": True, "stream": {"running": True}, "stream_config": stream_config(2880)},
-            {"ok": True, "stream": {"running": True}, "stream_config": stream_config(2880)},
-            {"ok": True, "stream_config": stream_config(2500)},
-            {"ok": True, "stream": {"running": True}, "stream_config": stream_config(2500)},
-        ])
+        client.stream_health.return_value = healthy
+        statuses = MagicMock(return_value={"ok": True, "stream": {"running": True}, "stream_config": stream_config})
         post = MagicMock(return_value={"ok": True, "message": "stream restarted"})
 
         with tempfile.TemporaryDirectory() as tmp:
             state_file = Path(tmp) / "youtube_autotune_state.json"
-            state_file.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+            state_file.write_text(json.dumps({"entries": {
+                "node-a:account-a:stream-a": {
+                    "active_issue_fingerprint": "runtime_encoder_overloaded",
+                    "episode_adjustments": 2,
+                    "stable_since": 10_000,
+                    "baseline_config": {**stream_config, "preset": "veryfast", "video_bitrate": 4500},
+                },
+            }}), encoding="utf-8")
             with patch.object(app, "YOUTUBE_AUTOTUNE_STATE_FILE", state_file), patch.object(
                 app, "load_youtube_profiles_config", return_value={
                     "active_profile_id": "account-a",
@@ -1210,17 +1185,21 @@ class YouTubeAPIClientTests(unittest.TestCase):
             ), patch.object(app, "youtube_client_for_id", return_value=client), patch.object(
                 app, "post_node_json", post
             ):
-                for timestamp in (10_000, 10_100, 10_200, 10_300, 10_400, 10_500, 10_600):
+                for timestamp in (11_000, 11_200):
                     with patch.object(app.time, "time", return_value=timestamp):
                         app.youtube_autotune_tick()
             saved = json.loads(state_file.read_text(encoding="utf-8"))
 
-        self.assertEqual([call.args[2]["video_bitrate"] for call in post.call_args_list], [3600, 2880, 2500])
+        self.assertEqual(len(post.call_args_list), 1)
+        recovered = post.call_args.args[2]
+        self.assertEqual(recovered["preset"], "veryfast")
+        self.assertEqual(recovered["video_bitrate"], 2880)
+        self.assertIn("policy_decision_id", recovered)
         entry = saved["entries"]["node-a:account-a:stream-a"]
-        self.assertEqual(entry["episode_adjustments"], 3)
-        self.assertTrue(entry["recovery_applied"])
-        self.assertEqual(saved["history"][0]["outcome"], "observing")
-        self.assertEqual(saved["history"][1]["changes"]["video_bitrate"], 2500)
+        self.assertEqual(entry["episode_adjustments"], 1)
+        self.assertEqual(entry["stable_since"], 11_200)
+        self.assertEqual(saved["history"][0]["outcome"], "recovered_one_level")
+        self.assertEqual(saved["history"][1]["outcome"], "stable_wait")
 
     def test_autotune_vertical_720p_uses_same_recovery_bitrate_as_landscape(self):
         from stream_control_hub import app

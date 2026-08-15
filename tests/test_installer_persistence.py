@@ -121,6 +121,17 @@ class InstallerPersistenceTests(unittest.TestCase):
         self.assertNotIn("$SYSTEMCTL enable --now stream-control-hub.service", script)
         self.assertNotIn("if ! $SYSTEMCTL enable --now stream-control-hub.service", script)
 
+    def test_managed_updates_stage_a_candidate_and_keep_a_rollback_snapshot(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+        agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
+
+        for script in (hub, agent):
+            self.assertIn("worktree add --detach", script)
+            self.assertIn("compileall -q", script)
+            self.assertIn("upgrade-backups", script)
+            self.assertIn("rolling back", script)
+            self.assertNotIn('git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"', script)
+
     def test_installers_default_without_interactive_tty(self):
         hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
         agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")

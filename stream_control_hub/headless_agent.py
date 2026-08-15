@@ -26,6 +26,8 @@ from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
 
 from .env_file import load_env_file, update_env_file_values
+from .policy import POLICY_VERSION, strip_policy, validate_policy
+from .role_lock import RoleConflictError, assert_role, declared_role
 from .youtube_api import YouTubeAPIClient, YouTubeAPIError
 from .stream_tuning import initial_stream_recommendation, parse_fraction, source_copy_compatible
 
@@ -73,6 +75,7 @@ PUBLIC_IP_SERVICES = ("https://api.ipify.org", "https://ifconfig.me/ip")
 PUBLIC_ORIGIN_CACHE: dict[str, Any] = {"value": "", "checked_at": 0.0}
 PUBLIC_ORIGIN_LOCK = threading.Lock()
 STREAM_LIFECYCLE_LOCK = threading.RLock()
+MOTION_ANALYSIS_LOCK = threading.Lock()
 STREAM_WATCHDOG_STOP = threading.Event()
 STREAM_WATCHDOG_THREAD: threading.Thread | None = None
 STREAM_AUTO_RESTART_ENABLED = os.environ.get("STREAM_AUTO_RESTART_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
@@ -88,6 +91,7 @@ STREAM_START_VERIFY_INTERVAL_SECONDS = max(
 STREAM_PROGRESS_STALL_SECONDS = max(10, int(os.environ.get("STREAM_AGENT_PROGRESS_STALL_SECONDS", "20")))
 STREAM_PROGRESS_GRACE_SECONDS = max(5, int(os.environ.get("STREAM_AGENT_PROGRESS_GRACE_SECONDS", "15")))
 STREAM_EGRESS_CAPACITY_KBPS = max(0, int(os.environ.get("STREAM_AGENT_EGRESS_CAPACITY_KBPS", "0")))
+MOTION_ANALYSIS_MAX_CPU_PERCENT = max(50.0, min(99.0, float(os.environ.get("STREAM_AGENT_MOTION_ANALYSIS_MAX_CPU_PERCENT", "88"))))
 YOUTUBE_CREDENTIAL_FILE = Path(
     os.environ.get("YOUTUBE_CREDENTIAL_FILE", str(DATA_DIR / "youtube_credentials.json"))
 )
@@ -128,6 +132,8 @@ def agent_version_status() -> dict[str, Any]:
         "branch": branch,
         "managed_install": bool(revision),
         "upgrade_supported": bool(shutil.which("systemd-run")),
+        "role": declared_role(ROOT),
+        "policy_version": POLICY_VERSION,
     }
 
 
@@ -141,6 +147,10 @@ def current_systemd_service() -> str:
 
 
 def schedule_agent_upgrade() -> dict[str, Any]:
+    try:
+        assert_role("agent", ROOT)
+    except RoleConflictError as exc:
+        raise RuntimeError(str(exc)) from exc
     version = agent_version_status()
     if not shutil.which("systemd-run"):
         raise RuntimeError("systemd-run is required for safe background upgrades")
@@ -150,29 +160,25 @@ def schedule_agent_upgrade() -> dict[str, Any]:
     unit = f"stream-control-agent-upgrade-{int(time.time())}"
     root = shlex.quote(str(ROOT))
     branch = shlex.quote(AGENT_SOURCE_BRANCH)
-    if version["managed_install"] and service == "stream-control-headless-agent.service":
-        script = (
-            "sleep 2; "
-            f"git -C {root} fetch origin {branch} && "
-            f"git -C {root} checkout {branch} && "
-            f"git -C {root} pull --ff-only origin {branch} && "
-            f"env BRANCH={branch} CHOICE=1 INSTALL_DIR={root} "
-            f"sh {root}/scripts/install-agent.sh"
+    data_dir = shlex.quote(str(DATA_DIR))
+    lock_file = shlex.quote(str(DATA_DIR / ".upgrade.lock"))
+    if not (version["managed_install"] and service == "stream-control-headless-agent.service"):
+        raise RuntimeError(
+            "Agent upgrade requires the managed stream-control-headless-agent.service installation; "
+            "reinstall the Agent once before using in-product upgrades."
         )
-        install_mode = "managed-installer"
-    else:
-        repo = shlex.quote(AGENT_SOURCE_REPO)
-        service_arg = shlex.quote(service)
-        script = (
-            "set -eu; sleep 2; tmp=$(mktemp -d); "
-            "trap 'rm -rf \"$tmp\"' EXIT; "
-            f"git clone --quiet --depth 1 --branch {branch} {repo} \"$tmp/repo\"; "
-            f"cp -a \"$tmp/repo/.git\" \"$tmp/repo/stream_control_hub\" \"$tmp/repo/scripts\" {root}/; "
-            f"cp \"$tmp/repo/requirements.txt\" \"$tmp/repo/README.md\" {root}/; "
-            f"{root}/.venv/bin/python -m pip install -q -r {root}/requirements.txt; "
-            f"systemctl restart {service_arg}"
-        )
-        install_mode = "in-place-bootstrap"
+    script = (
+        "set -eu; "
+        f"mkdir -p {data_dir}; "
+        f"if command -v flock >/dev/null 2>&1; then exec 9>{lock_file}; flock -n 9 || exit 75; "
+        f"else lock_dir={lock_file}.d; mkdir \"$lock_dir\" || exit 75; "
+        "trap 'rmdir \"$lock_dir\" >/dev/null 2>&1 || true' EXIT; fi; "
+        "sleep 2; "
+        f"test -z \"$(git -C {root} status --porcelain --untracked-files=no)\"; "
+        f"env BRANCH={branch} CHOICE=1 INSTALL_DIR={root} "
+        f"sh {root}/scripts/install-agent.sh"
+    )
+    install_mode = "transactional-managed-installer"
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
         text=True,
@@ -227,6 +233,12 @@ def clear_hub_seed_file() -> None:
 
 
 def schedule_hub_activation(seed_nodes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    try:
+        assert_role("hub", ROOT)
+    except RoleConflictError as exc:
+        raise RuntimeError(f"role switch requires Agent deactivation first: {exc}") from exc
+    if systemd_service_active("stream-control-headless-agent.service"):
+        raise RuntimeError("Agent service is active; deactivate the Agent role before activating HUB")
     status = tailscale_status()
     tailscale_ips = (status.get("self") or {}).get("tailscale_ips") or []
     tailscale_ip = next((str(item) for item in tailscale_ips if str(item).startswith("100.")), "")
@@ -1207,6 +1219,67 @@ def probe_media(video_path: Path) -> dict[str, Any]:
     return metadata
 
 
+def _motion_frame_metrics(frames: list[bytes]) -> list[dict[str, Any]]:
+    metrics: list[dict[str, Any]] = []
+    for previous, current in zip(frames, frames[1:]):
+        if len(previous) != len(current) or not current:
+            continue
+        differences = [abs(left - right) for left, right in zip(previous, current)]
+        mean_diff = sum(differences) / (len(differences) * 255.0)
+        changed_ratio = sum(1 for value in differences if value >= 12) / len(differences)
+        metrics.append({
+            "mean_diff": round(mean_diff, 5),
+            "changed_ratio": round(changed_ratio, 5),
+            "scene_cut": bool(mean_diff >= 0.35 or changed_ratio >= 0.85),
+        })
+    return metrics
+
+
+def extract_motion_samples(video_path: Path, source: dict[str, Any], sample_count: int = 12) -> list[dict[str, Any]]:
+    if not shutil.which(FFMPEG_BIN):
+        raise RuntimeError(f"{FFMPEG_BIN} is not installed")
+    duration = max(0.0, float(source.get("duration_seconds") or 0))
+    count = max(6, min(24, int(sample_count or 12)))
+    window_seconds = 3.0
+    timestamps = [
+        max(0.0, duration * (index + 0.5) / count - window_seconds / 2)
+        for index in range(count)
+    ] if duration else [0.0]
+    samples: list[dict[str, Any]] = []
+    frame_size = 160 * 90
+    for timestamp in timestamps:
+        result = subprocess.run(
+            [
+                FFMPEG_BIN,
+                "-hide_banner",
+                "-loglevel", "error",
+                "-threads", "1",
+                "-ss", f"{timestamp:.3f}",
+                "-t", str(window_seconds),
+                "-i", str(video_path),
+                "-an",
+                "-vf", "fps=1,scale=160:90,format=gray",
+                "-frames:v", "4",
+                "-f", "rawvideo",
+                "-pix_fmt", "gray",
+                "pipe:1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            check=False,
+        )
+        frames = [
+            result.stdout[offset:offset + frame_size]
+            for offset in range(0, len(result.stdout), frame_size)
+            if len(result.stdout[offset:offset + frame_size]) == frame_size
+        ]
+        metrics = _motion_frame_metrics(frames)
+        if metrics:
+            samples.extend({"timestamp": round(timestamp, 3), **item} for item in metrics)
+    return samples
+
+
 def stream_progress_path() -> Path:
     return DATA_DIR / "ffmpeg-progress.log"
 
@@ -1558,7 +1631,7 @@ def launch_stream_process(
     state["stream_started_at_epoch"] = now
     state["stream_config"] = {
         key: value
-        for key, value in payload.items()
+        for key, value in strip_policy(payload).items()
         if key not in {"stream_key", "youtube_ingestion_url"} and not key.startswith("_")
     }
     state["stream_config"]["video_path"] = str(video_path)
@@ -1838,6 +1911,7 @@ def api_status():
             "mode": "headless-agent",
             "headless": True,
             "control_hub": CONTROL_HUB,
+            "capabilities": {"hub_policy_v2": True, "motion_samples_v1": True},
             **version_status,
         },
         "roles": {
@@ -2471,6 +2545,46 @@ def api_share_media():
         }), 502
 
 
+@APP.post("/api/media/motion-samples")
+def api_media_motion_samples():
+    payload = request.get_json(silent=True) or {}
+    try:
+        video_path = resolve_media_path(str(payload.get("video_path") or payload.get("media") or ""))
+        sample_count = max(6, min(24, int(payload.get("sample_count") or 12)))
+        source = probe_media(video_path)
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    if not MOTION_ANALYSIS_LOCK.acquire(blocking=False):
+        return jsonify({"ok": False, "message": "another motion analysis is already running"}), 409
+    try:
+        state = load_state()
+        if stream_process_owned(int(state.get("stream_pid") or 0)):
+            observed_cpu = cpu_percent_sample()
+            if observed_cpu >= MOTION_ANALYSIS_MAX_CPU_PERCENT:
+                return jsonify({
+                    "ok": False,
+                    "message": "motion analysis deferred while the live encoder is under CPU pressure",
+                    "cpu_percent": observed_cpu,
+                    "retryable": True,
+                }), 429
+        samples = extract_motion_samples(video_path, source, sample_count)
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "message": "motion analysis timed out"}), 504
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 502
+    finally:
+        MOTION_ANALYSIS_LOCK.release()
+    stat = video_path.stat()
+    return jsonify({
+        "ok": True,
+        "video_path": str(video_path),
+        "source": source,
+        "file": {"size": stat.st_size, "modified": stat.st_mtime},
+        "sample_count": len(samples),
+        "samples": samples[:96],
+    })
+
+
 @APP.post("/api/stream/recommend")
 def api_stream_recommend():
     payload = request.get_json(silent=True) or {}
@@ -2487,6 +2601,7 @@ def api_stream_recommend():
         cpu_count=os.cpu_count() or 1,
         memory_available_mb=int(memory.get("available") or 0) // (1024 * 1024),
         egress_capacity_kbps=egress_capacity_kbps,
+        motion_level=str(payload.get("motion_level") or "medium"),
     )
     result["analysis"].update({
         "cpu_percent": cpu_percent_sample(),
@@ -2614,6 +2729,9 @@ def api_youtube_prepare():
 @APP.post("/api/start-stream")
 def api_start_stream():
     payload = request.get_json(silent=True) or {}
+    policy_error = validate_policy(payload)
+    if policy_error:
+        return jsonify({"ok": False, "message": policy_error}), 409
     try:
         video_path = resolve_media_path(str(payload.get("video_path") or ""))
         output_url = stream_output_url(payload)
@@ -2754,7 +2872,12 @@ def api_role_status():
     return jsonify({
         "ok": True,
         "roles": {
-            "agent": {"enabled": True, "version": version["version"], "url": f"http://{request.host.split(':')[0]}:{PORT}"},
+            "agent": {
+                "enabled": True,
+                "version": version["version"],
+                "policy_version": POLICY_VERSION,
+                "url": f"http://{request.host.split(':')[0]}:{PORT}",
+            },
             "hub": {
                 "enabled": systemd_service_active("stream-control-hub.service"),
                 "prepared": (ROOT / "scripts" / "install-hub.sh").exists(),
@@ -2782,7 +2905,7 @@ def api_activate_hub_role():
         "already_active": already_active,
         "message": "Hub already active; no new activation task was created"
         if already_active
-        else "Hub activation scheduled; the Agent role will remain active",
+        else "Hub activation scheduled after the Agent role has been deactivated",
         "result": result,
     }), 200 if already_active else 202
 
@@ -2796,7 +2919,7 @@ def api_deactivate_hub_role():
     return jsonify({
         "ok": True,
         "accepted": True,
-        "message": "Hub deactivation scheduled; the Agent role will remain active",
+        "message": "Hub deactivation scheduled; the machine will have no active role until the next explicit activation",
         "result": result,
     }), 202
 
@@ -2816,6 +2939,7 @@ def api_deactivate_agent_role():
 
 
 def main() -> None:
+    assert_role("agent", ROOT)
     ensure_dirs()
     start_stream_watchdog()
     try:

@@ -29,6 +29,9 @@ from flask import Flask, jsonify, make_response, request
 from werkzeug.utils import secure_filename
 
 from .env_file import load_env_file, update_env_file_values
+from .motion_analysis import classify_motion_samples, motion_profile_cache_key
+from .policy import POLICY_VERSION, issue_policy
+from .role_lock import RoleConflictError, assert_role, declared_role
 from .youtube_api import YouTubeAPIClient, YouTubeAPIError
 from .stream_tuning import youtube_live_bitrate_for_payload
 
@@ -51,6 +54,92 @@ def write_json_atomic(path: Path, payload: Any, *, mode: int | None = None) -> N
                 path.chmod(mode)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def load_motion_profiles() -> dict[str, Any]:
+    with MOTION_PROFILES_LOCK:
+        try:
+            payload = json.loads(MOTION_PROFILES_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        return payload if isinstance(payload, dict) else {}
+
+
+def save_motion_profiles(payload: dict[str, Any]) -> None:
+    with MOTION_PROFILES_LOCK:
+        write_json_atomic(MOTION_PROFILES_FILE, payload, mode=0o600)
+
+
+def cached_motion_profile(node_id: str, video_path: str) -> dict[str, Any] | None:
+    profiles = load_motion_profiles().get("profiles") or {}
+    prefix = f"{node_id}:{video_path}:"
+    matches = [value for key, value in profiles.items() if str(key).startswith(prefix) and isinstance(value, dict)]
+    if not matches:
+        return None
+    return max(matches, key=lambda item: float(item.get("analyzed_at") or 0))
+
+
+def analyze_node_motion(node: dict[str, Any], video_path: str, *, sample_count: int = 12) -> dict[str, Any]:
+    result = post_node_json(
+        node,
+        "/api/media/motion-samples",
+        {"video_path": video_path, "sample_count": max(6, min(24, int(sample_count or 12)))},
+        timeout=240,
+    )
+    if not result.get("ok"):
+        return result
+    profile = classify_motion_samples(result.get("samples") or [])
+    file_info = result.get("file") or {}
+    source = result.get("source") or {}
+    key = motion_profile_cache_key(
+        str(node.get("id") or ""),
+        video_path,
+        size=int(file_info.get("size") or 0),
+        modified=float(file_info.get("modified") or 0),
+    )
+    profile_record = {
+        **profile,
+        "node_id": str(node.get("id") or ""),
+        "node_name": str(node.get("name") or node.get("id") or ""),
+        "video_path": video_path,
+        "file": {"size": int(file_info.get("size") or 0), "modified": float(file_info.get("modified") or 0)},
+        "source": source,
+        "analyzed_at": time.time(),
+        "analysis_version": 1,
+    }
+    profiles = load_motion_profiles()
+    records = profiles.setdefault("profiles", {})
+    for old_key in list(records):
+        if old_key.startswith(f"{node.get('id')}:{video_path}:") and old_key != key:
+            records.pop(old_key, None)
+    records[key] = profile_record
+    profiles["profiles"] = dict(list(records.items())[-1000:])
+    save_motion_profiles(profiles)
+    return {"ok": True, "profile": profile_record, "source": source, "file": file_info}
+
+
+def schedule_motion_analysis(node: dict[str, Any], video_path: str) -> dict[str, Any]:
+    node_id = str(node.get("id") or "")
+    key = f"{node_id}:{video_path}"
+    cached = cached_motion_profile(node_id, video_path)
+    if cached:
+        return {"scheduled": False, "cached": True, "profile": cached}
+    with MOTION_ANALYSIS_ACTIVE_LOCK:
+        if key in MOTION_ANALYSIS_ACTIVE:
+            return {"scheduled": False, "active": True}
+        MOTION_ANALYSIS_ACTIVE.add(key)
+
+    def worker() -> None:
+        try:
+            analyze_node_motion(node, video_path)
+        except Exception:
+            APP.logger.exception("motion analysis failed for node %s", node_id)
+        finally:
+            with MOTION_ANALYSIS_ACTIVE_LOCK:
+                MOTION_ANALYSIS_ACTIVE.discard(key)
+
+    threading.Thread(target=worker, name=f"motion-analysis-{node_id}", daemon=True).start()
+    return {"scheduled": True, "cached": False}
 
 
 load_env_file(ROOT / ".env")
@@ -92,6 +181,7 @@ YOUTUBE_CREDENTIAL_FILE = Path(
 YOUTUBE_PROFILES_FILE = DATA_DIR / "youtube_profiles.json"
 YOUTUBE_USAGE_FILE = DATA_DIR / "youtube_api_usage.json"
 YOUTUBE_AUTOTUNE_STATE_FILE = DATA_DIR / "youtube_autotune_state.json"
+MOTION_PROFILES_FILE = DATA_DIR / "motion-profiles.json"
 YOUTUBE_AUTOTUNE_HISTORY_LIMIT = 50
 YOUTUBE_AUTOTUNE_HISTORY_TOTAL_LIMIT = 500
 YOUTUBE_AUTOTUNE_API_RETRY_BASE_SECONDS = max(
@@ -101,11 +191,17 @@ YOUTUBE_AUTOTUNE_API_RETRY_MAX_SECONDS = max(
     YOUTUBE_AUTOTUNE_API_RETRY_BASE_SECONDS,
     int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_API_RETRY_MAX_SECONDS", "300")),
 )
+YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS = max(
+    1200, int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS", "1200"))
+)
 YOUTUBE_PROFILE_CREDENTIALS_DIR = DATA_DIR / "youtube_profile_credentials"
 YOUTUBE_DEFAULT_PROFILE_ID = "default"
 YOUTUBE_PROFILE_LOCK = threading.RLock()
 YOUTUBE_AUTOTUNE_STOP = threading.Event()
 YOUTUBE_AUTOTUNE_LOCK = threading.Lock()
+MOTION_PROFILES_LOCK = threading.RLock()
+MOTION_ANALYSIS_ACTIVE: set[str] = set()
+MOTION_ANALYSIS_ACTIVE_LOCK = threading.Lock()
 YOUTUBE_CLIENT_CACHE: dict[str, YouTubeAPIClient] = {}
 OFFLINE_NODE_RETENTION_SECONDS = max(
     3600,
@@ -192,6 +288,7 @@ def default_youtube_profile() -> dict[str, Any]:
         "auto_tune_enabled": False,
         "auto_tune_interval_seconds": 300,
         "auto_tune_cooldown_seconds": 900,
+        "auto_tune_recovery_stable_seconds": YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS,
         "auto_tune_min_bitrate": 800,
         "auto_tune_max_bitrate": 40000,
         "created_at": "",
@@ -262,6 +359,9 @@ def public_youtube_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "auto_tune_enabled": bool(profile.get("auto_tune_enabled")),
         "auto_tune_interval_seconds": int(profile.get("auto_tune_interval_seconds") or 300),
         "auto_tune_cooldown_seconds": int(profile.get("auto_tune_cooldown_seconds") or 900),
+        "auto_tune_recovery_stable_seconds": max(
+            1200, int(profile.get("auto_tune_recovery_stable_seconds") or YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS)
+        ),
         "auto_tune_min_bitrate": int(profile.get("auto_tune_min_bitrate") or 800),
         "auto_tune_max_bitrate": int(profile.get("auto_tune_max_bitrate") or 40000),
         "usage": youtube_usage_for_profile(profile_id),
@@ -466,10 +566,12 @@ def youtube_autotune_apply_runtime(
     status: dict[str, Any],
     stream_config: dict[str, Any],
     entry: dict[str, Any],
+    motion_level: str = "medium",
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     runtime = youtube_autotune_smooth_runtime(entry, youtube_autotune_runtime_snapshot(status, stream_config))
     issue_fingerprint = youtube_autotune_issue_fingerprint(health)
-    if issue_fingerprint != "videoingestionstarved":
+    local_classification = str(runtime.get("classification") or "unknown")
+    if issue_fingerprint != "videoingestionstarved" and local_classification not in {"encoder_overloaded", "network_starved"}:
         return dict(recommendation), runtime, []
     result = dict(recommendation)
     decisions = []
@@ -477,6 +579,7 @@ def youtube_autotune_apply_runtime(
     explicit_bitrate = int((health.get("analysis") or {}).get("recommended_video_bitrate") or 0)
     fallback_bitrate = int(entry.get("youtube_recommended_bitrate") or 0) or youtube_autotune_resolution_bitrate(stream_config)
     classification = runtime["classification"]
+    motion_level = motion_level if motion_level in {"static", "medium", "dynamic"} else "medium"
     if classification == "encoder_overloaded":
         if not explicit_bitrate:
             result["video_bitrate"] = current_bitrate
@@ -495,14 +598,16 @@ def youtube_autotune_apply_runtime(
             decisions.append("Agent remains encoder-bound at 30 FPS; reduce frame rate to 24 FPS.")
         else:
             decisions.append("Agent is encoder-bound but already uses the fastest preset and 24 FPS; hold parameters for observation.")
+        if motion_level == "static":
+            decisions.append("Central motion analysis classifies this source as mostly static; preserve quality and avoid an unnecessary bitrate cut.")
     elif classification == "network_starved":
         if not explicit_bitrate:
             result["video_bitrate"] = current_bitrate
         result["preset"] = stream_config.get("preset") or "veryfast"
         decisions.append(
-            f"FFmpeg speed is stable but upload is only {runtime['upload_kbps']} Kbps; treat this as a network path issue and do not restart the encoder."
+            f"Central motion profile is {motion_level}; FFmpeg speed is stable but upload is only {runtime['upload_kbps']} Kbps; treat this as a network path issue and do not restart the encoder."
         )
-    elif classification == "healthy":
+    elif classification == "healthy" and issue_fingerprint == "videoingestionstarved":
         result["video_bitrate"] = explicit_bitrate or max(current_bitrate, fallback_bitrate)
         result["preset"] = stream_config.get("preset") or "veryfast"
         decisions.append(
@@ -564,6 +669,26 @@ def youtube_autotune_api_retry_delay(entry: dict[str, Any]) -> int:
     )
 
 
+def youtube_autotune_recovery_diff(
+    current: dict[str, Any], entry: dict[str, Any], profile: dict[str, Any]
+) -> dict[str, Any]:
+    """Restore one degraded setting toward the pre-incident configuration."""
+    baseline = entry.get("baseline_config") or {}
+    if not isinstance(baseline, dict):
+        return {}
+    # Quality is restored from the least disruptive encoder setting outward.
+    for key in ("preset", "fps", "resolution", "video_bitrate", "audio_bitrate", "keyframe_seconds"):
+        if key not in baseline or baseline.get(key) in (None, ""):
+            continue
+        if baseline.get(key) == current.get(key):
+            continue
+        candidate = {key: baseline.get(key)}
+        diff = youtube_autotune_payload_diff(current, candidate, profile)
+        if diff:
+            return diff
+    return {}
+
+
 def youtube_autotune_tick() -> dict[str, Any]:
     with YOUTUBE_AUTOTUNE_LOCK:
         now = time.time()
@@ -593,6 +718,10 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 continue
             interval = max(60, int(profile.get("auto_tune_interval_seconds") or 300))
             cooldown = max(60, int(profile.get("auto_tune_cooldown_seconds") or 900))
+            recovery_wait = max(
+                1200,
+                int(profile.get("auto_tune_recovery_stable_seconds") or YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS),
+            )
             key = f"{node.get('id')}:{profile_id}:{stream_config.get('youtube_stream_id')}"
             entry = entries.setdefault(key, {"consecutive_issues": 0, "last_check": 0, "last_adjusted": 0})
             next_api_retry_at = float(entry.get("next_api_retry_at") or 0)
@@ -603,31 +732,74 @@ def youtube_autotune_tick() -> dict[str, Any]:
             entry["last_check"] = now
             checked += 1
             node_id = str(node.get("id") or "")
+            video_path = str(stream_config.get("video_path") or "")
+            motion_profile = cached_motion_profile(node_id, video_path) if video_path else None
+            motion_level = str(
+                (motion_profile or {}).get("level") or stream_config.get("motion_level") or "medium"
+            ).lower()
+            if motion_level not in {"static", "medium", "dynamic"}:
+                motion_level = "medium"
+            if video_path and not motion_profile:
+                schedule_motion_analysis(node, video_path)
             event = {
                 "node_id": node_id,
                 "node_name": str(node.get("name") or node.get("id") or ""),
                 "profile_id": profile_id,
                 "stream_id": str(stream_config.get("youtube_stream_id") or ""),
                 "before": youtube_autotune_parameter_snapshot(stream_config),
+                "motion_level": motion_level,
+                "motion_profile": motion_profile or {},
             }
             try:
                 client = youtube_client_for_id(profile_id)
+                api_degraded = False
                 if not client.local_status().get("authorized"):
-                    entry["last_error"] = "profile is not authorized"
+                    api_degraded = True
+                    health = {
+                        "ok": False,
+                        "severity": "unknown",
+                        "health": {},
+                        "analysis": {
+                            "warnings": ["YouTube API is unavailable; use local Agent telemetry."],
+                            "configuration_issues": [],
+                            "reasons": [],
+                        },
+                    }
+                else:
+                    try:
+                        health = client.stream_health(str(stream_config.get("youtube_stream_id") or ""), stream_config)
+                    except Exception as exc:
+                        if not youtube_api_error_is_transient(exc):
+                            raise
+                        api_degraded = True
+                        entry["api_failures"] = int(entry.get("api_failures") or 0) + 1
+                        retry_after_seconds = youtube_autotune_api_retry_delay(entry)
+                        entry["next_api_retry_at"] = now + retry_after_seconds
+                        health = {
+                            "ok": False,
+                            "severity": "unknown",
+                            "health": entry.get("last_health") or {},
+                            "analysis": {
+                                "warnings": ["YouTube API is temporarily unavailable; use local Agent telemetry."],
+                                "configuration_issues": [],
+                                "reasons": [],
+                            },
+                        }
+                if not api_degraded:
                     entry.pop("next_api_retry_at", None)
                     entry["api_failures"] = 0
-                    append_youtube_autotune_history(state, {**event, "outcome": "error", "error": entry["last_error"]})
-                    continue
-                health = client.stream_health(str(stream_config.get("youtube_stream_id") or ""), stream_config)
-                entry.pop("next_api_retry_at", None)
-                entry["api_failures"] = 0
-                entry["last_error"] = ""
+                    entry["last_error"] = ""
                 recommendation = health.get("recommendation") or {}
                 severity = str(health.get("severity") or "").lower()
                 issue_fingerprint = youtube_autotune_issue_fingerprint(health)
                 previous_fingerprint = str(entry.get("active_issue_fingerprint") or "")
+                if api_degraded and not issue_fingerprint and previous_fingerprint:
+                    # A transient API outage must not erase an already-confirmed local episode.
+                    issue_fingerprint = previous_fingerprint
                 legacy_entry = "active_issue_fingerprint" not in entry
-                if issue_fingerprint != previous_fingerprint:
+                if issue_fingerprint != previous_fingerprint and not (
+                    not issue_fingerprint and previous_fingerprint.startswith("runtime_")
+                ):
                     entry["active_issue_fingerprint"] = issue_fingerprint
                     entry["episode_adjustments"] = (
                         youtube_autotune_history_adjustments(state, event, issue_fingerprint)
@@ -637,12 +809,31 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     entry["recovery_applied"] = False
                     entry["consecutive_issues"] = 0
                     entry["runtime_samples"] = []
+                    entry["stable_since"] = 0
+                    entry["recovery_level"] = 0
+                    if issue_fingerprint:
+                        entry.pop("baseline_config", None)
                 explicit_bitrate = int((health.get("analysis") or {}).get("recommended_video_bitrate") or 0)
                 if explicit_bitrate:
                     entry["youtube_recommended_bitrate"] = explicit_bitrate
                 recommendation, runtime, runtime_decisions = youtube_autotune_apply_runtime(
-                    health, recommendation, status, stream_config, entry
+                    health, recommendation, status, stream_config, entry, motion_level
                 )
+                runtime_issue = str(runtime.get("classification") or "") in {"encoder_overloaded", "network_starved"}
+                if runtime_issue:
+                    runtime_fingerprint = f"runtime_{runtime['classification']}"
+                    if issue_fingerprint != runtime_fingerprint:
+                        issue_fingerprint = runtime_fingerprint
+                        if previous_fingerprint != runtime_fingerprint:
+                            entry["active_issue_fingerprint"] = runtime_fingerprint
+                            entry["episode_adjustments"] = 0
+                            entry["consecutive_issues"] = 0
+                            entry["recovery_applied"] = False
+                    if severity not in {"warning", "critical"}:
+                        severity = "critical" if (
+                            float(runtime.get("speed") or 1) < 0.95
+                            or float(runtime.get("system_cpu_percent") or 0) >= 95
+                        ) else "warning"
                 diff = youtube_autotune_payload_diff(stream_config, recommendation, profile)
                 event.update({
                     "severity": severity or "unknown",
@@ -657,14 +848,75 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 })
                 entry["last_health"] = health.get("health") or {}
                 entry["last_analysis"] = health.get("analysis") or {}
-                issue_active = severity in {"warning", "critical"} and bool(issue_fingerprint)
+                if api_degraded and not runtime_issue:
+                    append_youtube_autotune_history(state, {
+                        **event,
+                        "outcome": "api_retry",
+                        "after": event["before"],
+                        "retry_after_seconds": max(0, int(float(entry.get("next_api_retry_at") or now) - now)),
+                    })
+                    continue
+                issue_active = (
+                    severity in {"warning", "critical"} and bool(issue_fingerprint)
+                ) or runtime_issue or (api_degraded and bool(previous_fingerprint))
                 if not issue_active:
-                    entry["consecutive_issues"] = 0
-                    entry["active_issue_fingerprint"] = ""
-                    entry["episode_adjustments"] = 0
-                    entry["recovery_applied"] = False
-                    entry["last_error"] = ""
-                    append_youtube_autotune_history(state, {**event, "outcome": "no_change", "after": event["before"]})
+                    if int(entry.get("episode_adjustments") or 0) and entry.get("baseline_config"):
+                        stable_since = float(entry.get("stable_since") or 0)
+                        if not stable_since:
+                            stable_since = now
+                            entry["stable_since"] = stable_since
+                        stable_for = max(0, now - stable_since)
+                        recovery_diff = youtube_autotune_recovery_diff(stream_config, entry, profile)
+                        if stable_for < recovery_wait:
+                            event["stable_for_seconds"] = round(stable_for, 1)
+                            event["recovery_wait_seconds"] = recovery_wait
+                            append_youtube_autotune_history(state, {**event, "outcome": "stable_wait", "after": event["before"]})
+                            continue
+                        if not recovery_diff:
+                            entry["consecutive_issues"] = 0
+                            entry["active_issue_fingerprint"] = ""
+                            entry["episode_adjustments"] = 0
+                            entry["baseline_config"] = {}
+                            entry["stable_since"] = 0
+                            append_youtube_autotune_history(state, {**event, "outcome": "recovered", "after": event["before"]})
+                            continue
+                        event["changes"] = youtube_autotune_parameter_snapshot(recovery_diff)
+                        event["recommendation_reasons"] = list(event["recommendation_reasons"]) + [
+                            f"The stream stayed stable for {int(stable_for // 60)} minutes; restore one quality level only."
+                        ]
+                        recovery_payload = dict(stream_config)
+                        recovery_payload.update(recovery_diff)
+                        recovery_payload["stream_key"] = ""
+                        recovery_payload["youtube_profile_id"] = profile_id
+                        recovery_payload = issue_policy(recovery_payload, reason="autotune-recovery")
+                        result = post_node_json(node, "/api/start-stream", recovery_payload, timeout=60)
+                        entry["last_recovery_at"] = now
+                        entry["last_result"] = redacted_stream_result(result)
+                        if result.get("ok"):
+                            entry["episode_adjustments"] = max(0, int(entry.get("episode_adjustments") or 0) - 1)
+                            entry["recovery_level"] = int(entry.get("recovery_level") or 0) + 1
+                            entry["stable_since"] = now
+                            append_youtube_autotune_history(state, {
+                                **event,
+                                "outcome": "recovered_one_level",
+                                "after": recovery_payload,
+                                "agent_message": str(result.get("message") or "Agent parameters restored")[:500],
+                            })
+                        else:
+                            entry["last_error"] = result.get("message") or "recovery restart failed"
+                            append_youtube_autotune_history(state, {
+                                **event,
+                                "outcome": "recovery_failed",
+                                "after": event["before"],
+                                "error": str(entry["last_error"])[:500],
+                            })
+                    else:
+                        entry["consecutive_issues"] = 0
+                        entry["active_issue_fingerprint"] = ""
+                        entry["episode_adjustments"] = 0
+                        entry["recovery_applied"] = False
+                        entry["last_error"] = ""
+                        append_youtube_autotune_history(state, {**event, "outcome": "no_change", "after": event["before"]})
                     continue
                 if entry.get("recovery_applied"):
                     append_youtube_autotune_history(state, {**event, "outcome": "observing", "after": event["before"]})
@@ -674,6 +926,11 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     continue
                 entry["consecutive_issues"] = int(entry.get("consecutive_issues") or 0) + 1
                 entry["pending_diff"] = diff
+                entry.setdefault(
+                    "baseline_config",
+                    {key: stream_config.get(key) for key in ("preset", "fps", "resolution", "video_bitrate", "audio_bitrate", "keyframe_seconds")},
+                )
+                entry["stable_since"] = 0
                 required_checks = 2 if severity == "critical" else 3
                 if entry["consecutive_issues"] < required_checks:
                     append_youtube_autotune_history(state, {**event, "outcome": "pending", "after": event["before"]})
@@ -681,33 +938,18 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 if now - float(entry.get("last_adjusted") or 0) < cooldown:
                     append_youtube_autotune_history(state, {**event, "outcome": "cooldown", "after": event["before"]})
                     continue
-                recovery_action = int(entry.get("episode_adjustments") or 0) >= 2
-                if recovery_action:
-                    recovery_bitrate = int(entry.get("youtube_recommended_bitrate") or 0) or youtube_autotune_resolution_bitrate(stream_config)
-                    recovery_recommendation = dict(recommendation)
-                    recovery_recommendation["video_bitrate"] = recovery_bitrate
-                    diff = youtube_autotune_payload_diff(stream_config, recovery_recommendation, profile)
-                    event["recommended"] = youtube_autotune_parameter_snapshot(recovery_recommendation)
-                    event["changes"] = youtube_autotune_parameter_snapshot(diff)
-                    event["recommendation_reasons"] = list(event["recommendation_reasons"]) + [
-                        f"The same YouTube problem remained after two changes; restore the recommended {recovery_bitrate} Kbps on the third change."
-                    ]
-                    entry["pending_diff"] = diff
-                    if not diff:
-                        entry["recovery_applied"] = True
-                        append_youtube_autotune_history(state, {**event, "outcome": "observing", "after": event["before"]})
-                        continue
                 payload = dict(stream_config)
                 payload.update(diff)
                 payload["stream_key"] = ""
                 payload["youtube_profile_id"] = profile_id
+                payload = issue_policy(payload, reason=f"autotune:{issue_fingerprint or 'runtime'}")
                 result = post_node_json(node, "/api/start-stream", payload, timeout=60)
                 entry["last_adjusted"] = now
                 entry["last_result"] = redacted_stream_result(result)
                 if result.get("ok"):
                     adjusted += 1
-                    entry["episode_adjustments"] = 3 if recovery_action else int(entry.get("episode_adjustments") or 0) + 1
-                    entry["recovery_applied"] = recovery_action
+                    entry["episode_adjustments"] = int(entry.get("episode_adjustments") or 0) + 1
+                    entry["recovery_applied"] = False
                     entry["consecutive_issues"] = 0
                     entry["last_error"] = ""
                     verified_status = request_node_json(node, "/api/status", timeout=8)
@@ -8831,6 +9073,12 @@ def schedule_agent_role_activation(
     agent_name: str = "",
     agent_token: str = "",
 ) -> dict[str, Any]:
+    try:
+        assert_role("agent", ROOT)
+    except RoleConflictError as exc:
+        raise RuntimeError(f"role switch requires HUB deactivation first: {exc}") from exc
+    if service_active("stream-control-hub.service"):
+        raise RuntimeError("HUB service is active; deactivate the HUB role before activating Agent")
     if not shutil.which("systemd-run"):
         raise RuntimeError("systemd-run is required to activate the Agent role")
     unit = f"stream-control-agent-activate-{int(time.time())}"
@@ -8865,14 +9113,26 @@ def schedule_agent_role_activation(
 
 
 def schedule_hub_upgrade() -> dict[str, Any]:
+    try:
+        assert_role("hub", ROOT)
+    except RoleConflictError as exc:
+        raise RuntimeError(str(exc)) from exc
     if not shutil.which("systemd-run") or not (ROOT / ".git").exists():
         raise RuntimeError("Hub must be a Git-managed systemd installation")
     unit = f"stream-control-hub-upgrade-{int(time.time())}"
     root = shlex.quote(str(ROOT))
+    data_dir = shlex.quote(str(DATA_DIR))
+    branch = shlex.quote(SOURCE_BRANCH)
+    lock_file = shlex.quote(str(DATA_DIR / ".upgrade.lock"))
     script = (
-        "set -eu; sleep 2; "
-        f"git -C {root} fetch origin main; git -C {root} checkout main; "
-        f"git -C {root} pull --ff-only origin main; env BRANCH=main CHOICE=1 "
+        "set -eu; "
+        f"mkdir -p {data_dir}; "
+        f"if command -v flock >/dev/null 2>&1; then exec 9>{lock_file}; flock -n 9 || exit 75; "
+        f"else lock_dir={lock_file}.d; mkdir \"$lock_dir\" || exit 75; "
+        "trap 'rmdir \"$lock_dir\" >/dev/null 2>&1 || true' EXIT; fi; "
+        "sleep 2; "
+        f"test -z \"$(git -C {root} status --porcelain --untracked-files=no)\"; "
+        f"env BRANCH={branch} CHOICE=1 "
         f"INSTALL_DIR={root} "
         f"STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 sh {root}/scripts/install-hub.sh"
     )
@@ -8884,7 +9144,7 @@ def schedule_hub_upgrade() -> dict[str, Any]:
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "failed to schedule Hub upgrade").strip())
-    return {"unit": unit, "role": "hub", "from_version": local_git_version(), "target_branch": "main"}
+    return {"unit": unit, "role": "hub", "from_version": local_git_version(), "target_branch": SOURCE_BRANCH}
 
 
 def schedule_hub_deactivation() -> dict[str, Any]:
@@ -10595,7 +10855,12 @@ def api_hub_role_status():
     return jsonify({
         "ok": True,
         "roles": {
-            "hub": {"enabled": True, "version": local_git_version(), "url": f"http://{host}:{PORT}"},
+            "hub": {
+                "enabled": True,
+                "version": local_git_version(),
+                "policy_version": POLICY_VERSION,
+                "url": f"http://{host}:{PORT}",
+            },
             "agent": {
                 "enabled": service_active("stream-control-headless-agent.service"),
                 "prepared": (ROOT / "scripts" / "install-agent.sh").exists(),
@@ -10621,7 +10886,7 @@ def api_activate_agent_role():
         )
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
-    return jsonify({"ok": True, "accepted": True, "message": "Agent activation scheduled; Hub remains active", "result": result}), 202
+    return jsonify({"ok": True, "accepted": True, "message": "Agent activation scheduled after the HUB role has been deactivated", "result": result}), 202
 
 
 @APP.post("/api/roles/hub/deactivate")
@@ -10644,7 +10909,7 @@ def api_upgrade_hub():
         result = schedule_hub_upgrade()
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
-    return jsonify({"ok": True, "accepted": True, "message": "Hub upgrade scheduled; Agent remains active", "result": result}), 202
+    return jsonify({"ok": True, "accepted": True, "message": "HUB upgrade scheduled; only the HUB service will be restarted", "result": result}), 202
 
 
 @APP.get("/api/media")
@@ -11241,6 +11506,7 @@ def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
         "fps": int(payload.get("fps") or 30),
         "resolution": str(payload.get("resolution") or "1280x720").strip() or "1280x720",
         "keyframe_seconds": int(payload.get("keyframe_seconds") or 2),
+        "motion_level": str(payload.get("motion_level") or "").strip().lower(),
     }
 
 
@@ -11316,6 +11582,9 @@ def api_nodes_stream_recommend():
         return jsonify({"ok": False, "message": "node disabled"}), 409
     node_payload = stream_payload_for_node(payload)
     node_payload["stream_key"] = ""
+    if node_payload.get("motion_level") not in {"static", "medium", "dynamic"}:
+        cached = cached_motion_profile(node_id, node_payload.get("video_path") or "")
+        node_payload["motion_level"] = str((cached or {}).get("level") or "medium")
     youtube_client = youtube_client_for_id(str(node_payload.get("youtube_profile_id") or ""))
     result = post_node_json(node, "/api/stream/recommend", node_payload, timeout=45)
     if (
@@ -11372,6 +11641,8 @@ def api_nodes_stream_start():
         except Exception as exc:
             if not youtube_api_error_is_transient(exc):
                 return youtube_error_response(exc)
+    node_payload = issue_policy(node_payload, reason="hub-stream-start")
+    motion_analysis: dict[str, Any] = {"scheduled": False, "cached": False}
     result = post_node_json(node, "/api/start-stream", node_payload, timeout=60)
     if result.get("ok"):
         with suppress(Exception):
@@ -11384,10 +11655,13 @@ def api_nodes_stream_start():
                 "media_local": node_payload.get("media_local"),
                 "source_node_id": node_payload.get("source_node_id"),
             })
+        if node_payload.get("adaptive_mode") != "off":
+            motion_analysis = schedule_motion_analysis(node, node_payload.get("video_path") or "")
     status_code = 200 if result.get("ok") else 502
     return jsonify({
         "node_id": node_id,
         "media_ensure": ensured,
+        "motion_analysis": motion_analysis,
         **redacted_stream_result(result),
     }), status_code
 
@@ -11557,6 +11831,9 @@ def api_youtube_profile_save():
         "auto_tune_enabled": bool(payload.get("auto_tune_enabled")),
         "auto_tune_interval_seconds": max(60, min(3600, int(payload.get("auto_tune_interval_seconds") or 300))),
         "auto_tune_cooldown_seconds": max(60, min(7200, int(payload.get("auto_tune_cooldown_seconds") or 900))),
+        "auto_tune_recovery_stable_seconds": max(
+            1200, min(86400, int(payload.get("auto_tune_recovery_stable_seconds") or YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS))
+        ),
         "auto_tune_min_bitrate": max(300, min(20000, int(payload.get("auto_tune_min_bitrate") or 800))),
         "auto_tune_max_bitrate": max(800, min(40000, int(payload.get("auto_tune_max_bitrate") or 40000))),
     }
@@ -12038,6 +12315,7 @@ def api_deactivate_node_role(role: str):
 
 
 def main() -> None:
+    assert_role("hub", ROOT)
     ensure_dirs()
     threading.Thread(target=youtube_autotune_loop, name="youtube-autotune", daemon=True).start()
     threading.Thread(target=offline_node_retention_loop, name="offline-node-retention", daemon=True).start()
