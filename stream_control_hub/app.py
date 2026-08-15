@@ -94,6 +94,13 @@ YOUTUBE_USAGE_FILE = DATA_DIR / "youtube_api_usage.json"
 YOUTUBE_AUTOTUNE_STATE_FILE = DATA_DIR / "youtube_autotune_state.json"
 YOUTUBE_AUTOTUNE_HISTORY_LIMIT = 50
 YOUTUBE_AUTOTUNE_HISTORY_TOTAL_LIMIT = 500
+YOUTUBE_AUTOTUNE_API_RETRY_BASE_SECONDS = max(
+    15, int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_API_RETRY_BASE_SECONDS", "30"))
+)
+YOUTUBE_AUTOTUNE_API_RETRY_MAX_SECONDS = max(
+    YOUTUBE_AUTOTUNE_API_RETRY_BASE_SECONDS,
+    int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_API_RETRY_MAX_SECONDS", "300")),
+)
 YOUTUBE_PROFILE_CREDENTIALS_DIR = DATA_DIR / "youtube_profile_credentials"
 YOUTUBE_DEFAULT_PROFILE_ID = "default"
 YOUTUBE_PROFILE_LOCK = threading.RLock()
@@ -543,6 +550,20 @@ def append_youtube_autotune_history(state: dict[str, Any], event: dict[str, Any]
     state["history"] = retained
 
 
+def youtube_api_error_is_transient(exc: Exception) -> bool:
+    if isinstance(exc, YouTubeAPIError):
+        return bool(getattr(exc, "transient", False) or exc.status_code in {429, 500, 502, 503, 504})
+    return isinstance(exc, requests.RequestException)
+
+
+def youtube_autotune_api_retry_delay(entry: dict[str, Any]) -> int:
+    failures = max(1, int(entry.get("api_failures") or 1))
+    return min(
+        YOUTUBE_AUTOTUNE_API_RETRY_MAX_SECONDS,
+        YOUTUBE_AUTOTUNE_API_RETRY_BASE_SECONDS * (2 ** min(failures - 1, 6)),
+    )
+
+
 def youtube_autotune_tick() -> dict[str, Any]:
     with YOUTUBE_AUTOTUNE_LOCK:
         now = time.time()
@@ -574,7 +595,10 @@ def youtube_autotune_tick() -> dict[str, Any]:
             cooldown = max(60, int(profile.get("auto_tune_cooldown_seconds") or 900))
             key = f"{node.get('id')}:{profile_id}:{stream_config.get('youtube_stream_id')}"
             entry = entries.setdefault(key, {"consecutive_issues": 0, "last_check": 0, "last_adjusted": 0})
-            if now - float(entry.get("last_check") or 0) < interval:
+            next_api_retry_at = float(entry.get("next_api_retry_at") or 0)
+            if next_api_retry_at and now < next_api_retry_at:
+                continue
+            if not next_api_retry_at and now - float(entry.get("last_check") or 0) < interval:
                 continue
             entry["last_check"] = now
             checked += 1
@@ -590,9 +614,14 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 client = youtube_client_for_id(profile_id)
                 if not client.local_status().get("authorized"):
                     entry["last_error"] = "profile is not authorized"
+                    entry.pop("next_api_retry_at", None)
+                    entry["api_failures"] = 0
                     append_youtube_autotune_history(state, {**event, "outcome": "error", "error": entry["last_error"]})
                     continue
                 health = client.stream_health(str(stream_config.get("youtube_stream_id") or ""), stream_config)
+                entry.pop("next_api_retry_at", None)
+                entry["api_failures"] = 0
+                entry["last_error"] = ""
                 recommendation = health.get("recommendation") or {}
                 severity = str(health.get("severity") or "").lower()
                 issue_fingerprint = youtube_autotune_issue_fingerprint(health)
@@ -672,8 +701,6 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 payload.update(diff)
                 payload["stream_key"] = ""
                 payload["youtube_profile_id"] = profile_id
-                if not payload.get("youtube_ingestion_url"):
-                    payload["youtube_ingestion_url"] = client.ingestion_target(str(payload.get("youtube_stream_id") or ""))
                 result = post_node_json(node, "/api/start-stream", payload, timeout=60)
                 entry["last_adjusted"] = now
                 entry["last_result"] = redacted_stream_result(result)
@@ -701,6 +728,20 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     })
             except Exception as exc:
                 entry["last_error"] = str(exc)
+                if youtube_api_error_is_transient(exc):
+                    entry["api_failures"] = int(entry.get("api_failures") or 0) + 1
+                    retry_after_seconds = youtube_autotune_api_retry_delay(entry)
+                    entry["next_api_retry_at"] = now + retry_after_seconds
+                    append_youtube_autotune_history(state, {
+                        **event,
+                        "outcome": "api_retry",
+                        "after": event["before"],
+                        "error": str(exc)[:500],
+                        "retry_after_seconds": retry_after_seconds,
+                    })
+                    continue
+                entry.pop("next_api_retry_at", None)
+                entry["api_failures"] = 0
                 append_youtube_autotune_history(state, {
                     **event,
                     "outcome": "error",
@@ -11329,7 +11370,8 @@ def api_nodes_stream_start():
         try:
             node_payload["youtube_ingestion_url"] = youtube_client_for_id(str(node_payload.get("youtube_profile_id") or "")).ingestion_target(node_payload["youtube_stream_id"])
         except Exception as exc:
-            return youtube_error_response(exc)
+            if not youtube_api_error_is_transient(exc):
+                return youtube_error_response(exc)
     result = post_node_json(node, "/api/start-stream", node_payload, timeout=60)
     if result.get("ok"):
         with suppress(Exception):

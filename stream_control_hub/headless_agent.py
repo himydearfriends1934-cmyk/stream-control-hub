@@ -1334,10 +1334,22 @@ def stream_output_url(payload: dict[str, Any]) -> str:
         hub_ingestion_url = str(payload.get("youtube_ingestion_url") or "").strip()
         if hub_ingestion_url.lower().startswith(("rtmp://", "rtmps://")):
             return hub_ingestion_url
+        cached_ingestion_url = cached_youtube_ingestion_url(str(payload.get("youtube_stream_id") or ""))
+        if cached_ingestion_url:
+            return cached_ingestion_url
         return YOUTUBE_CLIENT.ingestion_target(str(payload.get("youtube_stream_id") or ""))
     if not stream_key:
         raise ValueError("missing stream key")
     return f"{stream_url}/{stream_key}"
+
+
+def cached_youtube_ingestion_url(stream_id: str) -> str:
+    """Reuse the private target only for the exact stream already known to this Agent."""
+    cached = load_stream_restart_payload() or {}
+    if str(cached.get("youtube_stream_id") or "").strip() != stream_id.strip():
+        return ""
+    value = str(cached.get("youtube_ingestion_url") or "").strip()
+    return value if value.lower().startswith(("rtmp://", "rtmps://")) else ""
 
 
 def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -> list[str]:
@@ -1473,7 +1485,13 @@ def launch_stream_process(
     output_url = resolved_output_url or stream_output_url(payload)
     command = ffmpeg_command(payload, video_path, output_url)
     if persist_recovery:
-        save_stream_restart_payload(payload, video_path)
+        recovery_payload = dict(payload)
+        if (
+            str(recovery_payload.get("stream_output_mode") or "").strip().lower() == "youtube_api"
+            and not recovery_payload.get("youtube_ingestion_url")
+        ):
+            recovery_payload["youtube_ingestion_url"] = output_url
+        save_stream_restart_payload(recovery_payload, video_path)
 
     log_path = DATA_DIR / "ffmpeg.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)

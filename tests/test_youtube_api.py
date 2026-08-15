@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from stream_control_hub.youtube_api import YouTubeAPIClient, YouTubeAPIError, youtube_health_recommendation
 
 
@@ -196,6 +198,26 @@ class YouTubeAPIClientTests(unittest.TestCase):
 
         self.assertEqual(recorded, [("GET", "liveStreams", 1)])
 
+    def test_client_retries_transient_youtube_health_failure(self):
+        response = FakeResponse({
+            "items": [{
+                "id": "stream-1",
+                "status": {"streamStatus": "active", "healthStatus": {"status": "good"}},
+                "cdn": {},
+            }],
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            client = YouTubeAPIClient(client_id="client-id", credential_path=Path(tmp) / "credentials.json")
+            with patch.object(client, "_access_token_value", return_value="access-token"), patch(
+                "stream_control_hub.youtube_api.requests.request",
+                side_effect=[requests.ConnectionError("temporary network failure"), response],
+            ) as request, patch("stream_control_hub.youtube_api.time.sleep") as sleep:
+                health = client.stream_health("stream-1", {"video_bitrate": 4000})
+
+        self.assertTrue(health["ok"])
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once()
+
     def test_stream_list_reads_paginated_results(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = YouTubeAPIClient(client_id="client-id", credential_path=Path(tmp) / "credentials.json")
@@ -308,6 +330,26 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(output, "rtmp://example.test/live2/private-stream-name")
         target.assert_called_once_with("stream-1")
 
+    def test_agent_reuses_private_target_when_youtube_api_is_temporarily_unavailable(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recovery_file = Path(tmp) / "stream-restart.json"
+            with patch.object(headless_agent, "STREAM_RESTART_FILE", recovery_file):
+                headless_agent.write_private_json(recovery_file, {
+                    "stream_output_mode": "youtube_api",
+                    "youtube_stream_id": "stream-1",
+                    "youtube_ingestion_url": "rtmps://example.test/live/private-stream-name",
+                })
+                with patch.object(headless_agent.YOUTUBE_CLIENT, "ingestion_target") as target:
+                    output = headless_agent.stream_output_url({
+                        "stream_output_mode": "youtube_api",
+                        "youtube_stream_id": "stream-1",
+                    })
+
+        self.assertEqual(output, "rtmps://example.test/live/private-stream-name")
+        target.assert_not_called()
+
     def test_hub_forwards_youtube_stream_id_without_credentials(self):
         from stream_control_hub import app
 
@@ -374,6 +416,38 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(settings["node_youtube_profiles"]["node-a"], "default")
         self.assertEqual(settings["node_stream_locks"]["node-a"]["youtube_stream_id"], "stream-1")
         self.assertEqual(settings["node_stream_locks"]["node-a"]["video_path"], "video.mp4")
+
+    def test_hub_uses_existing_agent_target_when_youtube_lookup_is_temporarily_unavailable(self):
+        from stream_control_hub import app
+
+        node = {"id": "node-a", "base_url": "http://100.64.0.10:8787", "enabled": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            settings_file = Path(tmp) / "hub-settings.json"
+            nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            youtube_client = MagicMock()
+            youtube_client.ingestion_target.side_effect = YouTubeAPIError(
+                "temporary YouTube outage", status_code=503, transient=True
+            )
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "HUB_SETTINGS_FILE", settings_file
+            ), patch.object(
+                app, "youtube_client_for_id", return_value=youtube_client
+            ), patch.object(
+                app, "post_node_json", return_value={"ok": True, "result": {"started_pid": 4101}}
+            ) as post:
+                response = app.APP.test_client().post(
+                    "/api/nodes/stream/start",
+                    json={
+                        "node_id": "node-a",
+                        "video_path": "video.mp4",
+                        "stream_output_mode": "youtube_api",
+                        "youtube_stream_id": "stream-1",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(post.call_args.args[2].get("youtube_ingestion_url"), "")
 
     def test_agent_saves_youtube_config_and_reloads_client(self):
         from stream_control_hub import headless_agent
@@ -944,6 +1018,85 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertTrue(any("videoBitrateIsHigh" in item for item in event["api_problems"]))
         self.assertIn("Reduce bitrate", event["recommendation_reasons"])
         self.assertNotIn("youtube_ingestion_url", json.dumps(event))
+
+    def test_autotune_retries_transient_api_failure_without_losing_confirmation(self):
+        from stream_control_hub import app
+
+        stream_config = {
+            "stream_output_mode": "youtube_api",
+            "youtube_stream_id": "stream-a",
+            "youtube_profile_id": "account-a",
+            "adaptive_mode": "auto",
+            "resolution": "1280x720",
+            "fps": 30,
+            "video_bitrate": 6000,
+            "audio_bitrate": 128,
+            "preset": "veryfast",
+            "keyframe_seconds": 2,
+        }
+        health = {
+            "ok": True,
+            "severity": "critical",
+            "health": {"configuration_issues": [{"type": "videoBitrateIsHigh", "severity": "error"}]},
+            "analysis": {"reasons": ["Reduce bitrate"], "warnings": []},
+            "recommendation": {**stream_config, "video_bitrate": 4800},
+        }
+        youtube_client = MagicMock()
+        youtube_client.local_status.return_value = {"authorized": True}
+        youtube_client.stream_health.side_effect = [
+            YouTubeAPIError("temporary YouTube outage", status_code=503, transient=True),
+            health,
+        ]
+        statuses = MagicMock(side_effect=[
+            {"ok": True, "stream": {"running": True}, "stream_config": stream_config},
+            {"ok": True, "stream": {"running": True}, "stream_config": stream_config},
+            {"ok": True, "stream_config": {**stream_config, "video_bitrate": 4800}},
+        ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "youtube_autotune_state.json"
+            state_file.write_text(json.dumps({
+                "entries": {
+                    "node-a:account-a:stream-a": {
+                        "consecutive_issues": 1,
+                        "active_issue_fingerprint": "videobitrateishigh",
+                        "last_check": 0,
+                        "last_adjusted": 0,
+                    }
+                }
+            }), encoding="utf-8")
+            with patch.object(app, "YOUTUBE_AUTOTUNE_STATE_FILE", state_file), patch.object(
+                app, "load_youtube_profiles_config", return_value={
+                    "active_profile_id": "account-a",
+                    "profiles": [{
+                        "id": "account-a",
+                        "auto_tune_enabled": True,
+                        "auto_tune_interval_seconds": 300,
+                        "auto_tune_cooldown_seconds": 60,
+                        "auto_tune_min_bitrate": 800,
+                        "auto_tune_max_bitrate": 6000,
+                    }],
+                }
+            ), patch.object(app, "load_nodes", return_value=[{"id": "node-a", "name": "Node A", "enabled": True}]), patch.object(
+                app, "request_node_json", statuses
+            ), patch.object(app, "youtube_client_for_id", return_value=youtube_client), patch.object(
+                app, "post_node_json", return_value={"ok": True, "message": "stream restarted"}
+            ) as post:
+                with patch.object(app.time, "time", return_value=10_000):
+                    first = app.youtube_autotune_tick()
+                with patch.object(app.time, "time", return_value=10_030):
+                    second = app.youtube_autotune_tick()
+            saved = json.loads(state_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(first["adjusted"], 0)
+        self.assertEqual(second["adjusted"], 1)
+        self.assertNotIn("youtube_ingestion_url", post.call_args.args[2])
+        youtube_client.ingestion_target.assert_not_called()
+        entry = saved["entries"]["node-a:account-a:stream-a"]
+        self.assertEqual(entry["api_failures"], 0)
+        self.assertNotIn("next_api_retry_at", entry)
+        self.assertEqual(saved["history"][0]["outcome"], "adjusted")
+        self.assertEqual(saved["history"][1]["outcome"], "api_retry")
 
     def test_autotune_skips_stream_when_adaptive_mode_is_off(self):
         from stream_control_hub import app
