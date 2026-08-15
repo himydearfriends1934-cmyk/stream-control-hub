@@ -189,38 +189,87 @@ def schedule_agent_upgrade() -> dict[str, Any]:
     }
 
 
+HUB_SEED_RUNTIME_KEYS = {
+    "public_base_url",
+    "upload_base_url",
+    "upload_base_urls",
+    "offline_since",
+    "hub_only",
+    "hub_connected_at",
+    "hub_url",
+    "control_hub_url",
+    "role_hints",
+}
+
+
+def clean_hub_seed_nodes(seed_nodes: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for raw in seed_nodes or []:
+        if not isinstance(raw, dict):
+            continue
+        node = dict(raw)
+        for key in HUB_SEED_RUNTIME_KEYS:
+            node.pop(key, None)
+        if str(node.get("id") or "").strip():
+            cleaned.append(node)
+    return cleaned
+
+
+def hub_seed_file() -> Path:
+    return DATA_DIR / "hub-seed-nodes.json"
+
+
+def clear_hub_seed_file() -> None:
+    seed_file = hub_seed_file()
+    seed_file.parent.mkdir(parents=True, exist_ok=True)
+    seed_file.unlink(missing_ok=True)
+
+
 def schedule_hub_activation(seed_nodes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    if not shutil.which("systemd-run"):
-        raise RuntimeError("systemd-run is required to activate the Hub role")
     status = tailscale_status()
     tailscale_ips = (status.get("self") or {}).get("tailscale_ips") or []
     tailscale_ip = next((str(item) for item in tailscale_ips if str(item).startswith("100.")), "")
     if not tailscale_ip:
         raise RuntimeError("a Tailscale IPv4 address is required before activating the Hub role")
+
+    clean_nodes = clean_hub_seed_nodes(seed_nodes)
+    seed_count = len(clean_nodes)
+    seed_file = hub_seed_file()
+    seed_file.parent.mkdir(parents=True, exist_ok=True)
+    seed_file.write_text(json.dumps(clean_nodes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    seed_file.chmod(0o600)
+
+    if systemd_service_active("stream-control-hub.service"):
+        clear_hub_seed_file()
+        return {
+            "role": "hub",
+            "already_active": True,
+            "url": f"http://{tailscale_ip}:8788",
+            "seed_node_count": seed_count,
+        }
+    if not shutil.which("systemd-run"):
+        clear_hub_seed_file()
+        raise RuntimeError("systemd-run is required to activate the Hub role")
+
     unit = f"stream-control-hub-activate-{int(time.time())}"
     root = shlex.quote(str(ROOT))
     host = shlex.quote(tailscale_ip)
-    seed_count = 0
-    seed_file = DATA_DIR / "hub-seed-nodes.json"
-    if seed_nodes is not None:
-        ensure_dirs()
-        clean_nodes = [dict(item) for item in seed_nodes if isinstance(item, dict)]
-        seed_count = len(clean_nodes)
-        seed_file.write_text(json.dumps(clean_nodes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        seed_file.chmod(0o600)
     seed_path = shlex.quote(str(seed_file))
     script = (
-        "set -eu; sleep 2; "
+        "set -eu; "
+        f"trap 'rm -f {seed_path}' EXIT; "
+        "sleep 2; "
         f"env INSTALL_DIR={root} STREAM_HUB_HOST={host} "
         "STREAM_HUB_SERVICE_MODE=system STREAM_HUB_TRUSTED_REMOTE_WRITES=1 "
         "STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 "
         f"CHOICE=1 sh {root}/scripts/install-hub.sh; "
-        f"if [ -s {seed_path} ]; then "
+        f"if [ -s {seed_path} ] && grep -Eq '\"id\"[[:space:]]*:' {seed_path}; then "
         f"mkdir -p {root}/data; "
         f"cp {seed_path} {root}/data/nodes.local.json; "
         f"chmod 600 {root}/data/nodes.local.json; "
         "systemctl restart stream-control-hub.service >/dev/null 2>&1 || true; "
-        "fi"
+        "fi; "
+        f"rm -f {seed_path}"
     )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
@@ -229,21 +278,26 @@ def schedule_hub_activation(seed_nodes: list[dict[str, Any]] | None = None) -> d
         timeout=15,
     )
     if result.returncode != 0:
+        clear_hub_seed_file()
         raise RuntimeError((result.stderr or result.stdout or "failed to schedule Hub activation").strip())
     return {"unit": unit, "role": "hub", "url": f"http://{tailscale_ip}:8788", "seed_node_count": seed_count}
 
 
 def schedule_hub_deactivation() -> dict[str, Any]:
+    clear_hub_seed_file()
     if not shutil.which("systemd-run"):
         raise RuntimeError("systemd-run is required to deactivate the Hub role")
     unit = f"stream-control-hub-deactivate-{int(time.time())}"
     root = shlex.quote(str(ROOT))
+    seed_path = shlex.quote(str(hub_seed_file()))
     script = (
-        "set -eu; sleep 2; "
+        "set -eu; "
+        f"trap 'rm -f {seed_path}' EXIT; "
+        "sleep 2; "
         f"if [ -x {root}/scripts/install-hub.sh ]; then "
         f"ACTION=uninstall REMOVE_DATA=0 INSTALL_DIR={root} "
         f"STREAM_HUB_SERVICE_MODE=system sh {root}/scripts/install-hub.sh; "
-        "else systemctl disable --now stream-control-hub.service >/dev/null 2>&1 || true; fi"
+        "else systemctl disable --now stream-control-hub.service >/dev/null 2>&1 || true; fi; "
     )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
@@ -2699,12 +2753,16 @@ def api_activate_hub_role():
         result = schedule_hub_activation(seed_nodes if isinstance(seed_nodes, list) else None)
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
+    already_active = bool(result.get("already_active"))
     return jsonify({
         "ok": True,
-        "accepted": True,
-        "message": "Hub activation scheduled; the Agent role will remain active",
+        "accepted": not already_active,
+        "already_active": already_active,
+        "message": "Hub already active; no new activation task was created"
+        if already_active
+        else "Hub activation scheduled; the Agent role will remain active",
         "result": result,
-    }), 202
+    }), 200 if already_active else 202
 
 
 @APP.post("/api/roles/hub/deactivate")

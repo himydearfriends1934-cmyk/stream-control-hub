@@ -2018,6 +2018,14 @@ HTML = r"""
     .control-transfer-box { display: grid; gap: 8px; margin-top: 10px; padding: 10px; border: 1px dashed var(--line); border-radius: 10px; background: rgba(7,18,14,.42); }
     .control-transfer-box h3 { margin: 0; font-size: 15px; }
     .control-transfer-box input { width: 100%; }
+    .control-transfer-box select { width: 100%; }
+    .tailscale-peer-list { display: grid; gap: 7px; }
+    .tailscale-peer-option { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: rgba(7,18,14,.5); text-align: left; }
+    .tailscale-peer-option:hover, .tailscale-peer-option:focus-visible { border-color: var(--accent); background: rgba(54,211,153,.1); }
+    .tailscale-peer-option small { grid-column: 1 / -1; color: var(--muted); }
+    .tailscale-peer-option strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tailscale-peer-option .peer-action { color: var(--accent); font-size: 12px; font-weight: 800; }
+    .tailscale-peer-toolbar { display: flex; justify-content: flex-end; }
     .choice-modal { width: min(560px, calc(100vw - 28px)); text-align: left; }
     .choice-modal .choice-icon { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 16px; background: rgba(251, 191, 36, .16); color: #ffd166; font-size: 24px; box-shadow: inset 0 0 0 1px rgba(251, 191, 36, .32); }
     .choice-modal .wizard-head { align-items: center; }
@@ -2680,11 +2688,12 @@ HTML = r"""
         <button class="danger" id="roleSettingsDeleteNodeBtn">删除节点</button>
       </div>
       <div class="control-transfer-box">
-        <h3>Hub 控制转移 / 换平台</h3>
-        <p>把当前 Hub 的节点信息合并导入到新 Hub，新 Hub 会接管这些 Agent / Hub 节点的控制入口。</p>
-        <input id="transferHubUrlInput" placeholder="新 Hub Tailscale IP 或地址，例如 100.x.x.x">
-        <input id="transferHubTokenInput" placeholder="新 Hub 控制 Token（如果新 Hub 设置了 Token）">
-        <button id="transferHubNodesBtn" class="primary">转移当前 Hub 节点信息到新 Hub</button>
+        <h3>更换控制 Hub</h3>
+        <p>选择已激活且在线的 Hub，系统会自动转移节点信息并打开新控制台。</p>
+        <select id="transferHubNodeSelect" aria-label="选择新的控制 Hub">
+          <option value="">正在读取可用 Hub...</option>
+        </select>
+        <button id="transferHubNodesBtn" class="primary">一键转移并打开新 Hub</button>
         <button id="syncAllHubsBtn">同步节点信息到所有已激活 Hub</button>
       </div>
       <p>保护规则：点击操作后还会显示当前状态与影响范围，必须再次确认才会执行。</p>
@@ -2741,16 +2750,12 @@ HTML = r"""
         </div>
         <button class="wizard-close" id="tailscaleWizardClose" title="关闭">X</button>
       </div>
-      <div class="wizard-existing-grid">
-        <div class="wizard-field">
-          <label>Tailscale IP</label>
-          <input id="tailscaleExistingIpInput" type="text" autocomplete="off" placeholder="100.x.x.x">
+      <div class="wizard-status">
+        <div class="wizard-status-line"><strong>选择在线设备</strong><span>点击设备即可自动检测、配对并绑定到当前 Hub。</span></div>
+        <div class="tailscale-peer-toolbar">
+          <button id="refreshTailscalePeersBtn" type="button">刷新设备</button>
         </div>
-        <div class="wizard-field">
-          <label>Agent Token</label>
-          <input id="tailscaleExistingTokenInput" type="password" autocomplete="off" placeholder="optional">
-        </div>
-        <button class="primary wide-action" id="tailscaleUseExistingIpBtn">检测并连接</button>
+        <div class="tailscale-peer-list" id="tailscalePeerList">正在读取 Tailnet 设备...</div>
       </div>
       <div class="wizard-status">
         <div class="wizard-status-line"><strong>目标 VPS 尚未安装 Agent？</strong></div>
@@ -2915,8 +2920,7 @@ HTML = r"""
       choiceSubtitle: document.getElementById("choiceSubtitle"),
       choiceMessage: document.getElementById("choiceMessage"),
       choiceActions: document.getElementById("choiceActions"),
-      transferHubUrlInput: document.getElementById("transferHubUrlInput"),
-      transferHubTokenInput: document.getElementById("transferHubTokenInput"),
+      transferHubNodeSelect: document.getElementById("transferHubNodeSelect"),
       transferHubNodesBtn: document.getElementById("transferHubNodesBtn"),
       syncAllHubsBtn: document.getElementById("syncAllHubsBtn"),
       editableHubTitle: document.getElementById("editableHubTitle"),
@@ -2955,9 +2959,8 @@ HTML = r"""
       tailscaleWizardModal: document.getElementById("tailscaleWizardModal"),
       tailscaleWizardClose: document.getElementById("tailscaleWizardClose"),
       tailscaleWizardLog: document.getElementById("tailscaleWizardLog"),
-      tailscaleExistingIpInput: document.getElementById("tailscaleExistingIpInput"),
-      tailscaleExistingTokenInput: document.getElementById("tailscaleExistingTokenInput"),
-      tailscaleUseExistingIpBtn: document.getElementById("tailscaleUseExistingIpBtn"),
+      tailscalePeerList: document.getElementById("tailscalePeerList"),
+      refreshTailscalePeersBtn: document.getElementById("refreshTailscalePeersBtn"),
       agentInstallCommand: document.getElementById("agentInstallCommand"),
       copyAgentInstallBtn: document.getElementById("copyAgentInstallBtn"),
       mediaInput: document.getElementById("mediaInput"),
@@ -3079,6 +3082,7 @@ HTML = r"""
     let youtubeStreamsByProfile = {};
     let youtubeStreamLoadState = {};
     let youtubeStreamLoadedAt = {};
+    let tailscaleStatusCache = null;
     const YOUTUBE_PROFILE_VISIBLE_SLOTS = 6;
     const YOUTUBE_STREAM_CACHE_TTL_MS = 2 * 60 * 1000;
     const YOUTUBE_PROFILE_REFRESH_MS = 5 * 60 * 1000;
@@ -3902,6 +3906,7 @@ HTML = r"""
       const agentCapacity = Math.max(AGENT_SLOT_COUNT, agentRows.length);
       refs.agentNodeCount.textContent = `${onlineAgentCount}/${agentCapacity}`;
       refs.hubNodeCount.textContent = String(activeHubs.length);
+      renderTransferHubOptions();
       if (!nodes.length) {
         refs.nodeMonitor.innerHTML = renderMonitor(null);
         refs.nodeList.innerHTML = `<div class="guided-empty"><strong>等待接入 Agent</strong><span>点击“接入推流服务器”，或先复制一键安装命令到目标 VPS。</span><button class="primary" data-open-connect>连接 Agent</button></div>`;
@@ -5549,20 +5554,17 @@ HTML = r"""
     }
 
     async function showTailscaleStatus() {
-      setTailscaleWizardOpen(true);
-      setTailscaleStep("verify", "running");
-      setTailscaleLog("正在读取 Tailscale 状态...");
-      const resp = await fetch("/api/tailscale/status");
-      const data = await resp.json();
-      setTailscaleStep("verify", data.ok ? "done" : "fail");
-      setTailscaleLog(data);
-      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      setTailscaleWizardOpen(true, { refresh: false });
+      return refreshTailscalePeers();
     }
 
-    function setTailscaleWizardOpen(open) {
+    function setTailscaleWizardOpen(open, options = {}) {
       refs.tailscaleWizardModal.classList.toggle("open", open);
       refs.tailscaleWizardModal.setAttribute("aria-hidden", open ? "false" : "true");
-      if (open) loadLatestAgentInstallCommand();
+      if (open) {
+        loadLatestAgentInstallCommand();
+        if (options.refresh !== false) refreshTailscalePeers();
+      }
     }
 
     async function loadLatestAgentInstallCommand() {
@@ -5595,13 +5597,13 @@ HTML = r"""
         lines.push({ label: "Tailnet 设备", text: `${peers.length} 台（在线 ${onlinePeers} / 离线 ${offlinePeers}）`, tone: onlinePeers ? "done" : "" });
       }
       if (data?.node_id && data?.base_url) lines.push({ label: "Agent 连接", text: `${data.node_id} -> ${data.base_url}`, tone: "done" });
-      if (data?.previous_base_url) lines.push({ label: "原地址已保留", text: data.previous_base_url });
+      if (data?.connection_replaced) lines.push({ label: "旧连接", text: "旧 Hub 连接信息已清理，当前绑定已替换", tone: "done" });
       const detail = data?.error || data?.result?.stderr || data?.result?.message || data?.precheck?.message || "";
       if (!ok && detail) lines.push({ label: "失败原因", text: String(detail).slice(0, 260), tone: "fail" });
       if (ok && data?.node_id && data?.base_url) {
-        lines.push({ label: "连接完成", text: "Agent 已在线并保存，节点列表已刷新；现在可以关闭此窗口。", tone: "done" });
+        lines.push({ label: "连接完成", text: "Agent 已绑定到当前 Hub，节点列表已刷新。", tone: "done" });
       } else {
-        lines.push({ label: "下一步", text: ok ? "请输入 Agent 的 100.x 地址进行连接。" : "请按提示修复后重试。" });
+        lines.push({ label: "下一步", text: ok ? "选择上方在线设备继续。" : "请按提示修复后重试。" });
       }
       return lines;
     }
@@ -5623,16 +5625,99 @@ HTML = r"""
     }
 
     function setTailscaleBusy(busy) {
-      [refs.tailscaleUseExistingIpBtn]
+      [refs.refreshTailscalePeersBtn]
         .forEach((button) => { button.disabled = busy; });
+      refs.tailscalePeerList?.querySelectorAll("button").forEach((button) => { button.disabled = busy; });
     }
 
-    function renderTailscaleNodeOptions() {
-      return;
+    function peerAddresses(peer) {
+      return (peer?.tailscale_ips || [])
+        .map((value) => String(value || "").split("%", 1)[0])
+        .filter((value) => value.startsWith("100."));
+    }
+
+    function knownNodeForTailscaleIp(ip) {
+      return nodes.find((node) => (
+        String(node.tailscale_ip || "") === String(ip)
+        || String(node.base_url || "").includes(`://${ip}:`)
+      ));
+    }
+
+    function renderTailscaleNodeOptions(data = tailscaleStatusCache) {
+      if (!refs.tailscalePeerList) return;
+      const self = data?.self && typeof data.self === "object"
+        ? { ...data.self, self: true }
+        : null;
+      const candidates = [self, ...(Array.isArray(data?.peers) ? data.peers : [])].filter(Boolean);
+      const seen = new Set();
+      const online = [];
+      candidates.forEach((peer) => {
+        if (peer.online === false) return;
+        const ip = peerAddresses(peer).find((value) => !seen.has(value));
+        if (!ip) return;
+        seen.add(ip);
+        online.push({ peer, ip });
+      });
+      if (!online.length) {
+        refs.tailscalePeerList.innerHTML = `<div class="empty-state">没有检测到在线 Tailnet 设备。</div>`;
+        return;
+      }
+      refs.tailscalePeerList.innerHTML = online.map(({ peer, ip }) => {
+        const node = knownNodeForTailscaleIp(ip);
+        const name = peer.host_name || peer.dns_name?.split(".")[0] || node?.name || "Tailnet 设备";
+        const role = node?.roles?.hub?.enabled ? "已激活 Hub"
+          : node?.roles?.agent?.enabled ? "已接入 Agent"
+            : peer.self ? "当前 Hub" : "可连接设备";
+        return `
+          <button type="button" class="tailscale-peer-option" data-tailscale-peer-ip="${escapeHtml(ip)}">
+            <strong>${escapeHtml(name)}</strong>
+            <span class="peer-action">选择</span>
+            <small>${escapeHtml(role)}${node?.name && node.name !== name ? ` · ${escapeHtml(node.name)}` : ""}</small>
+          </button>
+        `;
+      }).join("");
+    }
+
+    function renderTransferHubOptions() {
+      if (!refs.transferHubNodeSelect) return;
+      const hubs = nodes.filter((node) => {
+        const role = node.roles?.hub || {};
+        return role.enabled && role.url && !sameOriginUrl(role.url);
+      });
+      const current = refs.transferHubNodeSelect.value;
+      refs.transferHubNodeSelect.innerHTML = hubs.length
+        ? `<option value="">选择新的控制 Hub</option>${hubs.map((node) => {
+            const role = node.roles?.hub || {};
+            return `<option value="${escapeHtml(node.id)}">${escapeHtml(node.name || node.id)} · ${escapeHtml(role.version || "已激活")}</option>`;
+          }).join("")}`
+        : `<option value="">暂无可用的已激活 Hub</option>`;
+      if (hubs.some((node) => String(node.id) === String(current))) refs.transferHubNodeSelect.value = current;
+    }
+
+    async function refreshTailscalePeers() {
+      setTailscaleStep("verify", "running");
+      setTailscaleLog("正在读取在线设备...");
+      try {
+        const resp = await fetch(`/api/tailscale/status?_=${Date.now()}`, { cache: "no-store" });
+        const data = await resp.json();
+        tailscaleStatusCache = data;
+        setTailscaleStep("verify", data.ok ? "done" : "fail");
+        renderTailscaleNodeOptions(data);
+        setTailscaleLog(data);
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        return data;
+      } catch (error) {
+        const data = { ok: false, message: friendlyError(error, "在线设备读取失败") };
+        setTailscaleStep("verify", "fail");
+        renderTailscaleNodeOptions(data);
+        setTailscaleLog(data);
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        return data;
+      }
     }
 
     async function runTailscaleStep(step, label, action) {
-      setTailscaleWizardOpen(true);
+      setTailscaleWizardOpen(true, { refresh: false });
       setTailscaleBusy(true);
       setTailscaleStep(step, "running");
       setTailscaleLog(`${label}...`);
@@ -5697,13 +5782,12 @@ HTML = r"""
       return showTailscaleStatus();
     }
 
-    async function connectExistingTailscaleIp(confirm_rebind = false) {
+    async function connectExistingTailscaleIp(tailscale_ip = "", confirm_rebind = false) {
+      tailscale_ip = String(tailscale_ip || "").trim();
       confirm_rebind = confirm_rebind === true;
-      const tailscale_ip = refs.tailscaleExistingIpInput.value.trim();
-      const token = refs.tailscaleExistingTokenInput.value.trim();
       if (!tailscale_ip) {
         setTailscaleWizardOpen(true);
-        setTailscaleLog("请输入已有的 Tailscale IP，例如 100.x.x.x。");
+        setTailscaleLog("请先选择一个在线设备。");
         return;
       }
       const data = await runTailscaleStep("verify", "正在检查同一 Tailnet、Agent 服务并自动配对", async () => {
@@ -5712,8 +5796,8 @@ HTML = r"""
           headers: authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({
             tailscale_ip,
-            ...(token ? { token } : {}),
-            ...(confirm_rebind ? { confirm_rebind: true } : {}),
+            replace_connection: true,
+            confirm_rebind: true,
           }),
         });
         return resp.json();
@@ -5734,7 +5818,6 @@ HTML = r"""
         return;
       }
       if (data.ok) {
-        refs.tailscaleExistingTokenInput.value = "";
         if (data.hub_only) {
           if (data.node_id) rememberSelectedNode(data.node_id);
           log(`Hub-only 节点：${data.node_id || data.hub_url || tailscale_ip}，Agent 当前关闭`);
@@ -6685,17 +6768,21 @@ HTML = r"""
     }
 
     async function transferHubNodes() {
-      const target = refs.transferHubUrlInput.value.trim();
-      const token = refs.transferHubTokenInput.value.trim();
-      if (!target) return alert("请输入新 Hub 地址。");
-      if (!confirm(`把当前 Hub 的节点信息转移到：\n${target}\n\n新 Hub 会合并这些节点信息，用来接管控制。是否继续？`)) return;
+      const nodeId = refs.transferHubNodeSelect.value.trim();
+      const targetNode = nodes.find((node) => String(node.id) === String(nodeId));
+      if (!nodeId || !targetNode) return alert("请先选择一个可用的目标 Hub。");
+      const targetLabel = targetNode.name || targetNode.id;
+      if (!confirm(`把当前 Hub 的节点信息转移到：\n${targetLabel}\n\n旧 Hub 连接信息会被清理，新 Hub 会接管控制。是否继续？`)) return;
       refs.transferHubNodesBtn.disabled = true;
       try {
-        const data = await postJson("/api/hub-transfer/nodes", { target_hub_url: target, target_token: token });
+        const data = await postJson("/api/hubs/transfer", { node_id: nodeId });
         refs.updateBox.textContent = JSON.stringify(data, null, 2);
         if (!data.ok) throw new Error(data.message || "控制转移失败");
-        log(`Hub 控制转移已完成：${data.imported_count || 0} 个节点 -> ${data.target_hub_url || target}`);
-        alert(`转移完成：${data.imported_count || 0} 个节点已导入新 Hub。\n\n${data.target_hub_url || target}`);
+        log(`Hub 控制转移已完成：${data.imported_count || 0} 个节点 -> ${targetLabel}`);
+        alert(`转移完成：${data.imported_count || 0} 个节点已导入新 Hub。\n\n即将打开新控制台。`);
+        if (data.target_hub_url && !sameOriginUrl(data.target_hub_url)) {
+          window.location.href = data.target_hub_url;
+        }
       } catch (error) {
         const message = friendlyError(error, "Hub 控制转移失败");
         log(message);
@@ -7444,7 +7531,12 @@ HTML = r"""
       const button = event.target.closest(".youtube-more-menu button");
       if (button) window.setTimeout(() => { refs.youtubeMoreActions.open = false; }, 0);
     });
-    refs.tailscaleUseExistingIpBtn.addEventListener("click", connectExistingTailscaleIp);
+    refs.refreshTailscalePeersBtn.addEventListener("click", refreshTailscalePeers);
+    refs.tailscalePeerList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-tailscale-peer-ip]");
+      if (!button) return;
+      connectExistingTailscaleIp(button.dataset.tailscalePeerIp || "");
+    });
     refs.copyAgentInstallBtn.addEventListener("click", copyAgentInstallCommand);
     if (refs.pushSelectedBtn) refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
     refs.previewTuneBtn.addEventListener("click", previewTune);
@@ -7668,8 +7760,20 @@ def online_tailscale_peer_for_ip(ip: str) -> dict[str, Any] | None:
     status = tailscale_status()
     if not status.get("ok"):
         return None
+    target_ip = str(ip or "").split("%", 1)[0]
+    self_info = status.get("self") if isinstance(status.get("self"), dict) else {}
+    self_ips = {str(item).split("%", 1)[0] for item in (self_info.get("tailscale_ips") or [])}
+    if target_ip in self_ips:
+        return {
+            "host_name": self_info.get("host_name"),
+            "dns_name": self_info.get("dns_name"),
+            "tailscale_ips": sorted(self_ips),
+            "online": True,
+            "self": True,
+        }
     for peer in status.get("peers") or []:
-        if ip in (peer.get("tailscale_ips") or []) and peer.get("online") is True:
+        peer_ips = {str(item).split("%", 1)[0] for item in (peer.get("tailscale_ips") or [])}
+        if target_ip in peer_ips and peer.get("online") is True:
             return peer
     return None
 
@@ -7733,6 +7837,49 @@ def pair_tailscale_agent(
         return payload
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
+
+
+def reset_node_connection_metadata(node: dict[str, Any]) -> None:
+    """Remove routing and role hints that belong to a previous Hub binding."""
+    for key in (
+        "public_base_url",
+        "upload_base_url",
+        "upload_base_urls",
+        "offline_since",
+        "hub_only",
+        "hub_connected_at",
+        "hub_url",
+        "control_hub_url",
+        "role_hints",
+    ):
+        node.pop(key, None)
+
+
+def clean_node_seed(node: dict[str, Any]) -> dict[str, Any]:
+    """Export a node record without stale runtime hints for a newly activated Hub."""
+    result = dict(node)
+    for key in (
+        "public_base_url",
+        "upload_base_url",
+        "upload_base_urls",
+        "offline_since",
+        "hub_only",
+        "hub_connected_at",
+        "hub_url",
+        "control_hub_url",
+        "role_hints",
+    ):
+        result.pop(key, None)
+    return result
+
+
+def clean_node_seeds(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [clean_node_seed(item) for item in nodes if isinstance(item, dict)]
+
+
+def hub_transfer_nodes() -> list[dict[str, Any]]:
+    """Return node records safe to import into a replacement Hub."""
+    return clean_node_seeds(load_nodes())
 
 
 def request_hub_status_url(hub_url: str, *, timeout: int = 5) -> dict[str, Any]:
@@ -8309,9 +8456,14 @@ def node_role_urls(node: dict[str, Any]) -> dict[str, str]:
     if not host:
         return {"agent": base_url, "hub": ""}
     host_label = f"[{host}]" if ":" in host else host
+    role_hints = node.get("role_hints") if isinstance(node.get("role_hints"), dict) else {}
+    hub_hint = role_hints.get("hub") if isinstance(role_hints.get("hub"), dict) else {}
+    local_hub_url = str(node.get("hub_role_url") or "").strip()
+    if not local_hub_url and (node.get("hub_only") or hub_hint.get("prepared") or hub_hint.get("activation_pending")):
+        local_hub_url = str(node.get("hub_url") or "").strip()
     return {
         "agent": base_url or f"http://{host_label}:8787",
-        "hub": str(node.get("hub_url") or f"http://{host_label}:8788").rstrip("/"),
+        "hub": (local_hub_url or f"http://{host_label}:8788").rstrip("/"),
     }
 
 
@@ -9967,7 +10119,7 @@ def api_import_nodes():
         if not isinstance(raw, dict):
             skipped += 1
             continue
-        node = dict(raw)
+        node = clean_node_seed(raw)
         node_id = str(node.get("id") or "").strip()
         if not node_id:
             skipped += 1
@@ -9991,7 +10143,7 @@ def api_transfer_nodes_to_hub():
     result = post_url_json(
         f"{target}/api/nodes/import",
         {
-            "nodes": load_nodes(),
+            "nodes": hub_transfer_nodes(),
             "source_hub": current_hub_source_url(),
             "transfer_mode": "tailnet-push",
         },
@@ -10007,9 +10159,70 @@ def api_transfer_nodes_to_hub():
     return jsonify({"target_hub_url": target, "target_input": target_raw, **result}), status_code
 
 
+def hub_transfer_headers(node: dict[str, Any]) -> list[dict[str, str]]:
+    """Try trusted Tailnet writes first, then credentials already stored for this node."""
+    headers = [{}]
+    for key in ("hub_token", "hub_control_token", "control_token", "token"):
+        value = str(node.get(key) or "").strip()
+        if value:
+            headers.append({"X-Control-Token": value})
+    return headers
+
+
+@APP.post("/api/hubs/transfer")
+def api_transfer_nodes_to_known_hub():
+    """Transfer to a known active Hub without exposing its address or token in the UI."""
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "目标 Hub 节点不存在，请刷新节点列表后重试"}), 404
+
+    hub_status = request_hub_role_status(node)
+    target_raw = str(hub_status.get("url") or node_role_urls(node)["hub"] or "").strip()
+    target, error = normalize_hub_transfer_target(target_raw)
+    if error:
+        return jsonify({"ok": False, "node_id": node_id, "message": "目标 Hub 地址无效，请先重新激活该节点"}), 409
+    if target.rstrip("/") == current_hub_source_url().rstrip("/"):
+        return jsonify({"ok": False, "node_id": node_id, "message": "目标就是当前 Hub，无需重复转移"}), 409
+    if not hub_status.get("ok") or not hub_status.get("enabled"):
+        return jsonify({
+            "ok": False,
+            "node_id": node_id,
+            "target_hub_url": target,
+            "message": "目标 Hub 当前不在线或尚未激活，请先激活目标 Hub 后再转移",
+        }), 409
+
+    result: dict[str, Any] = {"ok": False, "message": "目标 Hub 拒绝导入"}
+    for headers in hub_transfer_headers(node):
+        result = post_url_json(
+            f"{target}/api/nodes/import",
+            {
+                "nodes": hub_transfer_nodes(),
+                "source_hub": current_hub_source_url(),
+                "transfer_mode": "known-tailnet-hub",
+            },
+            timeout=30,
+            headers=headers,
+        )
+        if result.get("ok") or int(result.get("status_code") or 0) not in {401, 403}:
+            break
+    if not result.get("ok") and int(result.get("status_code") or 0) in {401, 403}:
+        result["message"] = "目标 Hub 未开启可信 Tailnet 写入，无法自动完成转移；请先重新激活目标 Hub"
+    status_code = 200 if result.get("ok") else int(result.get("status_code") or 502)
+    return jsonify({
+        "node_id": node_id,
+        "target_node_id": node_id,
+        "node_name": str(node.get("name") or node_id),
+        "target_hub_url": target,
+        "connection_replaced": True,
+        **result,
+    }), status_code
+
+
 @APP.post("/api/hubs/sync")
 def api_sync_all_hubs():
-    current_nodes = load_nodes()
+    current_nodes = hub_transfer_nodes()
     source_hub = request.host_url.rstrip("/")
     results: list[dict[str, Any]] = []
     for node in current_nodes:
@@ -10299,7 +10512,8 @@ def api_tailscale_connect_existing_ip():
     agent_name = str(payload.get("name") or payload.get("agent_name") or "").strip()
     manual_token = str(payload.get("token") or "").strip()
     supplied_token = manual_token
-    confirm_rebind = bool(payload.get("confirm_rebind") or payload.get("force_rebind"))
+    replace_connection = bool(payload.get("replace_connection", False))
+    confirm_rebind = bool(payload.get("confirm_rebind") or payload.get("force_rebind") or replace_connection)
     raw_ip = str(payload.get("tailscale_ip") or payload.get("ip") or "").strip()
     try:
         ip = ipaddress.ip_address(raw_ip.split("%", 1)[0])
@@ -10375,11 +10589,16 @@ def api_tailscale_connect_existing_ip():
                     node_id_for_ip = f"{base_id}-{suffix}"
                     suffix += 1
                 node = {"id": node_id_for_ip, "name": agent_name or peer_name or node_id_for_ip, "role": "stream-node", "enabled": True}
+            if replace_connection:
+                reset_node_connection_metadata(node)
+                node.pop("token", None)
             node["base_url"] = base_url
             node["hub_url"] = hub_url
+            node["control_hub_url"] = hub_url
             node["tailscale_ip"] = str(ip)
             node["hub_only"] = True
             node["hub_connected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            node["last_online_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             if target_index >= 0:
                 nodes[target_index] = node
             else:
@@ -10427,6 +10646,8 @@ def api_tailscale_connect_existing_ip():
     creating = target_index < 0
     if target_index >= 0:
         node = dict(nodes[target_index])
+        if replace_connection:
+            reset_node_connection_metadata(node)
         node["token"] = supplied_token
     else:
         base_id = secure_filename(agent_name).strip("-_") or f"agent-{str(ip).replace('.', '-')}"
@@ -10460,14 +10681,17 @@ def api_tailscale_connect_existing_ip():
             "status_code": status_code,
         }), status_code
 
-    if previous_base_url and previous_base_url != base_url and not node.get("public_base_url"):
+    if previous_base_url and previous_base_url != base_url and not replace_connection and not node.get("public_base_url"):
         node["public_base_url"] = previous_base_url
     node["base_url"] = base_url
+    node.pop("hub_url", None)
+    node["control_hub_url"] = hub_url
     agent = status.get("agent") if isinstance(status.get("agent"), dict) else {}
     if creating:
         node["name"] = str(agent.get("name") or status.get("hostname") or node_id)
     node["tailscale_ip"] = str(ip)
     node["tailscale_connected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    node["last_online_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if target_index >= 0:
         nodes[target_index] = node
     else:
@@ -10485,6 +10709,8 @@ def api_tailscale_connect_existing_ip():
         "paired_via": str(pairing.get("paired_via") or ("supplied-token" if manual_token else "tailscale")),
         "pairing_warning": pairing_warning,
         "token_rotated": bool(pairing.get("token_rotated")),
+        "connection_replaced": replace_connection,
+        "hub_url": hub_url,
     })
 
 
@@ -11399,10 +11625,30 @@ def api_activate_node_role(role: str):
         return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
     if role == "hub":
         hub_url = node_role_urls(node)["hub"]
+        existing_hub = request_hub_role_status(node)
+        if existing_hub.get("ok") and existing_hub.get("enabled"):
+            role_url = str(existing_hub.get("url") or hub_url).rstrip("/")
+            save_node_updates(node_id, {"hub_url": role_url, "last_online_at": retention_timestamp_text()})
+            save_node_role_hint(node_id, "hub", {
+                "activation_pending": False,
+                "prepared": True,
+                "enabled": True,
+                "url": role_url,
+                "message": "Hub already active",
+            })
+            return jsonify({
+                "ok": True,
+                "accepted": False,
+                "already_active": True,
+                "node_id": node_id,
+                "role": role,
+                "message": "Hub 已经激活，无需重复创建激活任务",
+                "result": {"already_active": True, "url": role_url},
+            }), 200
         result = post_node_json(
             node,
             "/api/roles/hub/activate",
-            {"nodes": load_nodes(), "source_hub": current_hub_source_url()},
+            {"nodes": clean_node_seeds(load_nodes()), "source_hub": current_hub_source_url()},
             timeout=30,
         )
         if result.get("ok"):
@@ -11410,9 +11656,9 @@ def api_activate_node_role(role: str):
             role_url = str(scheduled.get("url") or hub_url).rstrip("/")
             save_node_updates(node_id, {"hub_url": role_url})
             save_node_role_hint(node_id, "hub", {
-                "activation_pending": True,
+                "activation_pending": not bool(scheduled.get("already_active")),
                 "prepared": True,
-                "enabled": False,
+                "enabled": bool(scheduled.get("already_active")),
                 "url": role_url,
                 "message": result.get("message") or "Hub activation scheduled",
             })
@@ -11440,7 +11686,8 @@ def api_activate_node_role(role: str):
                 "url": agent_url,
                 "message": result.get("message") or "Agent activation scheduled",
             })
-    status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
+    scheduled_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+    status_code = 200 if result.get("ok") and scheduled_result.get("already_active") else 202 if result.get("ok") else int(result.get("status_code") or 502)
     return jsonify({"node_id": node_id, "role": role, **result}), status_code
 
 

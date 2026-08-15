@@ -62,16 +62,45 @@ class AgentUpgradeTests(unittest.TestCase):
             ), patch.object(
                 headless_agent, "tailscale_status", return_value={"self": {"tailscale_ips": ["100.64.0.2"]}}
             ), patch.object(
+                headless_agent, "systemd_service_active", return_value=False
+            ), patch.object(
                 headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
             ), patch.object(headless_agent.subprocess, "run", return_value=completed) as run:
                 result = headless_agent.schedule_hub_activation()
+            seed_contents = (data_dir / "hub-seed-nodes.json").read_text(encoding="utf-8").strip()
 
         command = run.call_args.args[0][-1]
         self.assertEqual(result["role"], "hub")
+        self.assertEqual(seed_contents, "[]")
         self.assertIn(str(root), command)
         self.assertIn("INSTALL_DIR=", command)
         self.assertIn("STREAM_HUB_SERVICE_MODE=system", command)
         self.assertNotIn("INSTALL_DIR=/opt/stream-control-hub ", command)
+
+    def test_agent_hub_activation_is_idempotent_when_service_is_active(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "agent_data"
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", data_dir
+            ), patch.object(
+                headless_agent,
+                "tailscale_status",
+                return_value={"self": {"tailscale_ips": ["100.64.0.2"]}},
+            ), patch.object(
+                headless_agent, "systemd_service_active", return_value=True
+            ), patch.object(headless_agent.subprocess, "run") as run:
+                result = headless_agent.schedule_hub_activation([{
+                    "id": "node-a",
+                    "hub_url": "http://old-hub:8788",
+                    "role_hints": {"hub": {"activation_pending": True}},
+                }])
+
+        self.assertTrue(result["already_active"])
+        self.assertFalse(run.called)
+        self.assertFalse((data_dir / "hub-seed-nodes.json").exists())
 
     def test_role_status_reports_inactive_counterpart_as_prepared(self):
         from stream_control_hub import app, headless_agent
@@ -519,6 +548,12 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("更改 Agent：", app.HTML)
         self.assertIn("更改后：", app.HTML)
         self.assertNotIn("upgradeSelectedNodes", app.HTML)
+        self.assertIn('id="tailscalePeerList"', app.HTML)
+        self.assertIn('id="refreshTailscalePeersBtn"', app.HTML)
+        self.assertIn('id="transferHubNodeSelect"', app.HTML)
+        self.assertIn('postJson("/api/hubs/transfer"', app.HTML)
+        self.assertNotIn('id="tailscaleExistingTokenInput"', app.HTML)
+        self.assertNotIn('id="transferHubTokenInput"', app.HTML)
 
     def test_media_library_keeps_profile_per_agent_copy(self):
         from stream_control_hub import app
@@ -653,6 +688,49 @@ class AgentUpgradeTests(unittest.TestCase):
                 self.assertEqual(args[0], "http://100.64.0.9:8788/api/nodes/import")
                 self.assertEqual(args[1]["source_hub"], "http://100.64.0.1:8788")
                 self.assertEqual(kwargs["headers"], {"X-Control-Token": "hub-token"})
+
+    def test_hub_transfers_to_known_hub_without_ui_credentials(self):
+        from stream_control_hub import app
+
+        nodes = [{
+            "id": "new-hub",
+            "name": "New Hub",
+            "base_url": "http://100.64.0.9:8787",
+            "hub_url": "http://100.64.0.1:8788",
+            "control_hub_url": "http://100.64.0.1:8788",
+            "role_hints": {"agent": {"activation_pending": True}},
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "online_tailscale_peer_for_ip", return_value={"online": True}
+            ), patch.object(
+                app,
+                "request_hub_role_status",
+                return_value={"ok": True, "enabled": True, "url": "http://100.64.0.9:8788"},
+            ), patch.object(
+                app, "current_hub_source_url", return_value="http://100.64.0.1:8788"
+            ), patch.object(
+                app, "post_url_json", return_value={"ok": True, "imported_count": 1}
+            ) as post:
+                response = app.APP.test_client().post(
+                    "/api/hubs/transfer",
+                    json={"node_id": "new-hub"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data["connection_replaced"])
+        self.assertEqual(data["target_node_id"], "new-hub")
+        args, kwargs = post.call_args
+        self.assertEqual(args[0], "http://100.64.0.9:8788/api/nodes/import")
+        self.assertEqual(kwargs["headers"], {})
+        imported = args[1]["nodes"][0]
+        self.assertNotIn("hub_url", imported)
+        self.assertNotIn("control_hub_url", imported)
+        self.assertNotIn("role_hints", imported)
 
     def test_hub_syncs_nodes_to_all_active_hubs(self):
         from stream_control_hub import app
