@@ -175,6 +175,30 @@ class AgentTrustTests(unittest.TestCase):
 
 
 class HubAgentConnectionTests(unittest.TestCase):
+    def test_existing_dual_role_record_recovers_agent_and_hub_urls(self):
+        from stream_control_hub import app
+
+        self.assertEqual(
+            app.node_role_urls({
+                "id": "dual-role",
+                "base_url": "http://100.118.47.126:8788",
+            }),
+            {
+                "agent": "http://100.118.47.126:8787",
+                "hub": "http://100.118.47.126:8788",
+            },
+        )
+        self.assertEqual(
+            app.node_role_urls({
+                "id": "legacy-dual-role",
+                "hub_url": "http://100.118.47.127",
+            }),
+            {
+                "agent": "http://100.118.47.127:8787",
+                "hub": "http://100.118.47.127:8788",
+            },
+        )
+
     def test_current_hub_tailscale_address_is_seen_as_online(self):
         from stream_control_hub import app
 

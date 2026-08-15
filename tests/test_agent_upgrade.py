@@ -240,7 +240,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('data-settings-role="${role}"', app.HTML)
         self.assertIn("const agentRows = nodes.filter", app.HTML)
         self.assertIn("const shouldShowAgentRow", app.HTML)
-        self.assertIn("agentEnabled || nodeHasResources(nodeId)", app.HTML)
+        self.assertIn("agentPresent || nodeHasResources(nodeId)", app.HTML)
         self.assertIn("/api/nodes/delete", app.HTML)
         self.assertIn('id="roleSettingsDeleteNodeBtn"', app.HTML)
         self.assertIn("deleteNodeRecord(roleSettingsNodeId)", app.HTML)
@@ -868,9 +868,10 @@ class AgentUpgradeTests(unittest.TestCase):
             ):
                 response = app.APP.test_client().get("/api/nodes", environ_base={"REMOTE_ADDR": "127.0.0.1"})
 
-        roles = response.get_json()[0]["roles"]
+            roles = response.get_json()[0]["roles"]
         self.assertTrue(roles["agent"]["activation_pending"])
         self.assertTrue(roles["agent"]["prepared"])
+        self.assertTrue(roles["agent"]["present"])
         self.assertTrue(roles["hub"]["activation_pending"])
         self.assertEqual(roles["hub"]["url"], "http://100.64.0.10:8788")
 

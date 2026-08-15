@@ -60,6 +60,7 @@ MEDIA_DIR = DATA_DIR / "media"
 WORK_DIR = DATA_DIR / "work"
 NODES_FILE = Path(os.environ.get("STREAM_HUB_NODES_FILE", str(CONFIG_DIR / "nodes.json")))
 PORT = int(os.environ.get("STREAM_HUB_PORT", "8788"))
+AGENT_PORT = int(os.environ.get("STREAM_HUB_AGENT_PORT", "8787"))
 SOURCE_REPO = os.environ.get(
     "STREAM_HUB_SOURCE_REPO",
     "https://github.com/himydearfriends1934-cmyk/stream-control-hub.git",
@@ -3206,7 +3207,7 @@ HTML = r"""
     }
 
     function statusSummaryText() {
-      const agentRows = nodes.filter((node) => Boolean(node.roles?.agent?.enabled));
+      const agentRows = nodes.filter((node) => Boolean(node.roles?.agent?.present || node.roles?.agent?.enabled));
       const onlineAgents = agentRows.filter((node) => nodeOnline(node)).length;
       const streamingAgents = agentRows.filter((node) => nodeStreaming(node)).length;
       const resources = mediaLibrary.resources || [];
@@ -3897,8 +3898,9 @@ HTML = r"""
       const nodeHasResources = (nodeId) => (mediaLibrary.resources || []).some((resource) => resourceHasNode(resource, nodeId));
       const shouldShowAgentRow = (node) => {
         const nodeId = String(node.id || "");
-        const agentEnabled = Boolean(node.roles?.agent?.enabled);
-        return node.enabled !== false && (agentEnabled || nodeHasResources(nodeId));
+        const agentRole = node.roles?.agent || {};
+        const agentPresent = Boolean(agentRole.present || agentRole.enabled);
+        return node.enabled !== false && (agentPresent || nodeHasResources(nodeId));
       };
       const agentRows = nodes.filter(shouldShowAgentRow);
       const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
@@ -8446,24 +8448,48 @@ def request_node_json(node: dict[str, Any], path: str, *, timeout: int = 6) -> d
 
 
 def node_base_url(node: dict[str, Any]) -> str:
-    return str(node.get("base_url") or "").rstrip("/")
+    return node_role_urls(node)["agent"]
 
 
 def node_role_urls(node: dict[str, Any]) -> dict[str, str]:
-    base_url = node_base_url(node)
-    parsed = urlparse(base_url)
-    host = parsed.hostname or ""
+    raw_agent_url = str(node.get("agent_url") or node.get("base_url") or "").strip().rstrip("/")
+    raw_hub_url = str(node.get("hub_role_url") or node.get("hub_url") or "").strip().rstrip("/")
+    agent_parsed = urlparse(raw_agent_url) if raw_agent_url else None
+    hub_parsed = urlparse(raw_hub_url) if raw_hub_url else None
+    host = (
+        (agent_parsed.hostname if agent_parsed else "")
+        or (hub_parsed.hostname if hub_parsed else "")
+        or str(node.get("tailscale_ip") or "").split("%", 1)[0].strip()
+    )
     if not host:
-        return {"agent": base_url, "hub": ""}
+        return {"agent": raw_agent_url, "hub": raw_hub_url}
     host_label = f"[{host}]" if ":" in host else host
+    agent_scheme = (agent_parsed.scheme if agent_parsed and agent_parsed.scheme in {"http", "https"} else "http")
+    hub_scheme = (hub_parsed.scheme if hub_parsed and hub_parsed.scheme in {"http", "https"} else agent_scheme)
+
+    # Older node records sometimes stored only a host, or accidentally stored the
+    # Hub's 8788 URL as base_url. The current Agent endpoint is always 8787.
+    agent_port = agent_parsed.port if agent_parsed else None
+    if agent_port in {None, PORT}:
+        agent_url = f"{agent_scheme}://{host_label}:{AGENT_PORT}"
+    else:
+        agent_url = raw_agent_url
+
+    hub_url = raw_hub_url
+    if not hub_url or (hub_parsed and hub_parsed.port is None):
+        hub_url = f"{hub_scheme}://{host_label}:{PORT}"
     role_hints = node.get("role_hints") if isinstance(node.get("role_hints"), dict) else {}
     hub_hint = role_hints.get("hub") if isinstance(role_hints.get("hub"), dict) else {}
     local_hub_url = str(node.get("hub_role_url") or "").strip()
     if not local_hub_url and (node.get("hub_only") or hub_hint.get("prepared") or hub_hint.get("activation_pending")):
         local_hub_url = str(node.get("hub_url") or "").strip()
+    if local_hub_url:
+        local_hub_parsed = urlparse(local_hub_url)
+        if local_hub_parsed.port is None:
+            local_hub_url = f"{hub_scheme}://{host_label}:{PORT}"
     return {
-        "agent": base_url or f"http://{host_label}:8787",
-        "hub": (local_hub_url or f"http://{host_label}:8788").rstrip("/"),
+        "agent": agent_url.rstrip("/"),
+        "hub": (local_hub_url or hub_url or f"http://{host_label}:{PORT}").rstrip("/"),
     }
 
 
@@ -9916,12 +9942,31 @@ def api_nodes():
         agent_role_status = (agent_health.get("roles") or {}).get("agent") or {}
         prepared_hub = (agent_health.get("roles") or {}).get("hub") or {}
         agent_enabled = bool(agent_health.get("ok"))
+        agent_service_enabled = bool(
+            agent_role_status.get("enabled")
+            or prepared_agent.get("enabled")
+            or agent_hint.get("enabled")
+        )
+        agent_present = bool(
+            agent_enabled
+            or agent_service_enabled
+            or agent_role_status.get("prepared")
+            or prepared_agent.get("prepared")
+            or agent_hint.get("prepared")
+            or agent_hint.get("activation_pending")
+            or node.get("base_url")
+            or node.get("agent_url")
+            or node.get("tailscale_ip")
+            or node.get("hub_url")
+            or node.get("hub_only")
+        )
         hub_view = hub_role if hub_role.get("enabled") else {**hub_hint, **prepared_hub, **hub_role}
         if hub_view.get("enabled"):
             hub_view["activation_pending"] = False
         node_view["roles"] = {
             "agent": {
                 "enabled": agent_enabled,
+                "present": agent_present,
                 "prepared": bool(
                     agent_role_status.get("prepared")
                     or prepared_agent.get("prepared")
