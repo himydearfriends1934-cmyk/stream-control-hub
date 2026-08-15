@@ -564,6 +564,8 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 continue
             if stream_config.get("stream_output_mode") != "youtube_api" or not stream_config.get("youtube_stream_id"):
                 continue
+            if str(stream_config.get("adaptive_mode") or "auto").strip().lower() == "off":
+                continue
             profile_id = safe_youtube_profile_id(str(stream_config.get("youtube_profile_id") or config.get("active_profile_id") or YOUTUBE_DEFAULT_PROFILE_ID))
             profile = profiles.get(profile_id)
             if not profile:
@@ -6287,16 +6289,21 @@ HTML = r"""
           refs.tuneBox.textContent = "媒体复制完成，正在刷新节点并启动 FFmpeg...";
           await refreshAll();
         }
-        if (!lastTuneRecommendation?.ok) {
+        let tuneForStart = null;
+        if (payload.adaptive_mode !== "off") {
           const tune = await postNodeAction("/api/nodes/stream/recommend", { ...payload, stream_key: "" });
+          lastTuneRecommendation = tune;
           if (tune.ok) {
             applyTuneRecommendation(tune);
             renderTuneRecommendation(tune);
+            tuneForStart = tune;
+          } else {
+            refs.tuneBox.textContent = tune.message || "智能调优失败，按当前固定参数继续启动。";
           }
         }
         const startPayload = streamPayload({ includeKey: true });
-        if (lastTuneRecommendation?.recommendation) {
-          Object.assign(startPayload, lastTuneRecommendation.recommendation);
+        if (tuneForStart?.recommendation) {
+          Object.assign(startPayload, tuneForStart.recommendation);
         }
         const data = await postNodeAction("/api/nodes/stream/start", startPayload);
         if (!data.ok) {

@@ -770,6 +770,23 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(result["severity"], "critical")
         self.assertLess(result["recommendation"]["video_bitrate"], 6000)
 
+    def test_youtube_health_extracts_prefixed_bitrate_recommendation(self):
+        result = youtube_health_recommendation(
+            {
+                "stream_status": "active",
+                "health_status": "good",
+                "configuration_issues": [{
+                    "type": "videoBitrateIsHigh",
+                    "severity": "warning",
+                    "description": "We recommend that you use a stream bitrate of 2500 Kbps.",
+                }],
+            },
+            {"video_bitrate": 4500, "fps": 30, "resolution": "1280x720"},
+        )
+
+        self.assertEqual(result["severity"], "warning")
+        self.assertEqual(result["recommendation"]["video_bitrate"], 2500)
+
     def test_youtube_health_handles_kiana_bitrate_and_starvation_issues(self):
         result = youtube_health_recommendation(
             {
@@ -927,6 +944,43 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertTrue(any("videoBitrateIsHigh" in item for item in event["api_problems"]))
         self.assertIn("Reduce bitrate", event["recommendation_reasons"])
         self.assertNotIn("youtube_ingestion_url", json.dumps(event))
+
+    def test_autotune_skips_stream_when_adaptive_mode_is_off(self):
+        from stream_control_hub import app
+
+        stream_config = {
+            "stream_output_mode": "youtube_api",
+            "youtube_stream_id": "stream-a",
+            "youtube_profile_id": "account-a",
+            "adaptive_mode": "off",
+            "resolution": "1280x720",
+            "fps": 30,
+            "video_bitrate": 4000,
+            "audio_bitrate": 128,
+        }
+        client = MagicMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "youtube_autotune_state.json"
+            state_file.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+            with patch.object(app, "YOUTUBE_AUTOTUNE_STATE_FILE", state_file), patch.object(
+                app, "load_youtube_profiles_config", return_value={
+                    "active_profile_id": "account-a",
+                    "profiles": [{
+                        "id": "account-a",
+                        "auto_tune_enabled": True,
+                        "auto_tune_interval_seconds": 60,
+                        "auto_tune_cooldown_seconds": 60,
+                    }],
+                }
+            ), patch.object(app, "load_nodes", return_value=[{"id": "node-a", "name": "Node A", "enabled": True}]), patch.object(
+                app, "request_node_json",
+                return_value={"ok": True, "stream": {"running": True}, "stream_config": stream_config},
+            ), patch.object(app, "youtube_client_for_id", return_value=client), patch.object(app, "post_node_json") as post:
+                result = app.youtube_autotune_tick()
+
+        self.assertEqual(result["checked"], 0)
+        client.stream_health.assert_not_called()
+        post.assert_not_called()
 
     def test_autotune_restores_recommended_bitrate_on_third_persistent_adjustment(self):
         from stream_control_hub import app

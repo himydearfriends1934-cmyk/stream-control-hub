@@ -104,11 +104,11 @@ def youtube_health_recommendation(
     elif "warning" in issue_levels and severity == "ok":
         severity = "warning"
 
-    video_high_types = {"bitratehigh"}
-    video_low_types = {"bitratelow"}
-    audio_high_types = {"audiobitratehigh"}
-    audio_low_types = {"audiobitratelow"}
-    frame_types = {"frameratehigh", "frameratemismatch"}
+    video_high_types = {"bitratehigh", "videobitratehigh", "videobitrateishigh"}
+    video_low_types = {"bitratelow", "videobitratelow", "videobitrateislow"}
+    audio_high_types = {"audiobitratehigh", "audiobitrateishigh"}
+    audio_low_types = {"audiobitratelow", "audiobitrateislow"}
+    frame_types = {"frameratehigh", "framerateishigh", "videoframeratehigh", "frameratemismatch"}
     keyframe_types = {"gopmismatch", "gopsizelong", "gopsizeover", "gopsizeshort", "opengop"}
     resolution_types = {"resolutionmismatch", "videoresolutionsuboptimal", "videoresolutionunsupported"}
     transcode_types = {
