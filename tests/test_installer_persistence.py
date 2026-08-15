@@ -109,6 +109,18 @@ class InstallerPersistenceTests(unittest.TestCase):
             self.assertIn(directive, hub)
             self.assertIn(directive, agent)
 
+    def test_hub_update_restarts_the_declared_systemd_service_strictly(self):
+        script = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn("systemctl show -p WorkingDirectory", script)
+        self.assertIn("sed -n 's/^WorkingDirectory=//p'", script)
+        self.assertIn("$SYSTEMCTL daemon-reload", script)
+        self.assertIn("$SYSTEMCTL enable stream-control-hub.service", script)
+        self.assertIn("$SYSTEMCTL reset-failed stream-control-hub.service", script)
+        self.assertIn("$SYSTEMCTL restart stream-control-hub.service", script)
+        self.assertNotIn("$SYSTEMCTL enable --now stream-control-hub.service", script)
+        self.assertNotIn("if ! $SYSTEMCTL enable --now stream-control-hub.service", script)
+
     def test_installers_default_without_interactive_tty(self):
         hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
         agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")

@@ -102,6 +102,52 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertFalse(run.called)
         self.assertFalse((data_dir / "hub-seed-nodes.json").exists())
 
+    def test_hub_upgrade_passes_shared_install_directory(self):
+        from stream_control_hub import app
+
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            with patch.object(app, "ROOT", root), patch.object(
+                app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(app, "local_git_version", return_value="abc1234"), patch.object(
+                app.subprocess, "run", return_value=completed
+            ) as run:
+                app.schedule_hub_upgrade()
+
+        command = run.call_args.args[0][-1]
+        self.assertIn("INSTALL_DIR=", command)
+        self.assertIn(str(root), command)
+
+    def test_agent_upgrade_passes_shared_install_directory(self):
+        from stream_control_hub import headless_agent
+
+        version = {
+            "version": "abc1234",
+            "managed_install": True,
+            "upgrade_supported": True,
+        }
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "agent_version_status", return_value=version
+            ), patch.object(
+                headless_agent,
+                "current_systemd_service",
+                return_value="stream-control-headless-agent.service",
+            ), patch.object(
+                headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(
+                headless_agent.subprocess, "run", return_value=completed
+            ) as run:
+                headless_agent.schedule_agent_upgrade()
+
+        command = run.call_args.args[0][-1]
+        self.assertIn("INSTALL_DIR=", command)
+        self.assertIn(str(root), command)
+
     def test_role_status_reports_inactive_counterpart_as_prepared(self):
         from stream_control_hub import app, headless_agent
 

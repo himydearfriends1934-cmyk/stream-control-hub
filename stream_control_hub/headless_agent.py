@@ -156,7 +156,8 @@ def schedule_agent_upgrade() -> dict[str, Any]:
             f"git -C {root} fetch origin {branch} && "
             f"git -C {root} checkout {branch} && "
             f"git -C {root} pull --ff-only origin {branch} && "
-            f"env BRANCH={branch} CHOICE=1 sh {root}/scripts/install-agent.sh"
+            f"env BRANCH={branch} CHOICE=1 INSTALL_DIR={root} "
+            f"sh {root}/scripts/install-agent.sh"
         )
         install_mode = "managed-installer"
     else:
@@ -315,7 +316,10 @@ def schedule_agent_deactivation() -> dict[str, Any]:
         raise RuntimeError("systemd-run is required to deactivate the Agent role")
     unit = f"stream-control-agent-deactivate-{int(time.time())}"
     root = shlex.quote(str(ROOT))
-    script = f"set -eu; sleep 2; ACTION=uninstall REMOVE_DATA=0 sh {root}/scripts/install-agent.sh"
+    script = (
+        f"set -eu; sleep 2; ACTION=uninstall REMOVE_DATA=0 INSTALL_DIR={root} "
+        f"sh {root}/scripts/install-agent.sh"
+    )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
         text=True,

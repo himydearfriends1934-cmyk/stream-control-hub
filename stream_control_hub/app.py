@@ -8825,6 +8825,7 @@ def schedule_hub_upgrade() -> dict[str, Any]:
         "set -eu; sleep 2; "
         f"git -C {root} fetch origin main; git -C {root} checkout main; "
         f"git -C {root} pull --ff-only origin main; env BRANCH=main CHOICE=1 "
+        f"INSTALL_DIR={root} "
         f"STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 sh {root}/scripts/install-hub.sh"
     )
     result = subprocess.run(
@@ -8843,7 +8844,10 @@ def schedule_hub_deactivation() -> dict[str, Any]:
         raise RuntimeError("Hub must be a systemd installation to deactivate from the panel")
     unit = f"stream-control-hub-deactivate-{int(time.time())}"
     root = shlex.quote(str(ROOT))
-    script = f"set -eu; sleep 2; ACTION=uninstall REMOVE_DATA=0 sh {root}/scripts/install-hub.sh"
+    script = (
+        f"set -eu; sleep 2; ACTION=uninstall REMOVE_DATA=0 INSTALL_DIR={root} "
+        f"sh {root}/scripts/install-hub.sh"
+    )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
         text=True,

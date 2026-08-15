@@ -2,7 +2,22 @@
 set -eu
 
 if [ -z "${INSTALL_DIR:-}" ]; then
-  if [ -d "/opt/stream-control-hub/.git" ]; then
+  EXISTING_INSTALL_DIR=""
+  if command -v systemctl >/dev/null 2>&1; then
+    EXISTING_INSTALL_DIR="$(systemctl show -p WorkingDirectory --value stream-control-hub.service 2>/dev/null || true)"
+    if [ -z "$EXISTING_INSTALL_DIR" ] && [ "$(id -u)" -ne 0 ]; then
+      EXISTING_INSTALL_DIR="$(systemctl --user show -p WorkingDirectory --value stream-control-hub.service 2>/dev/null || true)"
+    fi
+  fi
+  if [ -z "$EXISTING_INSTALL_DIR" ] && [ -f /etc/systemd/system/stream-control-hub.service ]; then
+    EXISTING_INSTALL_DIR="$(sed -n 's/^WorkingDirectory=//p' /etc/systemd/system/stream-control-hub.service | head -n 1)"
+  fi
+  if [ -z "$EXISTING_INSTALL_DIR" ] && [ -f "$HOME/.config/systemd/user/stream-control-hub.service" ]; then
+    EXISTING_INSTALL_DIR="$(sed -n 's/^WorkingDirectory=//p' "$HOME/.config/systemd/user/stream-control-hub.service" | head -n 1)"
+  fi
+  if [ -n "$EXISTING_INSTALL_DIR" ] && [ -d "$EXISTING_INSTALL_DIR" ]; then
+    INSTALL_DIR="$EXISTING_INSTALL_DIR"
+  elif [ -d "/opt/stream-control-hub/.git" ]; then
     INSTALL_DIR="/opt/stream-control-hub"
   elif [ -d "$HOME/stream-control-hub/.git" ]; then
     INSTALL_DIR="$HOME/stream-control-hub"
@@ -317,12 +332,10 @@ UMask=0077
 [Install]
 WantedBy=$SERVICE_TARGET
 EOF
-  $SYSTEMCTL daemon-reload || true
-  if ! $SYSTEMCTL enable --now stream-control-hub.service; then
-    "$INSTALL_DIR/run-hub.sh" &
-  else
-    $SYSTEMCTL restart stream-control-hub.service
-  fi
+  $SYSTEMCTL daemon-reload
+  $SYSTEMCTL enable stream-control-hub.service
+  $SYSTEMCTL reset-failed stream-control-hub.service || true
+  $SYSTEMCTL restart stream-control-hub.service
 else
   "$INSTALL_DIR/run-hub.sh" &
 fi
