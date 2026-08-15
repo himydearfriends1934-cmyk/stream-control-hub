@@ -396,7 +396,11 @@ class YouTubeAPIClientTests(unittest.TestCase):
                 app,
                 "post_node_json",
                 return_value={"ok": True, "result": {"started_pid": 4101}},
-            ) as post:
+            ) as post, patch.object(
+                app,
+                "schedule_motion_analysis",
+                return_value={"scheduled": True},
+            ):
                 response = app.APP.test_client().post(
                     "/api/nodes/stream/start",
                     json={
