@@ -1844,11 +1844,47 @@ HTML = r"""
     .node-row.offline-node:hover, .node-space-ring-item.offline-node:hover { opacity: .9; }
     .node-index {
       grid-area: index;
+      display: inline-flex;
+      align-items: center;
       justify-self: center;
+      gap: 3px;
       color: var(--accent);
       font-size: 12px;
       font-weight: 950;
       font-variant-numeric: tabular-nums;
+    }
+    .node-drag-handle {
+      width: 18px;
+      min-width: 18px;
+      height: 26px;
+      padding: 0;
+      border: 1px solid rgba(54, 211, 153, .35);
+      border-radius: 6px;
+      color: var(--muted);
+      background: rgba(7, 18, 14, .68);
+      cursor: grab;
+      line-height: 1;
+      font-size: 13px;
+      font-weight: 900;
+    }
+    .node-drag-handle:hover {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+    .node-drag-handle:active,
+    .node-row.dragging .node-drag-handle {
+      cursor: grabbing;
+    }
+    .node-index-number {
+      min-width: 10px;
+      text-align: center;
+    }
+    .node-row.dragging {
+      opacity: .48;
+    }
+    .node-row.drag-over {
+      border-color: #ff3b4f;
+      box-shadow: 0 0 0 2px rgba(255, 59, 79, .36);
     }
     .node-name { min-width: 0; display: grid; gap: 3px; align-content: center; }
     .node-row.agent-row .node-name { grid-area: identity; }
@@ -3031,6 +3067,9 @@ HTML = r"""
     let nodes = [];
     let mediaLibrary = { resources: [], nodes: [], duplicate_retention: [] };
     const AGENT_SLOT_COUNT = 10;
+    let agentOrder = [];
+    let agentOrderSavePromise = Promise.resolve();
+    let draggedAgentId = "";
     let openResourceNodeId = "";
     let resourceAllMode = false;
     let resourceTableFilters = { name: "", size: "", age: "", profile: "", ownerNode: "" };
@@ -3072,6 +3111,80 @@ HTML = r"""
       selectedNodeId = String(nodeId || "");
       if (selectedNodeId) localStorage.setItem(LAST_NODE_STORAGE_KEY, selectedNodeId);
       else localStorage.removeItem(LAST_NODE_STORAGE_KEY);
+    }
+
+    function normalizedAgentOrder(order = agentOrder, sourceNodes = nodes) {
+      const knownIds = new Set(
+        (sourceNodes || [])
+          .map((node) => String(node?.id || "").trim())
+          .filter(Boolean),
+      );
+      const result = [];
+      const seen = new Set();
+      const candidates = Array.isArray(order) ? order : [];
+      candidates.forEach((value) => {
+        const id = String(value || "").trim();
+        if (!id || !knownIds.has(id) || seen.has(id)) return;
+        seen.add(id);
+        result.push(id);
+      });
+      knownIds.forEach((id) => {
+        if (!seen.has(id)) result.push(id);
+      });
+      return result;
+    }
+
+    function syncAgentOrder(sourceNodes = nodes) {
+      const next = normalizedAgentOrder(agentOrder, sourceNodes);
+      const changed = JSON.stringify(next) !== JSON.stringify(agentOrder);
+      agentOrder = next;
+      return changed;
+    }
+
+    function orderedAgentRows(rows) {
+      const order = normalizedAgentOrder(agentOrder, nodes);
+      const rank = new Map(order.map((id, index) => [id, index]));
+      return [...rows].sort((left, right) => (
+        (rank.get(String(left.id || "")) ?? Number.MAX_SAFE_INTEGER)
+        - (rank.get(String(right.id || "")) ?? Number.MAX_SAFE_INTEGER)
+      ));
+    }
+
+    function saveAgentOrder(order = agentOrder) {
+      const payloadOrder = normalizedAgentOrder(order, nodes);
+      agentOrder = payloadOrder;
+      agentOrderSavePromise = agentOrderSavePromise
+        .catch(() => null)
+        .then(async () => {
+          const data = await postJson("/api/settings", { agent_order: payloadOrder });
+          if (!data.ok) throw new Error(data.message || "Agent 顺序保存失败");
+          if (Array.isArray(data.agent_order)) agentOrder = normalizedAgentOrder(data.agent_order, nodes);
+          log("AGENT 顺序已保存");
+          return data;
+        });
+      agentOrderSavePromise.catch((error) => log(friendlyError(error, "AGENT 顺序保存失败")));
+      return agentOrderSavePromise;
+    }
+
+    function moveAgentInOrder(sourceId, targetId, insertBefore) {
+      const source = String(sourceId || "");
+      const target = String(targetId || "");
+      if (!source || !target || source === target) return false;
+      const next = normalizedAgentOrder(agentOrder, nodes).filter((id) => id !== source);
+      const targetIndex = next.indexOf(target);
+      if (targetIndex < 0) return false;
+      next.splice(insertBefore ? targetIndex : targetIndex + 1, 0, source);
+      agentOrder = next;
+      renderNodes();
+      saveAgentOrder(next);
+      return true;
+    }
+
+    function clearAgentDragState() {
+      draggedAgentId = "";
+      refs.nodeList.querySelectorAll(".dragging, .drag-over").forEach((row) => {
+        row.classList.remove("dragging", "drag-over");
+      });
     }
     let lastTuneRecommendation = null;
     let activeUpload = null;
@@ -3838,7 +3951,10 @@ HTML = r"""
       const agentVersion = h.agent?.version || "未识别";
       return `
         <div class="node-row agent-row ${streaming ? "running" : ""} ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="点击选中；删除/取消角色请打开后面的设置">
-          <span class="node-index">${rowIndex + 1}</span>
+          <span class="node-index">
+            <button type="button" class="node-drag-handle" data-node-drag-handle data-node-id="${escapeHtml(node.id)}" draggable="true" title="按住拖动排序" aria-label="拖动 Agent 排序">↕</button>
+            <span class="node-index-number">${rowIndex + 1}</span>
+          </span>
           <span class="node-name">
             <span class="node-agent-line">
               <strong class="node-name-edit" data-node-name-edit data-node-id="${escapeHtml(node.id)}" title="双击修改 Agent 名称">${escapeHtml(node.name || node.id)}</strong>
@@ -3902,7 +4018,7 @@ HTML = r"""
         const agentPresent = Boolean(agentRole.present || agentRole.enabled);
         return node.enabled !== false && (agentPresent || nodeHasResources(nodeId));
       };
-      const agentRows = nodes.filter(shouldShowAgentRow);
+      const agentRows = orderedAgentRows(nodes.filter(shouldShowAgentRow));
       const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
       const onlineAgentCount = agentRows.filter((node) => Boolean(node.roles?.agent?.enabled)).length;
       const agentCapacity = Math.max(AGENT_SLOT_COUNT, agentRows.length);
@@ -5068,15 +5184,18 @@ HTML = r"""
       uiMessage("正在刷新 Hub、Agent 和资源状态...");
       showDiagnostics("正在刷新状态，请稍候...", { scroll: false });
       try {
-        const [nodeResp, libraryResp] = await Promise.all([
+        const [nodeResp, libraryResp, settingsResp] = await Promise.all([
           fetch("/api/nodes"),
           fetch("/api/media-library"),
+          fetch("/api/settings").catch(() => null),
           loadYouTubeProfiles().catch(() => null),
         ]);
         if (!nodeResp.ok) throw new Error(nodeResp.statusText || "节点状态读取失败");
         if (!libraryResp.ok) throw new Error(libraryResp.statusText || "媒体库读取失败");
+        if (settingsResp?.ok) applyHubSettings(await settingsResp.json());
         nodes = await nodeResp.json();
         mediaLibrary = await libraryResp.json();
+        if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
         renderNodes();
         renderMedia();
         renderStreamControls();
@@ -5104,6 +5223,7 @@ HTML = r"""
         const nodeResp = await fetch("/api/nodes");
         if (!nodeResp.ok) throw new Error(nodeResp.statusText || "Agent 参数刷新失败");
         nodes = await nodeResp.json();
+        if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
         if (!hadStreamingAgents && !hasStreamingAgentRows()) return;
         renderNodes();
         renderStreamControls();
@@ -7042,6 +7162,44 @@ HTML = r"""
       beginNodeNameEdit(nameEl);
     });
 
+    refs.nodeList.addEventListener("dragstart", (event) => {
+      const handle = event.target.closest("[data-node-drag-handle]");
+      const row = event.target.closest("[data-node-row]");
+      if (!handle || !row) return;
+      draggedAgentId = String(row.dataset.nodeId || "");
+      row.classList.add("dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", draggedAgentId);
+      }
+    });
+    refs.nodeList.addEventListener("dragover", (event) => {
+      if (!draggedAgentId) return;
+      const row = event.target.closest("[data-node-row]");
+      if (!row || String(row.dataset.nodeId || "") === draggedAgentId) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      refs.nodeList.querySelectorAll(".drag-over").forEach((item) => {
+        if (item !== row) item.classList.remove("drag-over");
+      });
+      row.classList.add("drag-over");
+    });
+    refs.nodeList.addEventListener("drop", (event) => {
+      if (!draggedAgentId) return;
+      const row = event.target.closest("[data-node-row]");
+      if (!row) return;
+      event.preventDefault();
+      const targetId = String(row.dataset.nodeId || "");
+      const rect = row.getBoundingClientRect();
+      const insertBefore = event.clientY < rect.top + rect.height / 2;
+      const sourceId = draggedAgentId;
+      clearAgentDragState();
+      moveAgentInOrder(sourceId, targetId, insertBefore);
+    });
+    refs.nodeList.addEventListener("dragend", () => {
+      clearAgentDragState();
+    });
+
     refs.nodeList.addEventListener("pointerdown", (event) => {
       guardLockedNodeSelect(event);
     }, true);
@@ -7384,23 +7542,26 @@ HTML = r"""
       }
     }
 
+    function applyHubSettings(data) {
+      const title = String(data?.hub_name || "").trim();
+      if (title) {
+        refs.editableHubTitle.textContent = title;
+        document.title = title;
+        localStorage.setItem(TITLE_STORAGE_KEY, title);
+      }
+      if (Array.isArray(data?.agent_order)) agentOrder = data.agent_order.map((id) => String(id || "").trim()).filter(Boolean);
+    }
+
     async function loadHubSettings() {
       try {
         const resp = await fetch("/api/settings");
-        const data = await resp.json();
-        const title = String(data.hub_name || "").trim();
-        if (title) {
-          refs.editableHubTitle.textContent = title;
-          document.title = title;
-          localStorage.setItem(TITLE_STORAGE_KEY, title);
-        }
+        if (resp.ok) applyHubSettings(await resp.json());
       } catch (_) {}
     }
 
     applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || "forest");
     refs.editableHubTitle.textContent = localStorage.getItem(TITLE_STORAGE_KEY) || "Stream Control Hub";
     document.title = refs.editableHubTitle.textContent;
-    loadHubSettings();
     refs.themeSelect.addEventListener("change", () => applyTheme(refs.themeSelect.value));
     refs.editableHubTitle.addEventListener("blur", saveCustomTitle);
     refs.editableHubTitle.addEventListener("keydown", (event) => {
@@ -8022,6 +8183,30 @@ def load_hub_settings() -> dict[str, Any]:
 
 def save_hub_settings(settings: dict[str, Any]) -> None:
     write_json_atomic(HUB_SETTINGS_FILE, settings)
+
+
+def normalize_agent_order(raw_order: Any, nodes: list[dict[str, Any]] | None = None) -> list[str]:
+    known_ids = [
+        str(node.get("id") or "").strip()
+        for node in (load_nodes() if nodes is None else nodes)
+        if isinstance(node, dict) and str(node.get("id") or "").strip()
+    ]
+    known = set(known_ids)
+    result: list[str] = []
+    seen: set[str] = set()
+    if isinstance(raw_order, list):
+        for value in raw_order:
+            node_id = str(value or "").strip()
+            if node_id and node_id in known and node_id not in seen:
+                seen.add(node_id)
+                result.append(node_id)
+    result.extend(node_id for node_id in known_ids if node_id not in seen)
+    return result
+
+
+def load_agent_order(nodes: list[dict[str, Any]] | None = None) -> list[str]:
+    settings = load_hub_settings()
+    return normalize_agent_order(settings.get("agent_order"), nodes)
 
 
 def node_youtube_profile_map() -> dict[str, str]:
@@ -9199,6 +9384,9 @@ def remove_node_record(node_id: str) -> dict[str, Any]:
     if len(remaining) == len(nodes):
         return {"ok": False, "node_id": node_id, "message": "node not found"}
     save_nodes(remaining)
+    settings = load_hub_settings()
+    settings["agent_order"] = normalize_agent_order(settings.get("agent_order"), remaining)
+    save_hub_settings(settings)
     return {"ok": True, "node_id": node_id, "deleted": True, "remaining_count": len(remaining)}
 
 
@@ -9835,21 +10023,43 @@ def list_media() -> list[dict[str, Any]]:
 @APP.get("/api/settings")
 def api_hub_settings():
     settings = load_hub_settings()
-    return jsonify({"ok": True, "hub_name": str(settings.get("hub_name") or "Stream Control Hub")})
+    nodes = load_nodes()
+    agent_order = load_agent_order(nodes)
+    if settings.get("agent_order") != agent_order:
+        settings["agent_order"] = agent_order
+        save_hub_settings(settings)
+    return jsonify({
+        "ok": True,
+        "hub_name": str(settings.get("hub_name") or "Stream Control Hub"),
+        "agent_order": agent_order,
+    })
 
 
 @APP.post("/api/settings")
 def api_save_hub_settings():
     payload = request.get_json(silent=True) or {}
-    hub_name = " ".join(str(payload.get("hub_name") or "").split()).strip()
-    if not hub_name:
-        return jsonify({"ok": False, "message": "Hub name is required"}), 400
-    if len(hub_name) > 80:
-        return jsonify({"ok": False, "message": "Hub name is limited to 80 characters"}), 400
+    has_hub_name = "hub_name" in payload
+    has_agent_order = "agent_order" in payload
+    if not has_hub_name and not has_agent_order:
+        return jsonify({"ok": False, "message": "hub_name or agent_order is required"}), 400
     settings = load_hub_settings()
-    settings["hub_name"] = hub_name
+    response: dict[str, Any] = {"ok": True}
+    if has_hub_name:
+        hub_name = " ".join(str(payload.get("hub_name") or "").split()).strip()
+        if not hub_name:
+            return jsonify({"ok": False, "message": "Hub name is required"}), 400
+        if len(hub_name) > 80:
+            return jsonify({"ok": False, "message": "Hub name is limited to 80 characters"}), 400
+        settings["hub_name"] = hub_name
+        response["hub_name"] = hub_name
+    if has_agent_order:
+        if not isinstance(payload.get("agent_order"), list):
+            return jsonify({"ok": False, "message": "agent_order must be a list"}), 400
+        agent_order = normalize_agent_order(payload.get("agent_order"), load_nodes())
+        settings["agent_order"] = agent_order
+        response["agent_order"] = agent_order
     save_hub_settings(settings)
-    return jsonify({"ok": True, "hub_name": hub_name})
+    return jsonify(response)
 
 
 @APP.get("/api/media-library")
