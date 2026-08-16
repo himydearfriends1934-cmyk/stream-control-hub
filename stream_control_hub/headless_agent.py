@@ -2869,8 +2869,10 @@ def api_upgrade():
 @APP.get("/api/role-status")
 def api_role_status():
     version = agent_version_status()
+    hub_enabled = systemd_service_active("stream-control-hub.service")
     return jsonify({
         "ok": True,
+        "role_conflict": hub_enabled,
         "roles": {
             "agent": {
                 "enabled": True,
@@ -2879,7 +2881,7 @@ def api_role_status():
                 "url": f"http://{request.host.split(':')[0]}:{PORT}",
             },
             "hub": {
-                "enabled": systemd_service_active("stream-control-hub.service"),
+                "enabled": hub_enabled,
                 "prepared": (ROOT / "scripts" / "install-hub.sh").exists(),
                 "version": version["version"],
                 "url": f"http://{request.host.split(':')[0]}:8788",

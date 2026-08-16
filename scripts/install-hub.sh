@@ -75,6 +75,7 @@ if [ -z "${STREAM_NODE_ROLE_FILE:-}" ]; then
     STREAM_NODE_ROLE_FILE="$HOME/.config/stream-control/role"
   fi
 fi
+ENV_FILE="$INSTALL_DIR/.env"
 UPGRADE_LOCK_FILE="${STREAM_NODE_UPGRADE_LOCK_FILE:-$INSTALL_DIR/data/.upgrade.lock}"
 
 acquire_upgrade_lock() {
@@ -96,6 +97,7 @@ acquire_upgrade_lock() {
 }
 
 assert_single_role() {
+  current_role=""
   if [ -f "$STREAM_NODE_ROLE_FILE" ]; then
     current_role="$(head -n 1 "$STREAM_NODE_ROLE_FILE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
     if [ -n "$current_role" ] && [ "$current_role" != "hub" ] && [ "$ROLE_SWITCH_CONFIRMED" != "1" ]; then
@@ -104,7 +106,10 @@ assert_single_role() {
     fi
   fi
   if command -v systemctl >/dev/null 2>&1 \
-    && systemctl is-active --quiet stream-control-headless-agent.service \
+    && (systemctl is-active --quiet stream-control-headless-agent.service \
+      || systemctl is-enabled --quiet stream-control-headless-agent.service) \
+    && ! systemctl is-active --quiet stream-control-hub.service \
+    && [ "$current_role" != "hub" ] \
     && [ "$ROLE_SWITCH_CONFIRMED" != "1" ]; then
     echo "Agent service is active. Deactivate Agent before installing HUB." >&2
     exit 6
@@ -132,6 +137,75 @@ hub_systemctl() {
   else
     systemctl --user "$@"
   fi
+}
+
+has_active_ffmpeg() {
+  command -v pgrep >/dev/null 2>&1 && pgrep -x ffmpeg >/dev/null 2>&1
+}
+
+reconcile_hub_role() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  if systemctl is-active --quiet stream-control-headless-agent.service \
+    || systemctl is-enabled --quiet stream-control-headless-agent.service; then
+    current_role=""
+    if [ -f "$STREAM_NODE_ROLE_FILE" ]; then
+      current_role="$(head -n 1 "$STREAM_NODE_ROLE_FILE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+    fi
+    if [ "$ROLE_SWITCH_CONFIRMED" != "1" ] \
+      && ! systemctl is-active --quiet stream-control-hub.service \
+      && [ "$current_role" != "hub" ]; then
+      echo "Agent service is active or enabled. Deactivate Agent before installing HUB." >&2
+      return 6
+    fi
+    if [ "$ROLE_SWITCH_CONFIRMED" != "1" ] && has_active_ffmpeg; then
+      echo "An active FFmpeg stream was detected. Refusing to stop Agent during HUB upgrade; confirm the role switch explicitly." >&2
+      return 6
+    fi
+    echo "Disabling the conflicting Agent service for the HUB role."
+    systemctl disable --now stream-control-headless-agent.service
+  fi
+}
+
+write_hub_service_unit() {
+  if [ "$STREAM_HUB_SERVICE_MODE" = "system" ]; then
+    SERVICE_FILE="/etc/systemd/system/stream-control-hub.service"
+    SERVICE_TARGET="multi-user.target"
+    SYSTEMCTL="systemctl"
+  else
+    SERVICE_DIR="$HOME/.config/systemd/user"
+    mkdir -p "$SERVICE_DIR"
+    SERVICE_FILE="$SERVICE_DIR/stream-control-hub.service"
+    SERVICE_TARGET="default.target"
+    SYSTEMCTL="systemctl --user"
+  fi
+  cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Stream Control Hub
+After=network-online.target
+Wants=network-online.target
+Conflicts=stream-control-headless-agent.service
+Before=stream-control-headless-agent.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=$ENV_FILE
+Environment=STREAM_NODE_ROLE=hub
+Environment=STREAM_NODE_ROLE_FILE=$STREAM_NODE_ROLE_FILE
+ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=$SERVICE_TARGET
+EOF
+  $SYSTEMCTL daemon-reload
 }
 
 health_check_hub() {
@@ -326,6 +400,8 @@ install_packages
 need_cmd git
 need_cmd python3
 need_cmd curl
+reconcile_hub_role
+write_hub_service_unit
 
 if [ -d "$INSTALL_DIR/.git" ]; then
   transactional_refresh_hub
@@ -347,7 +423,6 @@ python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
 "$INSTALL_DIR/.venv/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
 
-ENV_FILE="$INSTALL_DIR/.env"
 TOKEN=""
 EXISTING_HOST=""
 EXISTING_PORT=""
@@ -452,43 +527,7 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
-  if [ "$STREAM_HUB_SERVICE_MODE" = "system" ]; then
-    SERVICE_FILE="/etc/systemd/system/stream-control-hub.service"
-    SERVICE_TARGET="multi-user.target"
-    SYSTEMCTL="systemctl"
-  else
-    SERVICE_DIR="$HOME/.config/systemd/user"
-    mkdir -p "$SERVICE_DIR"
-    SERVICE_FILE="$SERVICE_DIR/stream-control-hub.service"
-    SERVICE_TARGET="default.target"
-    SYSTEMCTL="systemctl --user"
-  fi
-  cat > "$SERVICE_FILE" <<EOF
-[Unit]
-Description=Stream Control Hub
-After=network-online.target
-Wants=network-online.target
-Conflicts=stream-control-headless-agent.service
-Before=stream-control-headless-agent.service
-StartLimitIntervalSec=60
-StartLimitBurst=10
-
-[Service]
-WorkingDirectory=$INSTALL_DIR
-EnvironmentFile=$ENV_FILE
-Environment=STREAM_NODE_ROLE=hub
-Environment=STREAM_NODE_ROLE_FILE=$STREAM_NODE_ROLE_FILE
-ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub
-Restart=always
-RestartSec=3
-TimeoutStopSec=20
-KillMode=control-group
-UMask=0077
-
-[Install]
-WantedBy=$SERVICE_TARGET
-EOF
-  $SYSTEMCTL daemon-reload
+  write_hub_service_unit
   $SYSTEMCTL enable stream-control-hub.service
   $SYSTEMCTL reset-failed stream-control-hub.service || true
   $SYSTEMCTL restart stream-control-hub.service

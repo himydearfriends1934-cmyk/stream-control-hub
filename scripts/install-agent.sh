@@ -44,6 +44,7 @@ acquire_upgrade_lock() {
 }
 
 assert_single_role() {
+  current_role=""
   if [ -f "$STREAM_NODE_ROLE_FILE" ]; then
     current_role="$(head -n 1 "$STREAM_NODE_ROLE_FILE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
     if [ -n "$current_role" ] && [ "$current_role" != "agent" ] && [ "$ROLE_SWITCH_CONFIRMED" != "1" ]; then
@@ -52,11 +53,64 @@ assert_single_role() {
     fi
   fi
   if command -v systemctl >/dev/null 2>&1 \
-    && systemctl is-active --quiet stream-control-hub.service \
+    && (systemctl is-active --quiet stream-control-hub.service \
+      || systemctl is-enabled --quiet stream-control-hub.service) \
+    && ! systemctl is-active --quiet stream-control-headless-agent.service \
+    && [ "$current_role" != "agent" ] \
     && [ "$ROLE_SWITCH_CONFIRMED" != "1" ]; then
     echo "HUB service is active. Deactivate HUB before installing Agent." >&2
     exit 6
   fi
+}
+
+reconcile_agent_role() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  if systemctl is-active --quiet stream-control-hub.service \
+    || systemctl is-enabled --quiet stream-control-hub.service; then
+    current_role=""
+    if [ -f "$STREAM_NODE_ROLE_FILE" ]; then
+      current_role="$(head -n 1 "$STREAM_NODE_ROLE_FILE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+    fi
+    if [ "$ROLE_SWITCH_CONFIRMED" != "1" ] \
+      && ! systemctl is-active --quiet stream-control-headless-agent.service \
+      && [ "$current_role" != "agent" ]; then
+      echo "HUB service is active or enabled. Deactivate HUB before installing Agent." >&2
+      return 6
+    fi
+    echo "Disabling the conflicting HUB service for the Agent role."
+    systemctl disable --now stream-control-hub.service
+  fi
+}
+
+write_agent_service_unit() {
+  cat > /etc/systemd/system/stream-control-headless-agent.service <<EOF
+[Unit]
+Description=Stream Control Hub Headless Agent
+After=network-online.target
+Wants=network-online.target
+Conflicts=stream-control-hub.service
+Before=stream-control-hub.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=$INSTALL_DIR/.agent.env
+Environment=STREAM_NODE_ROLE=agent
+Environment=STREAM_NODE_ROLE_FILE=$STREAM_NODE_ROLE_FILE
+ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub.headless_agent
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
 }
 
 write_role_marker() {
@@ -475,6 +529,8 @@ configure_agent_firewall
 need_cmd git
 need_cmd python3
 need_cmd systemctl
+reconcile_agent_role
+write_agent_service_unit
 remove_legacy_conflicts
 
 if [ -d "$INSTALL_DIR/.git" ]; then
@@ -555,33 +611,7 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
   sh "$INSTALL_DIR/scripts/tailscale-install.sh" connect
 fi
 
-cat > /etc/systemd/system/stream-control-headless-agent.service <<EOF
-[Unit]
-Description=Stream Control Hub Headless Agent
-After=network-online.target
-Wants=network-online.target
-Conflicts=stream-control-hub.service
-Before=stream-control-hub.service
-StartLimitIntervalSec=60
-StartLimitBurst=10
-
-[Service]
-WorkingDirectory=$INSTALL_DIR
-EnvironmentFile=$INSTALL_DIR/.agent.env
-Environment=STREAM_NODE_ROLE=agent
-Environment=STREAM_NODE_ROLE_FILE=$STREAM_NODE_ROLE_FILE
-ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub.headless_agent
-Restart=always
-RestartSec=3
-TimeoutStopSec=20
-KillMode=control-group
-UMask=0077
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
+write_agent_service_unit
 systemctl enable stream-control-headless-agent.service
 systemctl reset-failed stream-control-headless-agent.service >/dev/null 2>&1 || true
 systemctl restart stream-control-headless-agent.service

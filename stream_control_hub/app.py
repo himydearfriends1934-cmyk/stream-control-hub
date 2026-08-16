@@ -10852,8 +10852,10 @@ def api_hub_switch_target():
 @APP.get("/api/role-status")
 def api_hub_role_status():
     host = (request.host.split(":", 1)[0] or "127.0.0.1").strip("[]")
+    agent_enabled = service_active("stream-control-headless-agent.service")
     return jsonify({
         "ok": True,
+        "role_conflict": agent_enabled,
         "roles": {
             "hub": {
                 "enabled": True,
@@ -10862,7 +10864,7 @@ def api_hub_role_status():
                 "url": f"http://{host}:{PORT}",
             },
             "agent": {
-                "enabled": service_active("stream-control-headless-agent.service"),
+                "enabled": agent_enabled,
                 "prepared": (ROOT / "scripts" / "install-agent.sh").exists(),
                 "version": local_git_version(),
                 "url": f"http://{host}:8787",
@@ -10909,7 +10911,7 @@ def api_upgrade_hub():
         result = schedule_hub_upgrade()
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
-    return jsonify({"ok": True, "accepted": True, "message": "HUB upgrade scheduled; only the HUB service will be restarted", "result": result}), 202
+    return jsonify({"ok": True, "accepted": True, "message": "HUB upgrade scheduled; the HUB service and role conflict state will be reconciled", "result": result}), 202
 
 
 @APP.get("/api/media")

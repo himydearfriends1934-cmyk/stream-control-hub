@@ -109,6 +109,28 @@ class InstallerPersistenceTests(unittest.TestCase):
             self.assertIn(directive, hub)
             self.assertIn(directive, agent)
 
+    def test_role_installers_reconcile_existing_conflicting_services(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+        agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
+
+        self.assertIn("Conflicts=stream-control-headless-agent.service", hub)
+        self.assertIn("Conflicts=stream-control-hub.service", agent)
+        self.assertIn("systemctl disable --now stream-control-headless-agent.service", hub)
+        self.assertIn("systemctl disable --now stream-control-hub.service", agent)
+        self.assertIn("systemctl is-enabled --quiet stream-control-headless-agent.service", hub)
+        self.assertIn("systemctl is-enabled --quiet stream-control-hub.service", agent)
+        self.assertIn("pgrep -x ffmpeg", hub)
+        self.assertIn("confirm the role switch explicitly", hub)
+        self.assertIn("write_hub_service_unit", hub)
+        self.assertIn("write_agent_service_unit", agent)
+
+        hub_install = hub.index("reconcile_hub_role\nwrite_hub_service_unit", hub.index("need_cmd curl"))
+        hub_refresh = hub.rindex("transactional_refresh_hub")
+        agent_install = agent.index("reconcile_agent_role\nwrite_agent_service_unit", agent.index("need_cmd systemctl"))
+        agent_refresh = agent.rindex("transactional_refresh_agent")
+        self.assertLess(hub_install, hub_refresh)
+        self.assertLess(agent_install, agent_refresh)
+
     def test_hub_update_restarts_the_declared_systemd_service_strictly(self):
         script = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
 

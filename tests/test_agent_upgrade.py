@@ -177,9 +177,11 @@ class AgentUpgradeTests(unittest.TestCase):
 
         self.assertTrue(hub_data["roles"]["agent"]["prepared"])
         self.assertFalse(hub_data["roles"]["agent"]["enabled"])
+        self.assertFalse(hub_data["role_conflict"])
         self.assertEqual(hub_data["roles"]["agent"]["version"], "abc1234")
         self.assertTrue(agent_data["roles"]["hub"]["prepared"])
         self.assertFalse(agent_data["roles"]["hub"]["enabled"])
+        self.assertFalse(agent_data["role_conflict"])
         self.assertEqual(agent_data["roles"]["hub"]["version"], "abc1234")
 
     def test_agent_reports_git_revision(self):
