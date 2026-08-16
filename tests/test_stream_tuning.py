@@ -49,6 +49,26 @@ class StreamTuningTests(unittest.TestCase):
         self.assertEqual(result["recommendation"]["preset"], "superfast")
         self.assertFalse(result["analysis"]["copy_compatible"])
 
+    def test_static_youtube_source_still_transcodes_for_controlled_gop(self):
+        result = initial_stream_recommendation(
+            {
+                "width": 1280,
+                "height": 720,
+                "fps": 30,
+                "video_codec": "h264",
+                "audio_codec": "aac",
+                "pixel_format": "yuv420p",
+                "video_bitrate_kbps": 3500,
+            },
+            cpu_count=2,
+            memory_available_mb=2048,
+            motion_level="static",
+        )
+
+        self.assertTrue(result["analysis"]["copy_compatible"])
+        self.assertFalse(result["recommendation"]["copy_mode"])
+        self.assertEqual(result["recommendation"]["keyframe_seconds"], 2)
+
     def test_ffmpeg_command_uses_progress_aspect_safe_filter_and_silent_audio(self):
         from stream_control_hub import headless_agent
 
@@ -72,6 +92,39 @@ class StreamTuningTests(unittest.TestCase):
         self.assertIn("anullsrc=channel_layout=stereo:sample_rate=44100", command)
         self.assertIn("scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1", command)
         self.assertEqual(command[command.index("-minrate") + 1], "4000k")
+
+    def test_youtube_copy_payload_is_transcoded_with_forced_two_second_gop(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_bytes(b"video")
+            with patch.object(headless_agent.shutil, "which", return_value="ffmpeg"), patch.object(
+                headless_agent, "DATA_DIR", Path(tmp)
+            ), patch.object(
+                headless_agent,
+                "probe_media",
+                return_value={"has_audio": True, "video_codec": "h264", "audio_codec": "aac", "pixel_format": "yuv420p", "fps": 30},
+            ):
+                command = headless_agent.ffmpeg_command(
+                    {
+                        "copy_mode": True,
+                        "stream_output_mode": "youtube_api",
+                        "youtube_stream_id": "stream-id",
+                        "fps": 30,
+                        "video_bitrate": 4000,
+                        "audio_bitrate": 128,
+                        "keyframe_seconds": 2,
+                    },
+                    video,
+                    "rtmps://a.rtmp.youtube.com/live2/secret",
+                )
+
+        self.assertEqual(command[command.index("-c:v") + 1], "libx264")
+        self.assertEqual(command[command.index("-g") + 1], "60")
+        self.assertEqual(command[command.index("-keyint_min") + 1], "60")
+        self.assertEqual(command[command.index("-sc_threshold") + 1], "0")
+        self.assertEqual(command[command.index("-force_key_frames") + 1], "expr:gte(t,n_forced*2)")
 
     def test_ffmpeg_network_rate_uses_only_ffmpeg_socket_counter(self):
         from stream_control_hub import headless_agent

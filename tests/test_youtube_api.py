@@ -954,6 +954,28 @@ class YouTubeAPIClientTests(unittest.TestCase):
             self.assertEqual(result["recommendation"][key], value)
         self.assertTrue(any("futureunknownissue" in warning for warning in result["analysis"]["warnings"]))
 
+    def test_youtube_health_rejects_copy_mode_even_without_api_issue(self):
+        result = youtube_health_recommendation(
+            {
+                "stream_status": "active",
+                "health_status": "good",
+                "configuration_issues": [],
+            },
+            {
+                "copy_mode": True,
+                "preset": "copy",
+                "video_bitrate": 4000,
+                "audio_bitrate": 128,
+                "fps": 30,
+                "resolution": "1280x720",
+                "keyframe_seconds": 2,
+            },
+        )
+
+        self.assertEqual(result["recommendation"]["copy_mode"], False)
+        self.assertEqual(result["severity"], "warning")
+        self.assertTrue(any("controlled two-second GOP" in reason for reason in result["analysis"]["reasons"]))
+
     def test_autotune_history_records_api_problem_before_change_and_verified_after(self):
         from stream_control_hub import app
 

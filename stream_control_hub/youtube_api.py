@@ -115,6 +115,9 @@ def youtube_health_recommendation(
     elif "warning" in issue_levels and severity == "ok":
         severity = "warning"
 
+    if copy_mode:
+        mark_action("YouTube Live requires transcoding so the Agent can enforce a controlled two-second GOP.")
+
     video_high_types = {"bitratehigh", "videobitratehigh", "videobitrateishigh"}
     video_low_types = {"bitratelow", "videobitratelow", "videobitrateislow"}
     audio_high_types = {"audiobitratehigh", "audiobitrateishigh"}

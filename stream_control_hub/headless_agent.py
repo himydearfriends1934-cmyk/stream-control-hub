@@ -760,6 +760,30 @@ def load_stream_restart_payload() -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def is_youtube_stream(payload: dict[str, Any], output_url: str = "") -> bool:
+    output_mode = str(payload.get("stream_output_mode") or "").strip().lower()
+    return (
+        output_mode == "youtube_api"
+        or bool(str(payload.get("youtube_stream_id") or "").strip())
+        or "youtube.com" in str(output_url or "").lower()
+    )
+
+
+def normalize_stream_payload(payload: dict[str, Any], output_url: str = "") -> dict[str, Any]:
+    normalized = dict(payload)
+    if not is_youtube_stream(normalized, output_url):
+        return normalized
+
+    # A recovery file can outlive the Hub's current settings. Never let an old
+    # Copy payload bypass YouTube's keyframe requirements on the next launch.
+    if bool(normalized.get("copy_mode")):
+        normalized["copy_mode"] = False
+        if str(normalized.get("preset") or "").strip().lower() == "copy":
+            normalized["preset"] = "superfast"
+    normalized["keyframe_seconds"] = max(1, min(4, int(normalized.get("keyframe_seconds") or 2)))
+    return normalized
+
+
 def remove_stream_restart_payload() -> None:
     STREAM_RESTART_FILE.unlink(missing_ok=True)
 
@@ -1428,6 +1452,7 @@ def cached_youtube_ingestion_url(stream_id: str) -> str:
 def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -> list[str]:
     if not shutil.which(FFMPEG_BIN):
         raise RuntimeError(f"{FFMPEG_BIN} is not installed")
+    payload = normalize_stream_payload(payload, output_url)
     if bool(payload.get("copy_mode")):
         source = probe_media(video_path)
         if not source_copy_compatible(source):
@@ -1506,13 +1531,21 @@ def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -
         "-refs",
         "1",
         "-x264-params",
-        "nal-hrd=cbr:force-cfr=1",
+        f"nal-hrd=cbr:force-cfr=1:keyint={fps * keyframe_seconds}:min-keyint={fps * keyframe_seconds}:scenecut=0:open-gop=0",
         "-r",
         str(fps),
         "-vf",
         f"scale={resolution.replace('x', ':')}:force_original_aspect_ratio=decrease,pad={resolution.replace('x', ':')}:(ow-iw)/2:(oh-ih)/2,setsar=1",
         "-g",
         str(fps * keyframe_seconds),
+        "-keyint_min",
+        str(fps * keyframe_seconds),
+        "-sc_threshold",
+        "0",
+        "-flags",
+        "+cgop",
+        "-force_key_frames",
+        f"expr:gte(t,n_forced*{keyframe_seconds})",
         "-c:a",
         "aac",
         "-b:a",
@@ -1554,8 +1587,9 @@ def launch_stream_process(
     persist_recovery: bool,
     resolved_output_url: str = "",
 ) -> dict[str, Any]:
-    video_path = resolve_media_path(str(payload.get("video_path") or ""))
     output_url = resolved_output_url or stream_output_url(payload)
+    payload = normalize_stream_payload(payload, output_url)
+    video_path = resolve_media_path(str(payload.get("video_path") or ""))
     command = ffmpeg_command(payload, video_path, output_url)
     if persist_recovery:
         recovery_payload = dict(payload)

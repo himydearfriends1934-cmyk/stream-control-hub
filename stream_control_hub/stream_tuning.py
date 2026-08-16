@@ -114,14 +114,10 @@ def initial_stream_recommendation(
     motion_level = str(motion_level or "medium").strip().lower()
     if motion_level not in {"static", "medium", "dynamic"}:
         motion_level = "medium"
-    static_copy_safe = (
-        motion_level == "static"
-        and copy_safe
-        and source_width <= 1280
-        and source_height <= 1280
-        and source_fps <= 30
-        and (not source.get("video_bitrate_kbps") or int(source.get("video_bitrate_kbps") or 0) <= 4500)
-    )
+    # YouTube requires a controlled GOP. Even a compatible static source can
+    # carry long or irregular keyframe intervals, so remuxing it with Copy
+    # mode cannot satisfy the live encoder contract.
+    static_copy_safe = False
     reasons = [
         f"YouTube Live H.264 baseline for {width}x{height}@{fps} is {youtube_bitrate} Kbps.",
         f"Selected {preset} for {cpu_count} logical CPU(s) and {memory_available_mb or 'unknown'} MB available memory.",
@@ -139,7 +135,7 @@ def initial_stream_recommendation(
     if not copy_safe:
         warnings.append("Source is not safe for RTMP copy mode; H.264/AAC transcoding is required.")
     elif motion_level == "static" and not static_copy_safe:
-        warnings.append("Source can use copy codecs but exceeds the guarded static-profile dimensions, frame rate, or bitrate limits.")
+        warnings.append("Static source still uses H.264/AAC transcoding so YouTube receives a controlled two-second GOP.")
 
     recommendation = {
         "copy_mode": static_copy_safe,
