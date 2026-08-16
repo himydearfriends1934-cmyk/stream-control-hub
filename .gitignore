@@ -9,3 +9,4 @@ agent_data/
 logs/
 *.log
 node-registration.json
+run-hub.sh
