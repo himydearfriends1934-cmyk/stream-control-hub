@@ -268,7 +268,10 @@ transactional_refresh_hub() {
     [ -e "$candidate/$item" ] && cp -a "$candidate/$item" "$INSTALL_DIR/$item"
   done
   mv "$candidate/.venv" "$INSTALL_DIR/.venv"
-  git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
+  # The candidate files are already in the main worktree. Reset the index and
+  # commit pointer to that exact candidate instead of asking checkout to
+  # overwrite the files it just received from the candidate worktree.
+  git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
   hub_systemctl restart stream-control-hub.service
   if health_check_hub; then
     cleanup_candidate
@@ -400,6 +403,7 @@ install_packages
 need_cmd git
 need_cmd python3
 need_cmd curl
+git config --global --add safe.directory "$INSTALL_DIR" >/dev/null 2>&1 || true
 reconcile_hub_role
 write_hub_service_unit
 

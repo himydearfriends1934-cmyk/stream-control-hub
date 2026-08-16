@@ -154,6 +154,17 @@ class InstallerPersistenceTests(unittest.TestCase):
             self.assertIn("rolling back", script)
             self.assertNotIn('git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"', script)
 
+    def test_managed_activation_resets_git_metadata_after_candidate_copy(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn('git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"', hub)
+        self.assertNotIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"', hub)
+
+    def test_hub_installer_allows_root_to_manage_existing_non_root_checkout(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn('git config --global --add safe.directory "$INSTALL_DIR"', hub)
+
     def test_installers_default_without_interactive_tty(self):
         hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
         agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
