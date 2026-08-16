@@ -119,4 +119,4 @@ class AgentOrderTests(unittest.TestCase):
         self.assertIn('refs.nodeList.addEventListener("dragstart"', app.HTML)
         self.assertIn('refs.nodeList.addEventListener("drop"', app.HTML)
         self.assertIn('postJson("/api/settings", { agent_order: payloadOrder })', app.HTML)
-        self.assertIn("orderedAgentRows(nodes.filter(shouldShowAgentRow))", app.HTML)
+        self.assertIn("orderedAgentRows(nodes.filter(shouldShowAgentNode))", app.HTML)

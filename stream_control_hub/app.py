@@ -3605,7 +3605,7 @@ HTML = r"""
     }
 
     function statusSummaryText() {
-      const agentRows = nodes.filter((node) => Boolean(node.roles?.agent?.present || node.roles?.agent?.enabled));
+      const agentRows = nodes.filter(shouldShowAgentNode);
       const onlineAgents = agentRows.filter((node) => nodeOnline(node)).length;
       const streamingAgents = agentRows.filter((node) => nodeStreaming(node)).length;
       const resources = mediaLibrary.resources || [];
@@ -4296,14 +4296,7 @@ HTML = r"""
     }
 
     function renderNodes() {
-      const nodeHasResources = (nodeId) => (mediaLibrary.resources || []).some((resource) => resourceHasNode(resource, nodeId));
-      const shouldShowAgentRow = (node) => {
-        const nodeId = String(node.id || "");
-        const agentRole = node.roles?.agent || {};
-        const agentPresent = Boolean(agentRole.present || agentRole.enabled);
-        return node.enabled !== false && (agentPresent || nodeHasResources(nodeId));
-      };
-      const agentRows = orderedAgentRows(nodes.filter(shouldShowAgentRow));
+      const agentRows = orderedAgentRows(nodes.filter(shouldShowAgentNode));
       const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
       const onlineAgentCount = agentRows.filter((node) => Boolean(node.roles?.agent?.enabled)).length;
       const agentCapacity = Math.max(AGENT_SLOT_COUNT, agentRows.length);
@@ -4374,6 +4367,23 @@ HTML = r"""
     function resourceHasNode(item, nodeId) {
       if (!nodeId) return true;
       return (item.copies || []).some((copy) => String(copy.node_id || "") === String(nodeId));
+    }
+
+    function nodeHasResources(nodeId) {
+      return (mediaLibrary.resources || []).some((resource) => resourceHasNode(resource, nodeId));
+    }
+
+    function isHubOnlyNode(node) {
+      const hubEnabled = Boolean(node?.hub_only || node?.roles?.hub?.enabled);
+      const agentEnabled = Boolean(node?.roles?.agent?.enabled);
+      return hubEnabled && !agentEnabled && !nodeHasResources(String(node?.id || ""));
+    }
+
+    function shouldShowAgentNode(node) {
+      const agentRole = node?.roles?.agent || {};
+      const agentPresent = Boolean(agentRole.present || agentRole.enabled);
+      return node?.enabled !== false && !isHubOnlyNode(node)
+        && (agentPresent || nodeHasResources(String(node?.id || "")));
     }
 
     function renderNodeSpaceRings(nodeDisks) {
