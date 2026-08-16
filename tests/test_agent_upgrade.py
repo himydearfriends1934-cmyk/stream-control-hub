@@ -25,6 +25,14 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertNotIn('INSTALL_DIR exists but is not a git checkout', script)
         self.assertNotIn('INSTALL_DIR exists but is not a git checkout', hub_script)
 
+    def test_agent_activation_resets_git_metadata_after_candidate_copy(self):
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "install-agent.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"', script)
+        self.assertNotIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"', script)
+
     def test_hub_activates_agent_from_shared_checkout_without_exposing_token(self):
         from stream_control_hub import app
 

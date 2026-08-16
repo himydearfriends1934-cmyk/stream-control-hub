@@ -254,7 +254,10 @@ transactional_refresh_agent() {
     [ -e "$candidate/$item" ] && cp -a "$candidate/$item" "$INSTALL_DIR/$item"
   done
   mv "$candidate/.venv" "$INSTALL_DIR/.venv"
-  git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
+  # The candidate files are already in the main worktree. Reset the index and
+  # commit pointer to that exact candidate instead of asking checkout to
+  # overwrite the files it just received from the candidate worktree.
+  git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
   systemctl restart stream-control-headless-agent.service
   if health_check_agent; then
     cleanup_candidate
