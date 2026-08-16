@@ -33,6 +33,13 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"', script)
         self.assertNotIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"', script)
 
+    def test_agent_installer_allows_root_to_manage_existing_non_root_checkout(self):
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "install-agent.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('git config --global --add safe.directory "$INSTALL_DIR"', script)
+
     def test_hub_activates_agent_from_shared_checkout_without_exposing_token(self):
         from stream_control_hub import app
 

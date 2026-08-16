@@ -532,6 +532,7 @@ configure_agent_firewall
 need_cmd git
 need_cmd python3
 need_cmd systemctl
+git config --global --add safe.directory "$INSTALL_DIR" >/dev/null 2>&1 || true
 reconcile_agent_role
 write_agent_service_unit
 remove_legacy_conflicts
