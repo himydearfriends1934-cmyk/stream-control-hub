@@ -4338,10 +4338,6 @@ HTML = r"""
         ? `${smartTuneActive ? "智能调参已开启" : "开启智能调参"}：${currentProfileName} / ${currentStreamName}`
         : "请先选择 YouTube API 直播流";
       const agentVersion = h.agent?.version || "未识别";
-      const hubRole = node.roles?.hub || {};
-      const hubAction = hubRole.enabled
-        ? ""
-        : `<button type="button" class="tiny primary" data-role-action="activate-role" data-role="hub" data-node-id="${escapeHtml(node.id)}" ${hubRole.activation_pending ? "disabled" : ""}>${hubRole.activation_pending ? "Hub 切换中" : "启用 Hub"}</button>`;
       return `
         <div class="node-row agent-row ${streaming ? "running" : ""} ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="点击选中；删除/取消角色请打开后面的设置">
           <span class="node-index">
@@ -4363,7 +4359,6 @@ HTML = r"""
             <button type="button" class="smart-tune-button ${smartTuneActive ? "active" : ""}" data-node-smart-tune data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(smartTuneTitle)}" ${smartTuneDisabled}>智能</button>
           </span>
           <span class="row-actions">
-            ${hubAction}
             <button class="tiny settings-button" data-role-settings data-node-id="${escapeHtml(node.id)}" title="节点角色设置" aria-label="节点角色设置">⚙</button>
             <span class="node-version-pill" title="版本 ${escapeHtml(agentVersion)}">${escapeHtml(agentVersion)}</span>
           </span>
