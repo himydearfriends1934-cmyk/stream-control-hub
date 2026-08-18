@@ -29,6 +29,17 @@ class InstallerPersistenceTests(unittest.TestCase):
         self.assertIn("existingPort", powershell)
         self.assertIn("STREAM_HUB_SUPPRESS_TOKEN_OUTPUT", script)
 
+    def test_hub_defaults_trusted_remote_writes_for_tailscale_host(self):
+        script = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn('case "$STREAM_HUB_HOST" in', script)
+        self.assertIn(
+            "100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*)",
+            script,
+        )
+        self.assertIn('STREAM_HUB_TRUSTED_REMOTE_WRITES="1"', script)
+        self.assertIn('STREAM_HUB_TRUSTED_REMOTE_WRITES="0"', script)
+
     def test_hub_preserves_youtube_environment_during_update(self):
         script = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
         powershell = (ROOT / "scripts" / "install-hub.ps1").read_text(encoding="utf-8")
