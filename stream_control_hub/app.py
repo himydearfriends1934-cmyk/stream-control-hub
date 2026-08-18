@@ -13,6 +13,7 @@ import hashlib
 import ipaddress
 import threading
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2348,6 +2349,44 @@ HTML = r"""
     .tailscale-peer-option strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .tailscale-peer-option .peer-action { color: var(--accent); font-size: 12px; font-weight: 800; }
     .tailscale-peer-toolbar { display: flex; justify-content: flex-end; }
+    .agent-discovery {
+      margin: 8px 0 10px;
+      padding: 9px 10px;
+      border: 1px solid rgba(54, 211, 153, 0.34);
+      border-radius: 8px;
+      background: rgba(54, 211, 153, 0.05);
+    }
+    .agent-discovery-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .agent-discovery-head strong, .agent-discovery-head small { display: block; }
+    .agent-discovery-head strong { font-size: 13px; }
+    .agent-discovery-head small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .agent-discovery-list { display: grid; gap: 6px; margin-top: 8px; }
+    .agent-discovery-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 2px 10px;
+      width: 100%;
+      padding: 8px 9px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--text);
+      background: rgba(7, 18, 14, 0.38);
+      text-align: left;
+    }
+    button.agent-discovery-item { cursor: pointer; }
+    button.agent-discovery-item:hover, button.agent-discovery-item:focus-visible {
+      border-color: var(--accent);
+      background: rgba(54, 211, 153, 0.1);
+    }
+    .agent-discovery-item small { grid-column: 1 / -1; color: var(--muted); }
+    .agent-discovery-item .peer-action { color: var(--accent); font-size: 12px; font-weight: 800; }
+    .agent-discovery-item.is-known .peer-action { color: var(--accent-2); }
+    .agent-discovery-empty { color: var(--muted); font-size: 12px; }
     .choice-modal { width: min(560px, calc(100vw - 28px)); text-align: left; }
     .choice-modal .choice-icon { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 16px; background: rgba(251, 191, 36, .16); color: #ffd166; font-size: 24px; box-shadow: inset 0 0 0 1px rgba(251, 191, 36, .32); }
     .choice-modal .wizard-head { align-items: center; }
@@ -2957,6 +2996,13 @@ HTML = r"""
         <div class="node-role-split" id="nodeRoleSplit">
         <div class="role-group node-role-pane agent-role-pane">
           <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
+          <div class="agent-discovery" id="agentDiscoveryPanel">
+            <div class="agent-discovery-head">
+              <span><strong>Tailnet 自动发现</strong><small id="agentDiscoverySummary">正在扫描在线 Agent...</small></span>
+              <button type="button" id="refreshAgentDiscoveryBtn" title="刷新 Tailnet Agent">刷新</button>
+            </div>
+            <div class="agent-discovery-list" id="agentDiscoveryList">正在读取 Tailnet 设备...</div>
+          </div>
           <div class="node-table" id="nodeList">加载中...</div>
         </div>
         <details class="role-group node-role-pane hub-role-pane" id="hubNodePane">
@@ -3068,7 +3114,7 @@ HTML = r"""
       <div class="wizard-head">
         <div>
           <h2 id="tailscaleWizardTitle">Agent 快速连接</h2>
-          <p>输入 Agent 的 Tailscale IP。Hub 会自动完成网络、服务和权限检查。</p>
+          <p>加入同一 Tailnet 后，Hub 会自动识别已安装 Agent；点击节点即可完成接入。</p>
         </div>
         <button class="wizard-close" id="tailscaleWizardClose" title="关闭">X</button>
       </div>
@@ -3085,7 +3131,7 @@ HTML = r"""
         <button id="copyAgentInstallBtn">复制一键安装命令</button>
       </div>
       <div class="wizard-status" id="tailscaleWizardLog">
-        <div class="wizard-status-line">请输入目标 Agent 的 100.x Tailscale IP。</div>
+        <div class="wizard-status-line">等待发现同一 Tailnet 中的 Agent。</div>
       </div>
     </div>
   </div>
@@ -3283,6 +3329,9 @@ HTML = r"""
       tailscaleWizardLog: document.getElementById("tailscaleWizardLog"),
       tailscalePeerList: document.getElementById("tailscalePeerList"),
       refreshTailscalePeersBtn: document.getElementById("refreshTailscalePeersBtn"),
+      agentDiscoverySummary: document.getElementById("agentDiscoverySummary"),
+      agentDiscoveryList: document.getElementById("agentDiscoveryList"),
+      refreshAgentDiscoveryBtn: document.getElementById("refreshAgentDiscoveryBtn"),
       agentInstallCommand: document.getElementById("agentInstallCommand"),
       copyAgentInstallBtn: document.getElementById("copyAgentInstallBtn"),
       mediaInput: document.getElementById("mediaInput"),
@@ -3486,7 +3535,9 @@ HTML = r"""
     const YOUTUBE_STREAM_CACHE_TTL_MS = 2 * 60 * 1000;
     const YOUTUBE_PROFILE_REFRESH_MS = 5 * 60 * 1000;
     const AGENT_STREAM_REFRESH_MS = 5 * 60 * 1000;
+    const TAILSCALE_DISCOVERY_REFRESH_MS = 30 * 1000;
     let agentStreamRefreshInFlight = false;
+    let tailscaleRefreshInFlight = null;
     let editingYouTubeProfileId = "";
     let youtubeProfileClickTimer = null;
 
@@ -4234,6 +4285,10 @@ HTML = r"""
         ? `${smartTuneActive ? "智能调参已开启" : "开启智能调参"}：${currentProfileName} / ${currentStreamName}`
         : "请先选择 YouTube API 直播流";
       const agentVersion = h.agent?.version || "未识别";
+      const hubRole = node.roles?.hub || {};
+      const hubAction = hubRole.enabled
+        ? ""
+        : `<button type="button" class="tiny primary" data-role-action="activate-role" data-role="hub" data-node-id="${escapeHtml(node.id)}" ${hubRole.activation_pending ? "disabled" : ""}>${hubRole.activation_pending ? "Hub 切换中" : "启用 Hub"}</button>`;
       return `
         <div class="node-row agent-row ${streaming ? "running" : ""} ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="点击选中；删除/取消角色请打开后面的设置">
           <span class="node-index">
@@ -4255,6 +4310,7 @@ HTML = r"""
             <button type="button" class="smart-tune-button ${smartTuneActive ? "active" : ""}" data-node-smart-tune data-node-id="${escapeHtml(node.id)}" title="${escapeHtml(smartTuneTitle)}" ${smartTuneDisabled}>智能</button>
           </span>
           <span class="row-actions">
+            ${hubAction}
             <button class="tiny settings-button" data-role-settings data-node-id="${escapeHtml(node.id)}" title="节点角色设置" aria-label="节点角色设置">⚙</button>
             <span class="node-version-pill" title="版本 ${escapeHtml(agentVersion)}">${escapeHtml(agentVersion)}</span>
           </span>
@@ -4376,7 +4432,7 @@ HTML = r"""
     function isHubOnlyNode(node) {
       const hubEnabled = Boolean(node?.hub_only || node?.roles?.hub?.enabled);
       const agentEnabled = Boolean(node?.roles?.agent?.enabled);
-      return hubEnabled && !agentEnabled && !nodeHasResources(String(node?.id || ""));
+      return hubEnabled && !agentEnabled;
     }
 
     function shouldShowAgentNode(node) {
@@ -5495,7 +5551,7 @@ HTML = r"""
         renderMedia();
         renderStreamControls();
         renderYouTubeAgentList();
-        renderTailscaleNodeOptions();
+        await refreshTailscalePeers({ silent: true });
         preloadNodeYouTubeStreams({ force: true });
         showDiagnostics(statusSummaryText(), { scroll: false });
         uiMessage("状态已刷新。AGENT 表、资源管理和开播表单已经更新。");
@@ -6042,15 +6098,10 @@ HTML = r"""
     }
 
     function setTailscaleBusy(busy) {
-      [refs.refreshTailscalePeersBtn]
-        .forEach((button) => { button.disabled = busy; });
+      [refs.refreshTailscalePeersBtn, refs.refreshAgentDiscoveryBtn]
+        .forEach((button) => { if (button) button.disabled = busy; });
       refs.tailscalePeerList?.querySelectorAll("button").forEach((button) => { button.disabled = busy; });
-    }
-
-    function peerAddresses(peer) {
-      return (peer?.tailscale_ips || [])
-        .map((value) => String(value || "").split("%", 1)[0])
-        .filter((value) => value.startsWith("100."));
+      refs.agentDiscoveryList?.querySelectorAll("button").forEach((button) => { button.disabled = busy; });
     }
 
     function knownNodeForTailscaleIp(ip) {
@@ -6060,36 +6111,83 @@ HTML = r"""
       ));
     }
 
+    function discoveredTailscaleNodes(data = tailscaleStatusCache) {
+      return (Array.isArray(data?.agent_nodes) ? data.agent_nodes : [])
+        .filter((item) => item && String(item.tailscale_ip || "").trim());
+    }
+
+    function discoveredNodeLabel(item, node = null) {
+      return item.agent_name
+        || item.host_name
+        || String(item.dns_name || "").split(".")[0]
+        || node?.name
+        || "Tailnet 设备";
+    }
+
+    function renderAgentDiscovery(data = tailscaleStatusCache) {
+      if (!refs.agentDiscoveryList) return;
+      const records = discoveredTailscaleNodes(data);
+      const onlineAgents = records.filter((item) => (
+        !item.self
+        && item.online !== false
+        && item.agent_installed
+        && !item.hub_enabled
+      ));
+      const hubs = records.filter((item) => !item.self && item.online !== false && item.hub_enabled);
+      if (refs.agentDiscoverySummary) {
+        refs.agentDiscoverySummary.textContent = `发现 ${onlineAgents.length} 个可接入 Agent${hubs.length ? ` · ${hubs.length} 个 Hub` : ""}`;
+      }
+      if (!onlineAgents.length) {
+        refs.agentDiscoveryList.innerHTML = `<div class="agent-discovery-empty">当前没有发现可直接接入的 Agent；确认目标机器已加入同一 Tailnet 并运行 8787。</div>`;
+        return;
+      }
+      refs.agentDiscoveryList.innerHTML = onlineAgents.map((item) => {
+        const ip = String(item.tailscale_ip || "");
+        const node = knownNodeForTailscaleIp(ip);
+        const name = discoveredNodeLabel(item, node);
+        const known = Boolean(node?.roles?.agent?.enabled);
+        return `
+          <button type="button" class="agent-discovery-item ${known ? "is-known" : ""}" data-discovery-agent-ip="${escapeHtml(ip)}">
+            <strong>${escapeHtml(name)}</strong>
+            <span class="peer-action">${known ? "刷新接入" : "点击接入"}</span>
+            <small>${escapeHtml(ip)} · ${known ? "已在 Agent 表中" : "已检测到 headless Agent"}${node?.name && node.name !== name ? ` · ${escapeHtml(node.name)}` : ""}</small>
+          </button>
+        `;
+      }).join("");
+    }
+
     function renderTailscaleNodeOptions(data = tailscaleStatusCache) {
       if (!refs.tailscalePeerList) return;
-      const self = data?.self && typeof data.self === "object"
-        ? { ...data.self, self: true }
-        : null;
-      const candidates = [self, ...(Array.isArray(data?.peers) ? data.peers : [])].filter(Boolean);
-      const seen = new Set();
-      const online = [];
-      candidates.forEach((peer) => {
-        if (peer.online === false) return;
-        const ip = peerAddresses(peer).find((value) => !seen.has(value));
-        if (!ip) return;
-        seen.add(ip);
-        online.push({ peer, ip });
-      });
-      if (!online.length) {
+      renderAgentDiscovery(data);
+      const records = discoveredTailscaleNodes(data).filter((item) => !item.self && item.online !== false);
+      if (!records.length) {
         refs.tailscalePeerList.innerHTML = `<div class="empty-state">没有检测到在线 Tailnet 设备。</div>`;
         return;
       }
-      refs.tailscalePeerList.innerHTML = online.map(({ peer, ip }) => {
+      refs.tailscalePeerList.innerHTML = records.map((item) => {
+        const ip = String(item.tailscale_ip || "");
         const node = knownNodeForTailscaleIp(ip);
-        const name = peer.host_name || peer.dns_name?.split(".")[0] || node?.name || "Tailnet 设备";
-        const role = node?.roles?.hub?.enabled ? "已激活 Hub"
-          : node?.roles?.agent?.enabled ? "已接入 Agent"
-            : peer.self ? "当前 Hub" : "可连接设备";
+        const name = discoveredNodeLabel(item, node);
+        const connectable = Boolean(item.agent_installed && !item.hub_enabled);
+        const role = item.hub_enabled
+          ? "已激活 Hub"
+          : item.agent_installed
+            ? node?.roles?.agent?.enabled ? "已接入 Agent" : "已检测到 Agent"
+            : "未检测到 Agent";
+        if (!connectable) {
+          return `
+            <div class="agent-discovery-item">
+              <strong>${escapeHtml(name)}</strong>
+              <span class="peer-action">${escapeHtml(role)}</span>
+              <small>${escapeHtml(ip)} · 请在目标机器安装并启动 Agent 8787</small>
+            </div>
+          `;
+        }
         return `
-          <button type="button" class="tailscale-peer-option" data-tailscale-peer-ip="${escapeHtml(ip)}">
+          <button type="button" class="tailscale-peer-option ${node?.roles?.agent?.enabled ? "is-known" : ""}" data-tailscale-peer-ip="${escapeHtml(ip)}">
             <strong>${escapeHtml(name)}</strong>
-            <span class="peer-action">选择</span>
-            <small>${escapeHtml(role)}${node?.name && node.name !== name ? ` · ${escapeHtml(node.name)}` : ""}</small>
+            <span class="peer-action">${node?.roles?.agent?.enabled ? "刷新接入" : "点击接入"}</span>
+            <small>${escapeHtml(ip)} · ${escapeHtml(role)}${node?.name && node.name !== name ? ` · ${escapeHtml(node.name)}` : ""}</small>
           </button>
         `;
       }).join("");
@@ -6111,26 +6209,40 @@ HTML = r"""
       if (hubs.some((node) => String(node.id) === String(current))) refs.transferHubNodeSelect.value = current;
     }
 
-    async function refreshTailscalePeers() {
-      setTailscaleStep("verify", "running");
-      setTailscaleLog("正在读取在线设备...");
-      try {
-        const resp = await fetch(`/api/tailscale/status?_=${Date.now()}`, { cache: "no-store" });
-        const data = await resp.json();
-        tailscaleStatusCache = data;
-        setTailscaleStep("verify", data.ok ? "done" : "fail");
-        renderTailscaleNodeOptions(data);
-        setTailscaleLog(data);
-        refs.updateBox.textContent = JSON.stringify(data, null, 2);
-        return data;
-      } catch (error) {
-        const data = { ok: false, message: friendlyError(error, "在线设备读取失败") };
-        setTailscaleStep("verify", "fail");
-        renderTailscaleNodeOptions(data);
-        setTailscaleLog(data);
-        refs.updateBox.textContent = JSON.stringify(data, null, 2);
-        return data;
-      }
+    async function refreshTailscalePeers({ silent = false } = {}) {
+      if (tailscaleRefreshInFlight) return tailscaleRefreshInFlight;
+      const task = (async () => {
+        if (!silent) {
+          setTailscaleStep("verify", "running");
+          setTailscaleLog("正在读取在线设备...");
+        }
+        try {
+          const resp = await fetch(`/api/tailscale/status?_=${Date.now()}`, { cache: "no-store" });
+          const data = await resp.json();
+          tailscaleStatusCache = data;
+          if (!silent) {
+            setTailscaleStep("verify", data.ok ? "done" : "fail");
+            setTailscaleLog(data);
+            refs.updateBox.textContent = JSON.stringify(data, null, 2);
+          }
+          renderTailscaleNodeOptions(data);
+          return data;
+        } catch (error) {
+          const data = { ok: false, message: friendlyError(error, "在线设备读取失败") };
+          tailscaleStatusCache = data;
+          if (!silent) {
+            setTailscaleStep("verify", "fail");
+            setTailscaleLog(data);
+            refs.updateBox.textContent = JSON.stringify(data, null, 2);
+          }
+          renderTailscaleNodeOptions(data);
+          return data;
+        }
+      })();
+      tailscaleRefreshInFlight = task.finally(() => {
+        tailscaleRefreshInFlight = null;
+      });
+      return tailscaleRefreshInFlight;
     }
 
     async function runTailscaleStep(step, label, action) {
@@ -6224,7 +6336,7 @@ HTML = r"""
         const requestedHub = data.requested_control_hub || "当前 Hub";
         const ok = window.confirm(`Agent 当前绑定 Hub：${currentHub}\n\n是否取消旧绑定，并重新绑定到新 Hub：${requestedHub}？`);
         if (ok) {
-          return connectExistingTailscaleIp(true);
+          return connectExistingTailscaleIp(tailscale_ip, true);
         }
         setTailscaleLog({
           ok: false,
@@ -7008,7 +7120,9 @@ HTML = r"""
       const warning = deactivating
         ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认取消 ${roleLabel} 功能？\n\n系统会停止并卸载该角色服务，默认保留配置/视频/节点数据；另一个角色不会被停止。`
         : activating
-        ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认激活 ${roleLabel}？\n\n安全提示：将启用已准备的独立 systemd 服务，开放 Tailscale ${role === "hub" ? "8788" : "8787"} 端口。现有 ${role === "hub" ? "Agent" : "Hub"} 会继续运行，配置与视频不会删除。`
+        ? role === "hub"
+          ? `${nodeName} 的 Hub 当前状态：${currentStatus}。\n\n是否确认启用 Hub？\n\n系统会自动停止 Agent 服务，保留配置和视频；切换完成后该节点会从 Agent 表转移到 Hub 表，并开放 Tailscale 8788。`
+          : `${nodeName} 的 Agent 当前状态：${currentStatus}。\n\n是否确认激活 Agent？\n\n系统会启用 Agent 8787；如果当前 Hub 正在运行，需要先停用 Hub。配置与视频不会删除。`
         : `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认升级 ${roleLabel}？\n\nHub 与 Agent 共用一份 Git 代码；更新后，同机所有已激活角色都会重启到相同版本，未激活角色保持关闭。`;
       if (!deactivating && !confirm(warning)) return;
       setRoleSettingsOpen(false);
@@ -7995,10 +8109,16 @@ HTML = r"""
       if (button) window.setTimeout(() => { refs.youtubeMoreActions.open = false; }, 0);
     });
     refs.refreshTailscalePeersBtn.addEventListener("click", refreshTailscalePeers);
+    refs.refreshAgentDiscoveryBtn.addEventListener("click", () => refreshTailscalePeers());
     refs.tailscalePeerList.addEventListener("click", (event) => {
       const button = event.target.closest("[data-tailscale-peer-ip]");
       if (!button) return;
       connectExistingTailscaleIp(button.dataset.tailscalePeerIp || "");
+    });
+    refs.agentDiscoveryList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-discovery-agent-ip]");
+      if (!button) return;
+      connectExistingTailscaleIp(button.dataset.discoveryAgentIp || "");
     });
     refs.copyAgentInstallBtn.addEventListener("click", copyAgentInstallCommand);
     if (refs.pushSelectedBtn) refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
@@ -8017,6 +8137,7 @@ HTML = r"""
     loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
     checkDailyGithubUpdates();
     window.setInterval(refreshRunningAgentParameters, AGENT_STREAM_REFRESH_MS);
+    window.setInterval(() => refreshTailscalePeers({ silent: true }), TAILSCALE_DISCOVERY_REFRESH_MS);
     window.setInterval(() => {
       loadYouTubeProfiles()
         .then(() => preloadNodeYouTubeStreams({ force: true }))
@@ -8217,6 +8338,97 @@ def tailscale_status_from_json(data: dict[str, Any]) -> dict[str, Any]:
             for peer in (data.get("Peer") or {}).values()
         ],
     }
+
+
+def _tailscale_ipv4(peer: dict[str, Any]) -> str:
+    for value in peer.get("tailscale_ips") or []:
+        candidate = str(value or "").split("%", 1)[0].strip()
+        try:
+            parsed = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if parsed.version == 4 and parsed in TAILSCALE_CGNAT:
+            return str(parsed)
+    return ""
+
+
+def probe_tailscale_node(peer: dict[str, Any]) -> dict[str, Any]:
+    """Probe only public role endpoints; never request or return role credentials."""
+    ip = _tailscale_ipv4(peer)
+    result = {
+        "tailscale_ip": ip,
+        "host_name": str(peer.get("host_name") or ""),
+        "dns_name": str(peer.get("dns_name") or ""),
+        "online": peer.get("online") is not False,
+        "self": bool(peer.get("self")),
+        "agent_installed": False,
+        "agent_enabled": False,
+        "agent_name": "",
+        "agent_url": f"http://{ip}:{AGENT_PORT}" if ip else "",
+        "hub_installed": False,
+        "hub_enabled": False,
+        "hub_url": f"http://{ip}:{PORT}" if ip else "",
+    }
+    if not ip or peer.get("online") is False:
+        return result
+
+    agent_url = result["agent_url"]
+    try:
+        response = requests.get(f"{agent_url}/", timeout=2)
+        payload = response.json() if response.ok else {}
+        if response.ok and isinstance(payload, dict) and payload.get("mode") == "headless-agent":
+            result["agent_installed"] = True
+            result["agent_enabled"] = True
+            result["agent_name"] = str(payload.get("name") or payload.get("hostname") or "")
+    except (OSError, requests.RequestException, ValueError):
+        pass
+
+    hub_url = result["hub_url"]
+    try:
+        response = requests.get(f"{hub_url}/api/role-status", timeout=2)
+        payload = response.json() if response.ok else {}
+        roles = payload.get("roles") if isinstance(payload, dict) else {}
+        hub = roles.get("hub") if isinstance(roles, dict) else {}
+        if isinstance(hub, dict) and (response.ok or hub.get("enabled")):
+            result["hub_installed"] = bool(hub.get("prepared") or hub.get("enabled") or response.ok)
+            result["hub_enabled"] = bool(hub.get("enabled"))
+            result["hub_url"] = str(hub.get("url") or hub_url).rstrip("/")
+    except (OSError, requests.RequestException, ValueError):
+        pass
+
+    result["role"] = (
+        "hub" if result["hub_enabled"] and not result["agent_enabled"]
+        else "agent" if result["agent_installed"] and not result["hub_enabled"]
+        else "dual" if result["agent_installed"] and result["hub_enabled"]
+        else "unknown"
+    )
+    return result
+
+
+def enrich_tailscale_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Add fast, credential-free role discovery to a raw Tailscale status payload."""
+    if not status.get("ok"):
+        return status
+    self_info = status.get("self") if isinstance(status.get("self"), dict) else {}
+    candidates: list[dict[str, Any]] = []
+    if self_info:
+        candidates.append({**self_info, "self": True})
+    candidates.extend(
+        peer for peer in (status.get("peers") or [])
+        if isinstance(peer, dict)
+    )
+    unique: dict[str, dict[str, Any]] = {}
+    for peer in candidates:
+        ip = _tailscale_ipv4(peer)
+        if ip and ip not in unique:
+            unique[ip] = peer
+    if not unique:
+        return {**status, "agent_nodes": []}
+    with ThreadPoolExecutor(max_workers=min(12, len(unique))) as executor:
+        discovered = list(executor.map(probe_tailscale_node, unique.values()))
+    discovered = [item for item in discovered if item.get("tailscale_ip")]
+    discovered.sort(key=lambda item: (bool(item.get("self")), str(item.get("tailscale_ip") or "")))
+    return {**status, "agent_nodes": discovered}
 
 
 def online_tailscale_peer_for_ip(ip: str) -> dict[str, Any] | None:
@@ -11046,7 +11258,7 @@ def api_push_audit():
 
 @APP.get("/api/tailscale/status")
 def api_tailscale_status():
-    return jsonify(tailscale_status())
+    return jsonify(enrich_tailscale_status(tailscale_status()))
 
 
 @APP.get("/api/install-commands")

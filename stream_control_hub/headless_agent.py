@@ -233,12 +233,6 @@ def clear_hub_seed_file() -> None:
 
 
 def schedule_hub_activation(seed_nodes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    try:
-        assert_role("hub", ROOT)
-    except RoleConflictError as exc:
-        raise RuntimeError(f"role switch requires Agent deactivation first: {exc}") from exc
-    if systemd_service_active("stream-control-headless-agent.service"):
-        raise RuntimeError("Agent service is active; deactivate the Agent role before activating HUB")
     status = tailscale_status()
     tailscale_ips = (status.get("self") or {}).get("tailscale_ips") or []
     tailscale_ip = next((str(item) for item in tailscale_ips if str(item).startswith("100.")), "")
@@ -275,6 +269,7 @@ def schedule_hub_activation(seed_nodes: list[dict[str, Any]] | None = None) -> d
         f"env INSTALL_DIR={root} STREAM_HUB_HOST={host} "
         "STREAM_HUB_SERVICE_MODE=system STREAM_HUB_TRUSTED_REMOTE_WRITES=1 "
         "STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 "
+        "ROLE_SWITCH_CONFIRMED=1 "
         f"CHOICE=1 sh {root}/scripts/install-hub.sh; "
         f"if [ -s {seed_path} ] && grep -Eq '\"id\"[[:space:]]*:' {seed_path}; then "
         f"mkdir -p {root}/data; "
@@ -2941,7 +2936,7 @@ def api_activate_hub_role():
         "already_active": already_active,
         "message": "Hub already active; no new activation task was created"
         if already_active
-        else "Hub activation scheduled after the Agent role has been deactivated",
+        else "Hub activation scheduled; the Agent role will be stopped automatically",
         "result": result,
     }), 200 if already_active else 202
 

@@ -175,6 +175,77 @@ class AgentTrustTests(unittest.TestCase):
 
 
 class HubAgentConnectionTests(unittest.TestCase):
+    def test_tailscale_discovery_marks_agent_and_hub_without_credentials(self):
+        from stream_control_hub import app
+
+        class FakeResponse:
+            def __init__(self, ok, payload):
+                self.ok = ok
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        responses = {
+            "http://100.118.47.120:8787/": FakeResponse(False, {}),
+            "http://100.118.47.120:8788/api/role-status": FakeResponse(
+                True,
+                {"ok": True, "roles": {"hub": {"enabled": True}}},
+            ),
+            "http://100.118.47.126:8787/": FakeResponse(
+                True,
+                {"ok": True, "name": "LIGHTCONE", "mode": "headless-agent"},
+            ),
+            "http://100.118.47.126:8788/api/role-status": FakeResponse(
+                True,
+                {"ok": True, "roles": {"hub": {"enabled": False}}},
+            ),
+            "http://100.118.47.127:8787/": FakeResponse(False, {}),
+            "http://100.118.47.127:8788/api/role-status": FakeResponse(
+                True,
+                {"ok": True, "roles": {"hub": {"enabled": True, "url": "http://100.118.47.127:8788"}}},
+            ),
+        }
+
+        def fake_get(url, *, timeout):
+            return responses[url]
+
+        raw = {
+            "ok": True,
+            "self": {"host_name": "hub", "tailscale_ips": ["100.118.47.120"], "online": True},
+            "peers": [
+                {"host_name": "agent", "tailscale_ips": ["100.118.47.126"], "online": True},
+                {"host_name": "hub-2", "tailscale_ips": ["100.118.47.127"], "online": True},
+            ],
+        }
+        with patch.object(app.requests, "get", side_effect=fake_get):
+            enriched = app.enrich_tailscale_status(raw)
+
+        by_ip = {item["tailscale_ip"]: item for item in enriched["agent_nodes"]}
+        self.assertTrue(by_ip["100.118.47.126"]["agent_installed"])
+        self.assertFalse(by_ip["100.118.47.126"]["hub_enabled"])
+        self.assertEqual(by_ip["100.118.47.126"]["agent_name"], "LIGHTCONE")
+        self.assertTrue(by_ip["100.118.47.127"]["hub_enabled"])
+        self.assertEqual(by_ip["100.118.47.127"]["hub_url"], "http://100.118.47.127:8788")
+        self.assertNotIn("token", json.dumps(enriched).lower())
+
+    def test_tailscale_status_endpoint_returns_discovered_agent_nodes(self):
+        from stream_control_hub import app
+
+        raw = {
+            "ok": True,
+            "self": {"host_name": "hub", "tailscale_ips": ["100.118.47.120"], "online": True},
+            "peers": [],
+        }
+        with patch.object(app, "tailscale_status", return_value=raw), patch.object(
+            app, "probe_tailscale_node", return_value={"tailscale_ip": "100.118.47.120", "self": True}
+        ):
+            response = app.APP.test_client().get("/api/tailscale/status")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["agent_nodes"], [{"tailscale_ip": "100.118.47.120", "self": True}])
+
     def test_existing_dual_role_record_recovers_agent_and_hub_urls(self):
         from stream_control_hub import app
 

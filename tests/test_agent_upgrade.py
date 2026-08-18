@@ -96,9 +96,10 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("STREAM_HUB_SERVICE_MODE=system", command)
         self.assertNotIn("INSTALL_DIR=/opt/stream-control-hub ", command)
 
-    def test_agent_hub_activation_refuses_when_agent_service_is_active(self):
+    def test_agent_hub_activation_stops_active_agent_during_role_switch(self):
         from stream_control_hub import headless_agent
 
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_dir = root / "agent_data"
@@ -109,16 +110,22 @@ class AgentUpgradeTests(unittest.TestCase):
                 "tailscale_status",
                 return_value={"self": {"tailscale_ips": ["100.64.0.2"]}},
             ), patch.object(
-                headless_agent, "systemd_service_active", return_value=True
-            ), patch.object(headless_agent.subprocess, "run") as run:
-                with self.assertRaisesRegex(RuntimeError, "Agent service is active"):
-                    headless_agent.schedule_hub_activation([{
-                        "id": "node-a",
-                        "hub_url": "http://old-hub:8788",
-                        "role_hints": {"hub": {"activation_pending": True}},
-                    }])
+                headless_agent,
+                "systemd_service_active",
+                side_effect=lambda name: name == "stream-control-headless-agent.service",
+            ), patch.object(headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"), patch.object(
+                headless_agent.subprocess, "run", return_value=completed
+            ) as run:
+                result = headless_agent.schedule_hub_activation([{
+                    "id": "node-a",
+                    "hub_url": "http://old-hub:8788",
+                    "role_hints": {"hub": {"activation_pending": True}},
+                }])
 
-        self.assertFalse(run.called)
+        command = run.call_args.args[0][-1]
+        self.assertEqual(result["role"], "hub")
+        self.assertIn("ROLE_SWITCH_CONFIRMED=1", command)
+        self.assertIn("install-hub.sh", command)
         self.assertFalse((data_dir / "hub-seed-nodes.json").exists())
 
     def test_hub_upgrade_passes_shared_install_directory(self):
@@ -610,6 +617,11 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("调参判断：", app.HTML)
         self.assertIn("更改 Agent：", app.HTML)
         self.assertIn("更改后：", app.HTML)
+        self.assertIn('id="agentDiscoveryList"', app.HTML)
+        self.assertIn("data-discovery-agent-ip", app.HTML)
+        self.assertIn("TAILSCALE_DISCOVERY_REFRESH_MS", app.HTML)
+        self.assertIn("connectExistingTailscaleIp(tailscale_ip, true)", app.HTML)
+        self.assertIn('data-role-action="activate-role" data-role="hub"', app.HTML)
         self.assertNotIn("upgradeSelectedNodes", app.HTML)
         self.assertIn('id="tailscalePeerList"', app.HTML)
         self.assertIn('id="refreshTailscalePeersBtn"', app.HTML)
