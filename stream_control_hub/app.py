@@ -2355,16 +2355,39 @@ HTML = r"""
       border: 1px solid rgba(54, 211, 153, 0.34);
       border-radius: 8px;
       background: rgba(54, 211, 153, 0.05);
+      overflow: hidden;
     }
     .agent-discovery-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
+      list-style: none;
+      cursor: pointer;
+      user-select: none;
     }
+    .agent-discovery-head::-webkit-details-marker { display: none; }
+    .agent-discovery-head::after {
+      content: "";
+      width: 7px;
+      height: 7px;
+      flex: 0 0 7px;
+      margin-left: 10px;
+      border-right: 2px solid var(--accent);
+      border-bottom: 2px solid var(--accent);
+      transform: rotate(45deg);
+      transition: transform .16s ease;
+    }
+    .agent-discovery[open] .agent-discovery-head {
+      margin-bottom: 8px;
+      border-bottom: 1px solid rgba(49, 89, 76, .55);
+      padding-bottom: 8px;
+    }
+    .agent-discovery[open] .agent-discovery-head::after { transform: rotate(225deg); }
     .agent-discovery-head strong, .agent-discovery-head small { display: block; }
     .agent-discovery-head strong { font-size: 13px; }
     .agent-discovery-head small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .agent-discovery-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
     .agent-discovery-list { display: grid; gap: 6px; margin-top: 8px; }
     .agent-discovery-item {
       display: grid;
@@ -2996,13 +3019,15 @@ HTML = r"""
         <div class="node-role-split" id="nodeRoleSplit">
         <div class="role-group node-role-pane agent-role-pane">
           <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
-          <div class="agent-discovery" id="agentDiscoveryPanel">
-            <div class="agent-discovery-head">
+          <details class="agent-discovery" id="agentDiscoveryPanel" open>
+            <summary class="agent-discovery-head">
               <span><strong>Tailnet 自动发现</strong><small id="agentDiscoverySummary">正在扫描在线 Agent...</small></span>
+            </summary>
+            <div class="agent-discovery-toolbar">
               <button type="button" id="refreshAgentDiscoveryBtn" title="刷新 Tailnet Agent">刷新</button>
             </div>
             <div class="agent-discovery-list" id="agentDiscoveryList">正在读取 Tailnet 设备...</div>
-          </div>
+          </details>
           <div class="node-table" id="nodeList">加载中...</div>
         </div>
         <details class="role-group node-role-pane hub-role-pane" id="hubNodePane">
@@ -3329,6 +3354,7 @@ HTML = r"""
       tailscaleWizardLog: document.getElementById("tailscaleWizardLog"),
       tailscalePeerList: document.getElementById("tailscalePeerList"),
       refreshTailscalePeersBtn: document.getElementById("refreshTailscalePeersBtn"),
+      agentDiscoveryPanel: document.getElementById("agentDiscoveryPanel"),
       agentDiscoverySummary: document.getElementById("agentDiscoverySummary"),
       agentDiscoveryList: document.getElementById("agentDiscoveryList"),
       refreshAgentDiscoveryBtn: document.getElementById("refreshAgentDiscoveryBtn"),
@@ -3410,6 +3436,7 @@ HTML = r"""
     let resourceNameFilterTimer = null;
     const PROFILE_FILTER_VISIBLE_SLOTS = 6;
     const MONITOR_DISCLOSURE_STORAGE_KEY = "streamHub.monitorSections";
+    const AGENT_DISCOVERY_DISCLOSURE_STORAGE_KEY = "streamHub.agentDiscoveryOpen";
 
     function monitorDisclosureState() {
       try {
@@ -3435,6 +3462,32 @@ HTML = r"""
         // Browser storage may be unavailable in private or restricted contexts.
       }
     }
+
+    function agentDiscoveryOpen() {
+      try {
+        const stored = localStorage.getItem(AGENT_DISCOVERY_DISCLOSURE_STORAGE_KEY);
+        return stored === null ? true : stored === "1";
+      } catch (_) {
+        return true;
+      }
+    }
+
+    function rememberAgentDiscoveryDisclosure(open) {
+      try {
+        localStorage.setItem(AGENT_DISCOVERY_DISCLOSURE_STORAGE_KEY, open ? "1" : "0");
+      } catch (_) {
+        // Browser storage may be unavailable in private or restricted contexts.
+      }
+    }
+
+    function initializeAgentDiscoveryDisclosure() {
+      if (!refs.agentDiscoveryPanel) return;
+      refs.agentDiscoveryPanel.addEventListener("toggle", (event) => {
+        rememberAgentDiscoveryDisclosure(Boolean(event.target.open));
+      });
+      refs.agentDiscoveryPanel.open = agentDiscoveryOpen();
+    }
+
     function initializeDashboardLayout() {
       if (!refs.dashboardGrid) return;
       refs.dashboardGrid.classList.add("fixed-layout-ready");
@@ -8133,6 +8186,7 @@ HTML = r"""
     [refs.presetInput, refs.videoBitrateInput, refs.audioBitrateInput, refs.fpsInput, refs.resolutionInput, refs.keyframeInput].forEach((el) => {
       el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
     });
+    initializeAgentDiscoveryDisclosure();
     initializeDashboardLayout();
     loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
     checkDailyGithubUpdates();
