@@ -3426,6 +3426,7 @@ HTML = r"""
     }, true);
     let nodes = [];
     let mediaLibrary = { resources: [], nodes: [], duplicate_retention: [] };
+    let localRoleStatus = null;
     const AGENT_SLOT_COUNT = 10;
     let agentOrder = [];
     let agentOrderSavePromise = Promise.resolve();
@@ -4383,13 +4384,14 @@ HTML = r"""
     function renderHubRow(node) {
       const role = node.roles?.hub || {};
       const enabled = Boolean(role.enabled);
+      const pending = Boolean(role.activation_pending);
       const version = role.version || "未安装";
       const current = enabled && role.url && sameOriginUrl(role.url);
       return `
         <div class="node-row role-row ${current ? "control-hub" : ""}" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
-          <span>${stateDot(enabled, false)}</span>
+          <span>${stateDot(enabled, pending)}</span>
           <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>${current ? "当前控制 Hub · " : ""}Hub 版本 ${escapeHtml(version)}</small><span class="node-profile-label">Profile</span><select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="选择这个 Hub 隶属的 YouTube Profile">${profileOptions(nodeProfileId(node))}</select></span>
-          <span class="node-state">${current ? "控制中" : enabled ? "已启用" : "未启用"}</span>
+          <span class="node-state">${current ? "控制中" : enabled ? "已启用" : pending ? "激活中" : "未启用"}</span>
           <span class="node-state">8788</span>
           <span class="row-actions">
             <button class="tiny" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}">${current ? "当前 Hub" : "切换 Hub"}</button>
@@ -4399,18 +4401,47 @@ HTML = r"""
       `;
     }
 
+    function localHubRole() {
+      return localRoleStatus?.roles?.hub || {};
+    }
+
+    function localHubEnabled() {
+      return Boolean(localHubRole().enabled);
+    }
+
+    function renderLocalHubRow() {
+      const role = localHubRole();
+      const version = role.version || "本地版本";
+      return `
+        <div class="node-row role-row control-hub" data-hub-row data-local-hub-row>
+          <span>${stateDot(true, false)}</span>
+          <span class="node-name"><strong>当前控制 Hub</strong><small>本机控制台 · Hub 版本 ${escapeHtml(version)}</small><span class="node-profile-label">Profile ${escapeHtml(profileName(activeYouTubeProfileId))}</span></span>
+          <span class="node-state">控制中</span>
+          <span class="node-state">8788</span>
+          <span class="row-actions"><button class="tiny" type="button" disabled>当前 Hub</button></span>
+        </div>
+      `;
+    }
+
     function renderNodes() {
       const agentRows = orderedAgentRows(nodes.filter(shouldShowAgentNode));
-      const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
+      const activeHubs = nodes.filter((node) => {
+        const role = node.roles?.hub || {};
+        return Boolean(role.enabled || role.activation_pending);
+      });
+      const visibleHubCount = activeHubs.length + (localHubEnabled() ? 1 : 0);
       const onlineAgentCount = agentRows.filter((node) => Boolean(node.roles?.agent?.enabled)).length;
       const agentCapacity = Math.max(AGENT_SLOT_COUNT, agentRows.length);
       refs.agentNodeCount.textContent = `${onlineAgentCount}/${agentCapacity}`;
-      refs.hubNodeCount.textContent = String(activeHubs.length);
+      refs.hubNodeCount.textContent = String(visibleHubCount);
       renderTransferHubOptions();
       if (!nodes.length) {
         refs.nodeMonitor.innerHTML = renderMonitor(null);
         refs.nodeList.innerHTML = `<div class="guided-empty"><strong>等待接入 Agent</strong><span>点击“接入推流服务器”，或先复制一键安装命令到目标 VPS。</span><button class="primary" data-open-connect>连接 Agent</button></div>`;
-        refs.hubNodeList.innerHTML = `<div class="empty-state">还没有激活的 Hub。</div>`;
+        refs.hubNodeList.innerHTML = localHubEnabled() ? `
+          <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
+          ${renderLocalHubRow()}
+        ` : `<div class="empty-state">还没有激活的 Hub。</div>`;
         updatePrimaryActionStates();
         return;
       }
@@ -4428,8 +4459,9 @@ HTML = r"""
         </div>
         ${agentRows.map((node, index) => renderNodeRow(node, index)).join("")}
       ` : `<div class="empty-state">还没有配置 Agent 节点。</div>`;
-      refs.hubNodeList.innerHTML = activeHubs.length ? `
+      refs.hubNodeList.innerHTML = visibleHubCount ? `
         <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
+        ${localHubEnabled() ? renderLocalHubRow() : ""}
         ${activeHubs.map((node) => renderHubRow(node)).join("")}
       ` : `<div class="empty-state">还没有已激活的 Hub。</div>`;
       updatePrimaryActionStates();
@@ -4478,7 +4510,8 @@ HTML = r"""
     }
 
     function isHubOnlyNode(node) {
-      const hubEnabled = Boolean(node?.hub_only || node?.roles?.hub?.enabled);
+      const hubRole = node?.roles?.hub || {};
+      const hubEnabled = Boolean(node?.hub_only || hubRole.enabled || hubRole.activation_pending);
       const agentEnabled = Boolean(node?.roles?.agent?.enabled);
       return hubEnabled && !agentEnabled;
     }
@@ -5583,15 +5616,17 @@ HTML = r"""
       uiMessage("正在刷新 Hub、Agent 和资源状态...");
       showDiagnostics("正在刷新状态，请稍候...", { scroll: false });
       try {
-        const [nodeResp, libraryResp, settingsResp] = await Promise.all([
+        const [nodeResp, libraryResp, settingsResp, roleResp] = await Promise.all([
           fetch("/api/nodes"),
           fetch("/api/media-library"),
           fetch("/api/settings").catch(() => null),
+          fetch("/api/role-status").catch(() => null),
           loadYouTubeProfiles().catch(() => null),
         ]);
         if (!nodeResp.ok) throw new Error(nodeResp.statusText || "节点状态读取失败");
         if (!libraryResp.ok) throw new Error(libraryResp.statusText || "媒体库读取失败");
         if (settingsResp?.ok) applyHubSettings(await settingsResp.json());
+        localRoleStatus = roleResp?.ok ? await roleResp.json() : null;
         nodes = await nodeResp.json();
         mediaLibrary = await libraryResp.json();
         if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);

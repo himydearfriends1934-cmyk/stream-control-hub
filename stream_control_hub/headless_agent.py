@@ -262,19 +262,21 @@ def schedule_hub_activation(seed_nodes: list[dict[str, Any]] | None = None) -> d
     root = shlex.quote(str(ROOT))
     host = shlex.quote(tailscale_ip)
     seed_path = shlex.quote(str(seed_file))
+    nodes_path = shlex.quote(str(ROOT / "data" / "nodes.local.json"))
     script = (
         "set -eu; "
         f"trap 'rm -f {seed_path}' EXIT; "
         "sleep 2; "
         f"env INSTALL_DIR={root} STREAM_HUB_HOST={host} "
+        f"STREAM_HUB_NODES_FILE={nodes_path} "
         "STREAM_HUB_SERVICE_MODE=system STREAM_HUB_TRUSTED_REMOTE_WRITES=1 "
         "STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 "
         "ROLE_SWITCH_CONFIRMED=1 "
         f"CHOICE=1 sh {root}/scripts/install-hub.sh; "
         f"if [ -s {seed_path} ] && grep -Eq '\"id\"[[:space:]]*:' {seed_path}; then "
         f"mkdir -p {root}/data; "
-        f"cp {seed_path} {root}/data/nodes.local.json; "
-        f"chmod 600 {root}/data/nodes.local.json; "
+        f"cp {seed_path} {nodes_path}; "
+        f"chmod 600 {nodes_path}; "
         "systemctl restart stream-control-hub.service >/dev/null 2>&1 || true; "
         "fi; "
         f"rm -f {seed_path}"

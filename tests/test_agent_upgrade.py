@@ -94,6 +94,8 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn(str(root), command)
         self.assertIn("INSTALL_DIR=", command)
         self.assertIn("STREAM_HUB_SERVICE_MODE=system", command)
+        self.assertIn("STREAM_HUB_NODES_FILE=", command)
+        self.assertIn("cp ", command)
         self.assertNotIn("INSTALL_DIR=/opt/stream-control-hub ", command)
 
     def test_agent_hub_activation_stops_active_agent_during_role_switch(self):
