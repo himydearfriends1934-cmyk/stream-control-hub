@@ -230,7 +230,7 @@ StartLimitBurst=10
 
 [Service]
 WorkingDirectory=$INSTALL_DIR
-EnvironmentFile=$ENV_FILE
+EnvironmentFile=-$ENV_FILE
 Environment=STREAM_NODE_ROLE=hub
 Environment=STREAM_NODE_ROLE_FILE=$STREAM_NODE_ROLE_FILE
 ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub
@@ -313,8 +313,11 @@ transactional_refresh_hub() {
   # commit pointer to that exact candidate instead of asking checkout to
   # overwrite the files it just received from the candidate worktree.
   git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
+  # The candidate is no longer needed after its files and virtualenv are copied.
+  # Remove it before any service restart so an interrupted role switch cannot
+  # leave an untracked worktree that blocks the next recovery attempt.
+  cleanup_candidate
   if [ ! -f "$ENV_FILE" ]; then
-    cleanup_candidate
     echo "HUB code refreshed; environment file will be initialized before service start."
     return 0
   fi

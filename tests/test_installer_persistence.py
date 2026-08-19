@@ -19,7 +19,7 @@ class InstallerPersistenceTests(unittest.TestCase):
             "STREAM_HUB_TRUSTED_REMOTE_WRITES=$STREAM_HUB_TRUSTED_REMOTE_WRITES",
             script,
         )
-        self.assertIn("EnvironmentFile=$ENV_FILE", script)
+        self.assertIn("EnvironmentFile=-$ENV_FILE", script)
         self.assertIn("existingTrustedRemoteWrites", powershell)
         self.assertIn(
             '"STREAM_HUB_TRUSTED_REMOTE_WRITES=$TrustedRemoteWrites"',
@@ -171,6 +171,7 @@ class InstallerPersistenceTests(unittest.TestCase):
         hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
 
         self.assertIn('git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"', hub)
+        self.assertIn("cleanup_candidate\n  if [ ! -f \"$ENV_FILE\" ]", hub)
         self.assertNotIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"', hub)
 
     def test_hub_upgrade_ignores_runtime_media_and_data_paths(self):
