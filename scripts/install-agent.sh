@@ -99,7 +99,7 @@ StartLimitBurst=10
 
 [Service]
 WorkingDirectory=$INSTALL_DIR
-EnvironmentFile=$INSTALL_DIR/.agent.env
+EnvironmentFile=-$INSTALL_DIR/.agent.env
 Environment=STREAM_NODE_ROLE=agent
 Environment=STREAM_NODE_ROLE_FILE=$STREAM_NODE_ROLE_FILE
 ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub.headless_agent

@@ -126,6 +126,8 @@ class InstallerPersistenceTests(unittest.TestCase):
 
         self.assertIn("Conflicts=stream-control-headless-agent.service", hub)
         self.assertIn("Conflicts=stream-control-hub.service", agent)
+        self.assertIn("EnvironmentFile=-$ENV_FILE", hub)
+        self.assertIn("EnvironmentFile=-$INSTALL_DIR/.agent.env", agent)
         self.assertIn("systemctl disable --now stream-control-headless-agent.service", hub)
         self.assertIn("systemctl disable --now stream-control-hub.service", agent)
         self.assertIn("systemctl is-enabled --quiet stream-control-headless-agent.service", hub)
