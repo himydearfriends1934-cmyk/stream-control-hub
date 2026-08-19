@@ -263,21 +263,21 @@ class AgentUpgradeTests(unittest.TestCase):
             ):
                 headless_agent.schedule_agent_upgrade("def5678")
 
-            status = headless_agent.load_upgrade_status()
-            self.assertEqual(status["state"], "pending")
-            self.assertEqual(status["target_version"], "def5678")
+                status = headless_agent.load_upgrade_status()
+                self.assertEqual(status["state"], "pending")
+                self.assertEqual(status["target_version"], "def5678")
 
-            with patch.object(
-                headless_agent, "upgrade_unit_active", return_value=True
-            ), patch.object(
-                headless_agent,
-                "current_systemd_service",
-                return_value="stream-control-headless-agent.service",
-            ), patch.object(
-                headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
-            ):
-                with self.assertRaisesRegex(RuntimeError, "已有 Agent 升级任务正在执行"):
-                    headless_agent.schedule_agent_upgrade("def5678")
+                with patch.object(
+                    headless_agent, "upgrade_unit_active", return_value=True
+                ), patch.object(
+                    headless_agent,
+                    "current_systemd_service",
+                    return_value="stream-control-headless-agent.service",
+                ), patch.object(
+                    headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "已有 Agent 升级任务正在执行"):
+                        headless_agent.schedule_agent_upgrade("def5678")
 
     def test_role_status_reports_inactive_counterpart_as_prepared(self):
         from stream_control_hub import app, headless_agent
