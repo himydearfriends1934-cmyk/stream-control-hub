@@ -147,6 +147,7 @@ class AgentUpgradeTests(unittest.TestCase):
         command = run.call_args.args[0][-1]
         self.assertIn("INSTALL_DIR=", command)
         self.assertIn(str(root), command)
+        self.assertNotIn("flock -n 9", command)
 
     def test_agent_upgrade_passes_shared_install_directory(self):
         from stream_control_hub import headless_agent

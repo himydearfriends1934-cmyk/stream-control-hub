@@ -9427,15 +9427,9 @@ def schedule_hub_upgrade() -> dict[str, Any]:
         raise RuntimeError("Hub must be a Git-managed systemd installation")
     unit = f"stream-control-hub-upgrade-{int(time.time())}"
     root = shlex.quote(str(ROOT))
-    data_dir = shlex.quote(str(DATA_DIR))
     branch = shlex.quote(SOURCE_BRANCH)
-    lock_file = shlex.quote(str(DATA_DIR / ".upgrade.lock"))
     script = (
         "set -eu; "
-        f"mkdir -p {data_dir}; "
-        f"if command -v flock >/dev/null 2>&1; then exec 9>{lock_file}; flock -n 9 || exit 75; "
-        f"else lock_dir={lock_file}.d; mkdir \"$lock_dir\" || exit 75; "
-        "trap 'rmdir \"$lock_dir\" >/dev/null 2>&1 || true' EXIT; fi; "
         "sleep 2; "
         f"test -z \"$(git -C {root} status --porcelain --untracked-files=no)\"; "
         f"env BRANCH={branch} CHOICE=1 "
