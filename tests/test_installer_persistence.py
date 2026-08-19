@@ -141,6 +141,8 @@ class InstallerPersistenceTests(unittest.TestCase):
         agent_refresh = agent.rindex("transactional_refresh_agent")
         self.assertLess(hub_install, hub_refresh)
         self.assertLess(agent_install, agent_refresh)
+        agent_switch_marker = agent.index('if [ "$ROLE_SWITCH_CONFIRMED" = "1" ]; then')
+        self.assertLess(agent_switch_marker, agent_refresh)
 
     def test_hub_update_restarts_the_declared_systemd_service_strictly(self):
         script = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")

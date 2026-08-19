@@ -580,6 +580,11 @@ git config --global --add safe.directory "$INSTALL_DIR" >/dev/null 2>&1 || true
 reconcile_agent_role
 write_agent_service_unit
 remove_legacy_conflicts
+# The transactional refresh starts the Agent for its health check. During an
+# explicit Hub-to-Agent switch, the role marker must already match that unit.
+if [ "$ROLE_SWITCH_CONFIRMED" = "1" ]; then
+  write_role_marker
+fi
 
 if [ -d "$INSTALL_DIR/.git" ]; then
   transactional_refresh_agent
