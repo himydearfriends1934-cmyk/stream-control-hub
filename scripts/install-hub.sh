@@ -272,6 +272,11 @@ transactional_refresh_hub() {
   # commit pointer to that exact candidate instead of asking checkout to
   # overwrite the files it just received from the candidate worktree.
   git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
+  if [ ! -f "$ENV_FILE" ]; then
+    cleanup_candidate
+    echo "HUB code refreshed; environment file will be initialized before service start."
+    return 0
+  fi
   hub_systemctl restart stream-control-hub.service
   if health_check_hub; then
     cleanup_candidate

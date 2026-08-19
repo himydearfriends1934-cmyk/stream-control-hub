@@ -171,6 +171,14 @@ class InstallerPersistenceTests(unittest.TestCase):
         self.assertIn('git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"', hub)
         self.assertNotIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"', hub)
 
+    def test_hub_role_activation_defers_restart_until_env_exists(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        guard = 'if [ ! -f "$ENV_FILE" ]; then'
+        self.assertIn(guard, hub)
+        self.assertIn('echo "HUB code refreshed; environment file will be initialized before service start."', hub)
+        self.assertLess(hub.index(guard), hub.index('hub_systemctl restart stream-control-hub.service'))
+
     def test_hub_installer_allows_root_to_manage_existing_non_root_checkout(self):
         hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
 
