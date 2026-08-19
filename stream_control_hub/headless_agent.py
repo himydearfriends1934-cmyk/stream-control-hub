@@ -235,7 +235,7 @@ def schedule_agent_upgrade(target_version: str = "") -> dict[str, Any]:
     root = shlex.quote(str(ROOT))
     branch = shlex.quote(AGENT_SOURCE_BRANCH)
     data_dir = shlex.quote(str(DATA_DIR))
-    lock_file = shlex.quote(str(DATA_DIR / ".upgrade.lock"))
+    task_lock_file = shlex.quote(str(DATA_DIR / ".upgrade-task.lock"))
     if not (version["managed_install"] and service == "stream-control-headless-agent.service"):
         raise RuntimeError(
             "Agent upgrade requires the managed stream-control-headless-agent.service installation; "
@@ -255,6 +255,7 @@ def schedule_agent_upgrade(target_version: str = "") -> dict[str, Any]:
         "set -eu; "
         f"mkdir -p {data_dir}; "
         f"status_file={shlex.quote(str(DATA_DIR / '.upgrade-status.json'))}; "
+        f"task_lock_file={task_lock_file}; "
         "write_status() { "
         "tmp=\"$status_file.tmp.$$\"; "
         "printf 'state=%s\\nunit=%s\\ntarget_version=%s\\nmessage=%s\\nexit_code=%s\\nupdated_at=%s\\n' "
@@ -273,8 +274,8 @@ def schedule_agent_upgrade(target_version: str = "") -> dict[str, Any]:
         "}; "
         "trap finish_upgrade EXIT; "
         "write_status running 'Agent upgrade is running' 0; "
-        f"if command -v flock >/dev/null 2>&1; then exec 9>{lock_file}; flock -n 9 || exit 75; "
-        f"else lock_dir={lock_file}.d; mkdir \"$lock_dir\" || exit 75; "
+        f"if command -v flock >/dev/null 2>&1; then exec 8>{task_lock_file}; flock -n 8 || exit 75; "
+        f"else lock_dir={task_lock_file}.d; mkdir \"$lock_dir\" || exit 75; "
         "cleanup_upgrade_lock() { rmdir \"$lock_dir\" >/dev/null 2>&1 || true; }; fi; "
         "sleep 2; "
         f"test -z \"$(git -C {root} status --porcelain --untracked-files=no)\"; "

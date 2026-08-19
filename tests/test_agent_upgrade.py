@@ -234,6 +234,8 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('actual_version="$(git -C', command)
         self.assertIn('expected def5678', command)
         self.assertIn(".upgrade-status.json", command)
+        self.assertIn(".upgrade-task.lock", command)
+        self.assertNotIn("exec 9=", command)
         self.assertIn("Another Agent upgrade is already running", command)
 
     def test_agent_upgrade_writes_pending_status_and_rejects_duplicate(self):
