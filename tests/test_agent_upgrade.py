@@ -1,5 +1,6 @@
 import json
 import inspect
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -72,6 +73,29 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertNotIn("private-token", command)
         self.assertIn("STREAM_AGENT_NAME=node-a", saved_env)
         self.assertIn("STREAM_AGENT_CONTROL_TOKEN=private-token", saved_env)
+
+    def test_hub_role_marker_allows_agent_conversion_schedule(self):
+        from stream_control_hub import app
+
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "install-agent.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            marker = root / "role"
+            marker.write_text("hub\n", encoding="utf-8")
+            with patch.dict(os.environ, {"STREAM_NODE_ROLE_FILE": str(marker)}, clear=False), patch.object(
+                app, "ROOT", root
+            ), patch.object(
+                app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(
+                app, "subprocess", wraps=app.subprocess
+            ) as subprocess_module:
+                with patch.object(subprocess_module, "run", return_value=completed) as run:
+                    result = app.schedule_agent_role_activation("http://100.64.0.1:8788")
+
+        self.assertEqual(result["role"], "agent")
+        self.assertIn("ROLE_SWITCH_CONFIRMED=1", run.call_args.args[0][-1])
 
     def test_agent_activates_hub_from_shared_checkout(self):
         from stream_control_hub import headless_agent

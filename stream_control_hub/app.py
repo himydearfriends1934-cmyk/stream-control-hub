@@ -9953,9 +9953,9 @@ def schedule_agent_role_activation(
     agent_token: str = "",
 ) -> dict[str, Any]:
     try:
-        assert_role("agent", ROOT)
+        assert_role("hub", ROOT)
     except RoleConflictError as exc:
-        raise RuntimeError(f"role switch requires HUB deactivation first: {exc}") from exc
+        raise RuntimeError(f"Agent activation requires the current HUB role: {exc}") from exc
     if not shutil.which("systemd-run"):
         raise RuntimeError("systemd-run is required to activate the Agent role")
     unit = f"stream-control-agent-activate-{int(time.time())}"
