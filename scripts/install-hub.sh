@@ -456,6 +456,12 @@ migrate_shared_media
 git config --global --add safe.directory "$INSTALL_DIR" >/dev/null 2>&1 || true
 reconcile_hub_role
 write_hub_service_unit
+# The transactional refresh may restart the HUB before the final install
+# writes its environment file. During an explicit Agent-to-Hub switch, the
+# role marker must already match that unit.
+if [ "$ROLE_SWITCH_CONFIRMED" = "1" ]; then
+  write_role_marker
+fi
 
 if [ -d "$INSTALL_DIR/.git" ]; then
   transactional_refresh_hub

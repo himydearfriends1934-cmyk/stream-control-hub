@@ -141,6 +141,8 @@ class InstallerPersistenceTests(unittest.TestCase):
         hub_refresh = hub.rindex("transactional_refresh_hub")
         agent_install = agent.index("reconcile_agent_role\nwrite_agent_service_unit", agent.index("need_cmd systemctl"))
         agent_refresh = agent.rindex("transactional_refresh_agent")
+        hub_switch_marker = hub.index('if [ "$ROLE_SWITCH_CONFIRMED" = "1" ]; then')
+        self.assertLess(hub_switch_marker, hub_refresh)
         self.assertLess(hub_install, hub_refresh)
         self.assertLess(agent_install, agent_refresh)
         agent_switch_marker = agent.index('if [ "$ROLE_SWITCH_CONFIRMED" = "1" ]; then')
