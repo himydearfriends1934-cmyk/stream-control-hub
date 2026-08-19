@@ -3127,7 +3127,7 @@ HTML = r"""
         </div>
         <button class="wizard-close" id="roleSettingsClose" aria-label="关闭">×</button>
       </div>
-      <div class="wizard-existing-grid">
+      <div class="wizard-existing-grid" id="roleSettingsNameSection">
         <div class="wizard-field">
           <label>机器显示名称</label>
           <input id="roleSettingsNameInput" type="text" maxlength="80" placeholder="输入容易识别的名称">
@@ -3135,11 +3135,11 @@ HTML = r"""
         <button id="roleSettingsSaveNameBtn">保存名称</button>
       </div>
       <div class="role-settings-status" id="roleSettingsActions"></div>
-      <div class="role-settings-item">
+      <div class="role-settings-item" id="roleSettingsNodeRecord">
         <span><strong>节点记录</strong><small>删除前会先迁移该节点独有资源；失败则保留节点记录。</small></span>
         <button class="danger" id="roleSettingsDeleteNodeBtn">删除节点</button>
       </div>
-      <div class="control-transfer-box">
+      <div class="control-transfer-box" id="roleSettingsTransferBox">
         <h3>更换控制 Hub</h3>
         <p>选择已激活且在线的 Hub，系统会自动转移节点信息并打开新控制台。</p>
         <select id="transferHubNodeSelect" aria-label="选择新的控制 Hub">
@@ -3383,9 +3383,12 @@ HTML = r"""
       roleSettingsTitle: document.getElementById("roleSettingsTitle"),
       roleSettingsSummary: document.getElementById("roleSettingsSummary"),
       roleSettingsActions: document.getElementById("roleSettingsActions"),
+      roleSettingsNameSection: document.getElementById("roleSettingsNameSection"),
       roleSettingsNameInput: document.getElementById("roleSettingsNameInput"),
       roleSettingsSaveNameBtn: document.getElementById("roleSettingsSaveNameBtn"),
       roleSettingsDeleteNodeBtn: document.getElementById("roleSettingsDeleteNodeBtn"),
+      roleSettingsNodeRecord: document.getElementById("roleSettingsNodeRecord"),
+      roleSettingsTransferBox: document.getElementById("roleSettingsTransferBox"),
       roleSettingsClose: document.getElementById("roleSettingsClose"),
       operationProgressModal: document.getElementById("operationProgressModal"),
       operationProgressTitle: document.getElementById("operationProgressTitle"),
@@ -4559,16 +4562,7 @@ HTML = r"""
           <span class="node-state">控制中</span>
           <span class="node-state">8788</span>
           <span class="row-actions">
-            <details class="hub-function-menu" data-hub-function-menu>
-              <summary>功能</summary>
-              <div class="hub-function-popover">
-                <button type="button" data-hub-action="view-resources" data-node-id="__local_hub__">查看资源</button>
-                <button type="button" disabled>当前 Hub</button>
-                ${agentEnabled
-                  ? `<button type="button" disabled>Agent 已激活</button>`
-                  : `<button type="button" class="${agentPending ? "" : "primary"}" data-local-hub-agent-action="activate">${agentPending ? "Agent 激活中" : "激活 Agent"}</button>`}
-              </div>
-            </details>
+            <button class="tiny settings-button" data-local-role-settings title="当前 Hub 功能设置" aria-label="当前 Hub 功能设置">⚙</button>
           </span>
         </div>
       `;
@@ -7638,6 +7632,32 @@ HTML = r"""
       refs.roleSettingsModal.classList.toggle("open", open);
       refs.roleSettingsModal.setAttribute("aria-hidden", open ? "false" : "true");
       if (!open) return;
+      const localHub = roleSettingsNodeId === "__local_hub__";
+      refs.roleSettingsNameSection.hidden = localHub;
+      refs.roleSettingsNodeRecord.hidden = localHub;
+      refs.roleSettingsTransferBox.hidden = localHub;
+      if (localHub) {
+        const hubRole = localHubRole();
+        const agentRole = localRoleStatus?.roles?.agent || {};
+        const agentPending = Boolean(agentRole.activation_pending);
+        refs.roleSettingsTitle.textContent = "当前控制 Hub · 功能设置";
+        refs.roleSettingsSummary.textContent = "当前 Hub 的角色切换与升级功能。激活 Agent 会同时关闭本机 Hub，保留配置和视频。";
+        refs.roleSettingsActions.innerHTML = `
+          <div class="role-settings-item">
+            <span><strong>角色切换</strong><small>当前状态：${agentPending ? "Agent 激活任务已提交，等待 Hub 关闭" : "Hub 已启用"}。</small></span>
+            <span class="actions">
+              <button class="primary" data-local-role-action="activate-agent" ${agentPending ? "disabled" : ""}>${agentPending ? "Agent 激活中" : "激活 Agent（关闭 Hub）"}</button>
+            </span>
+          </div>
+          <div class="role-settings-item">
+            <span><strong>Hub 升级</strong><small>当前版本：${escapeHtml(hubRole.version || "未识别")}。从 GitHub main 检查并升级当前 Hub。</small></span>
+            <span class="actions">
+              <button data-local-role-action="upgrade-hub">升级 Hub</button>
+            </span>
+          </div>
+        `;
+        return;
+      }
       const node = nodes.find((item) => String(item.id) === roleSettingsNodeId);
       if (!node) return setRoleSettingsOpen(false);
       refs.roleSettingsTitle.textContent = `${node.name || node.id} · 角色设置`;
@@ -7798,6 +7818,7 @@ HTML = r"""
 
     async function activateLocalHubAgent(sourceButton = null) {
       if (!confirm("当前控制 Hub 将停止并切换为 Agent。\n\nHub 配置和视频会保留；切换完成后请在 Tailscale Agent 列表中把该节点加入 Agent 表。是否继续？")) return;
+      setRoleSettingsOpen(false);
       if (sourceButton) sourceButton.disabled = true;
       const operation = beginOperationProgress({
         kind: "role",
@@ -7825,6 +7846,17 @@ HTML = r"""
         log(message);
         finishOperationProgress(false, message);
         if (sourceButton) sourceButton.disabled = false;
+      }
+    }
+
+    async function handleLocalHubRoleAction(action, sourceButton = null) {
+      if (action === "activate-agent") {
+        await activateLocalHubAgent(sourceButton);
+        return;
+      }
+      if (action === "upgrade-hub") {
+        setRoleSettingsOpen(false);
+        await checkUpdatesAndPrompt();
       }
     }
 
@@ -8410,11 +8442,11 @@ HTML = r"""
         openNodeResources(resourceButton.dataset.nodeId || "");
         return;
       }
-      const localAgentButton = event.target.closest("[data-local-hub-agent-action]");
-      if (localAgentButton) {
+      const localSettingsButton = event.target.closest("[data-local-role-settings]");
+      if (localSettingsButton) {
         event.preventDefault();
         event.stopPropagation();
-        activateLocalHubAgent(localAgentButton);
+        setRoleSettingsOpen(true, "__local_hub__");
         return;
       }
       const settingsButton = event.target.closest("[data-role-settings]");
@@ -8458,6 +8490,11 @@ HTML = r"""
     refs.roleSettingsModal.addEventListener("click", async (event) => {
       if (event.target === refs.roleSettingsModal) {
         setRoleSettingsOpen(false);
+        return;
+      }
+      const localRoleButton = event.target.closest("[data-local-role-action]");
+      if (localRoleButton) {
+        await handleLocalHubRoleAction(localRoleButton.dataset.localRoleAction, localRoleButton);
         return;
       }
       const nodeActionButton = event.target.closest("[data-settings-node-action]");
