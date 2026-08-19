@@ -132,6 +132,7 @@ def agent_version_status() -> dict[str, Any]:
         "branch": branch,
         "managed_install": bool(revision),
         "upgrade_supported": bool(shutil.which("systemd-run")),
+        "upgrade_status": load_upgrade_status(),
         "role": declared_role(ROOT),
         "policy_version": POLICY_VERSION,
     }
@@ -144,6 +145,51 @@ def current_systemd_service() -> str:
         return ""
     matches = re.findall(r"([A-Za-z0-9_.@-]+\.service)(?:/|$)", content)
     return matches[-1] if matches else ""
+
+
+def load_upgrade_status() -> dict[str, Any]:
+    status_file = DATA_DIR / ".upgrade-status.json"
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_upgrade_status(
+    *,
+    state: str,
+    unit: str,
+    target_version: str,
+    message: str,
+    exit_code: int = 0,
+) -> None:
+    write_private_json(
+        DATA_DIR / ".upgrade-status.json",
+        {
+            "state": str(state or ""),
+            "unit": str(unit or ""),
+            "target_version": normalize_target_version(target_version),
+            "message": str(message or ""),
+            "exit_code": int(exit_code or 0),
+            "updated_at": time.time(),
+        },
+    )
+
+
+def upgrade_unit_active(unit: str) -> bool:
+    if not unit or not shutil.which("systemctl"):
+        return False
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", unit],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def normalize_target_version(value: Any) -> str:
@@ -196,12 +242,40 @@ def schedule_agent_upgrade(target_version: str = "") -> dict[str, Any]:
             "reinstall the Agent once before using in-product upgrades."
         )
     target_version = normalize_target_version(target_version) or latest_source_version()
+    existing = load_upgrade_status()
+    if str(existing.get("state") or "").lower() in {"pending", "running"}:
+        existing_unit = str(existing.get("unit") or "")
+        recent_pending = (
+            str(existing.get("state") or "").lower() == "pending"
+            and time.time() - float(existing.get("updated_at") or 0) < 90
+        )
+        if upgrade_unit_active(existing_unit) or recent_pending:
+            raise RuntimeError("已有 Agent 升级任务正在执行，请等待当前任务完成后再试。")
     script = (
         "set -eu; "
         f"mkdir -p {data_dir}; "
+        f"status_file={shlex.quote(str(DATA_DIR / '.upgrade-status.json'))}; "
+        "write_status() { "
+        "tmp=\"$status_file.tmp.$$\"; "
+        "printf 'state=%s\\nunit=%s\\ntarget_version=%s\\nmessage=%s\\nexit_code=%s\\nupdated_at=%s\\n' "
+        f"\"$1\" {shlex.quote(unit)} {shlex.quote(target_version)} \"$2\" \"$3\" \"$(date +%s)\" > \"$tmp\"; "
+        "mv \"$tmp\" \"$status_file\"; "
+        "}; "
+        "cleanup_upgrade_lock() { :; }; "
+        "finish_upgrade() { "
+        "code=\"$?\"; "
+        "if [ \"$code\" -eq 0 ]; then write_status succeeded 'Agent upgrade completed' 0; "
+        "elif [ \"$code\" -eq 75 ]; then write_status failed 'Another Agent upgrade is already running' 75; "
+        "elif [ \"$code\" -eq 78 ]; then write_status failed 'Installed Agent version did not match the target version' 78; "
+        "else write_status failed 'Agent upgrade task failed' \"$code\"; fi; "
+        "cleanup_upgrade_lock; "
+        "exit \"$code\"; "
+        "}; "
+        "trap finish_upgrade EXIT; "
+        "write_status running 'Agent upgrade is running' 0; "
         f"if command -v flock >/dev/null 2>&1; then exec 9>{lock_file}; flock -n 9 || exit 75; "
         f"else lock_dir={lock_file}.d; mkdir \"$lock_dir\" || exit 75; "
-        "trap 'rmdir \"$lock_dir\" >/dev/null 2>&1 || true' EXIT; fi; "
+        "cleanup_upgrade_lock() { rmdir \"$lock_dir\" >/dev/null 2>&1 || true; }; fi; "
         "sleep 2; "
         f"test -z \"$(git -C {root} status --porcelain --untracked-files=no)\"; "
         f"env BRANCH={branch} CHOICE=1 INSTALL_DIR={root} "
@@ -211,6 +285,12 @@ def schedule_agent_upgrade(target_version: str = "") -> dict[str, Any]:
         f"echo \"Agent upgrade finished at $actual_version, expected {shlex.quote(target_version)}\" >&2; exit 78; fi"
     )
     install_mode = "transactional-managed-installer"
+    save_upgrade_status(
+        state="pending",
+        unit=unit,
+        target_version=target_version,
+        message="Agent upgrade task scheduled",
+    )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
         text=True,
@@ -218,6 +298,13 @@ def schedule_agent_upgrade(target_version: str = "") -> dict[str, Any]:
         timeout=15,
     )
     if result.returncode != 0:
+        save_upgrade_status(
+            state="failed",
+            unit=unit,
+            target_version=target_version,
+            message=(result.stderr or result.stdout or "Agent upgrade task could not be scheduled").strip(),
+            exit_code=result.returncode,
+        )
         raise RuntimeError((result.stderr or result.stdout or "failed to schedule upgrade").strip())
     return {
         "unit": unit,
@@ -2981,6 +3068,7 @@ def api_role_status():
             "agent": {
                 "enabled": True,
                 "version": version["version"],
+                "upgrade_status": version.get("upgrade_status") or {},
                 "policy_version": POLICY_VERSION,
                 "url": f"http://{request.host.split(':')[0]}:{PORT}",
             },
@@ -2988,6 +3076,7 @@ def api_role_status():
                 "enabled": hub_enabled,
                 "prepared": (ROOT / "scripts" / "install-hub.sh").exists(),
                 "version": version["version"],
+                "upgrade_status": version.get("upgrade_status") or {},
                 "url": f"http://{request.host.split(':')[0]}:8788",
             },
         },

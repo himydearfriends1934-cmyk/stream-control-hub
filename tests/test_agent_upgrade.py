@@ -185,8 +185,11 @@ class AgentUpgradeTests(unittest.TestCase):
         completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            data_dir = root / "data"
             (root / ".git").mkdir()
             with patch.object(app, "ROOT", root), patch.object(
+                app, "DATA_DIR", data_dir
+            ), patch.object(
                 app.shutil, "which", return_value="/usr/bin/systemd-run"
             ), patch.object(app, "local_git_version", return_value="abc1234"), patch.object(
                 app.subprocess, "run", return_value=completed
@@ -209,7 +212,10 @@ class AgentUpgradeTests(unittest.TestCase):
         completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            data_dir = root / "agent_data"
             with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", data_dir
+            ), patch.object(
                 headless_agent, "agent_version_status", return_value=version
             ), patch.object(
                 headless_agent,
@@ -227,6 +233,51 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn(str(root), command)
         self.assertIn('actual_version="$(git -C', command)
         self.assertIn('expected def5678', command)
+        self.assertIn(".upgrade-status.json", command)
+        self.assertIn("Another Agent upgrade is already running", command)
+
+    def test_agent_upgrade_writes_pending_status_and_rejects_duplicate(self):
+        from stream_control_hub import headless_agent
+
+        version = {
+            "version": "abc1234",
+            "managed_install": True,
+            "upgrade_supported": True,
+        }
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "agent_data"
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", data_dir
+            ), patch.object(
+                headless_agent, "agent_version_status", return_value=version
+            ), patch.object(
+                headless_agent,
+                "current_systemd_service",
+                return_value="stream-control-headless-agent.service",
+            ), patch.object(
+                headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(
+                headless_agent.subprocess, "run", return_value=completed
+            ):
+                headless_agent.schedule_agent_upgrade("def5678")
+
+            status = headless_agent.load_upgrade_status()
+            self.assertEqual(status["state"], "pending")
+            self.assertEqual(status["target_version"], "def5678")
+
+            with patch.object(
+                headless_agent, "upgrade_unit_active", return_value=True
+            ), patch.object(
+                headless_agent,
+                "current_systemd_service",
+                return_value="stream-control-headless-agent.service",
+            ), patch.object(
+                headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
+            ):
+                with self.assertRaisesRegex(RuntimeError, "已有 Agent 升级任务正在执行"):
+                    headless_agent.schedule_agent_upgrade("def5678")
 
     def test_role_status_reports_inactive_counterpart_as_prepared(self):
         from stream_control_hub import app, headless_agent
@@ -368,6 +419,8 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("function pollOperationProgress", app.HTML)
         self.assertIn("function operationProgressSteps", app.HTML)
         self.assertIn("startOperationProgressPolling", app.HTML)
+        self.assertIn("upgradeStatus.state", app.HTML)
+        self.assertIn("后台升级任务失败", app.HTML)
         self.assertIn("data-role-settings", app.HTML)
         self.assertIn('data-settings-role="${role}"', app.HTML)
         self.assertIn('data-role-action="${enabled ? "upgrade-role" : "activate-role"}"', app.HTML)

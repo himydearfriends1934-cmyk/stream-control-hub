@@ -1029,6 +1029,52 @@ def local_git_version() -> str:
     return str(result.get("stdout") or "unmanaged").strip() or "unmanaged"
 
 
+def load_upgrade_status() -> dict[str, Any]:
+    status_file = DATA_DIR / ".upgrade-status.json"
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_upgrade_status(
+    *,
+    state: str,
+    unit: str,
+    target_version: str,
+    message: str,
+    exit_code: int = 0,
+) -> None:
+    write_json_atomic(
+        DATA_DIR / ".upgrade-status.json",
+        {
+            "state": str(state or ""),
+            "unit": str(unit or ""),
+            "target_version": normalize_target_version(target_version),
+            "message": str(message or ""),
+            "exit_code": int(exit_code or 0),
+            "updated_at": time.time(),
+        },
+        mode=0o600,
+    )
+
+
+def upgrade_unit_active(unit: str) -> bool:
+    if not unit or not shutil.which("systemctl"):
+        return False
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", unit],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def normalize_target_version(value: Any) -> str:
     parts = str(value or "").strip().split(None, 1)
     candidate = parts[0] if parts else ""
@@ -5977,8 +6023,14 @@ HTML = r"""
           const targetVersion = operationVersion(operation.targetVersion);
           const actualVersion = operationVersion(info.version);
           const versionMatches = !targetVersion || actualVersion === targetVersion;
-          if (elapsed < 5000) {
+          const upgradeStatus = info.upgrade_status || {};
+          const upgradeState = String(upgradeStatus.state || "").trim().toLowerCase();
+          if (upgradeState === "failed") {
+            finishOperationProgress(false, upgradeStatus.message || "后台升级任务失败，请查看目标节点日志后重试。");
+          } else if (elapsed < 5000) {
             setOperationProgress({ percent: 30, step: 1, stage: "后台升级任务已提交", message: "正在等待安装器拉取 GitHub 最新代码。" });
+          } else if (upgradeState === "pending" || upgradeState === "running") {
+            setOperationProgress({ percent: 70, step: 2, stage: "升级任务执行中", message: upgradeStatus.message || "安装器正在更新代码并重启服务。" });
           } else if (!enabled) {
             setOperationProgress({ percent: 58, step: 2, stage: "服务重启中", message: "目标服务暂时不可用，正在等待升级后的服务重新上线。" });
           } else if (!versionMatches) {
@@ -10477,9 +10529,37 @@ def schedule_hub_upgrade(target_version: str = "") -> dict[str, Any]:
     root = shlex.quote(str(ROOT))
     branch = shlex.quote(SOURCE_BRANCH)
     target_version = normalize_target_version(target_version) or latest_source_version()
+    existing = load_upgrade_status()
+    if str(existing.get("state") or "").lower() in {"pending", "running"}:
+        existing_unit = str(existing.get("unit") or "")
+        recent_pending = (
+            str(existing.get("state") or "").lower() == "pending"
+            and time.time() - float(existing.get("updated_at") or 0) < 90
+        )
+        if upgrade_unit_active(existing_unit) or recent_pending:
+            raise RuntimeError("已有 Hub 升级任务正在执行，请等待当前任务完成后再试。")
+    status_file = shlex.quote(str(DATA_DIR / ".upgrade-status.json"))
     script = (
         "set -eu; "
         "sleep 2; "
+        f"status_file={status_file}; "
+        "write_status() { "
+        "tmp=\"$status_file.tmp.$$\"; "
+        "printf 'state=%s\\nunit=%s\\ntarget_version=%s\\nmessage=%s\\nexit_code=%s\\nupdated_at=%s\\n' "
+        f"\"$1\" {shlex.quote(unit)} {shlex.quote(target_version)} \"$2\" \"$3\" \"$(date +%s)\" > \"$tmp\"; "
+        "mv \"$tmp\" \"$status_file\"; "
+        "}; "
+        "cleanup_upgrade_status() { :; }; "
+        "finish_upgrade() { "
+        "code=\"$?\"; "
+        "if [ \"$code\" -eq 0 ]; then write_status succeeded 'Hub upgrade completed' 0; "
+        "elif [ \"$code\" -eq 78 ]; then write_status failed 'Installed Hub version did not match the target version' 78; "
+        "else write_status failed 'Hub upgrade task failed' \"$code\"; fi; "
+        "cleanup_upgrade_status; "
+        "exit \"$code\"; "
+        "}; "
+        "trap finish_upgrade EXIT; "
+        "write_status running 'Hub upgrade is running' 0; "
         f"test -z \"$(git -C {root} status --porcelain --untracked-files=no)\"; "
         f"env BRANCH={branch} CHOICE=1 "
         f"INSTALL_DIR={root} "
@@ -10488,6 +10568,12 @@ def schedule_hub_upgrade(target_version: str = "") -> dict[str, Any]:
         f"if [ -n {shlex.quote(target_version)} ] && [ \"$actual_version\" != {shlex.quote(target_version)} ]; then "
         f"echo \"HUB upgrade finished at $actual_version, expected {shlex.quote(target_version)}\" >&2; exit 78; fi"
     )
+    save_upgrade_status(
+        state="pending",
+        unit=unit,
+        target_version=target_version,
+        message="Hub upgrade task scheduled",
+    )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
         text=True,
@@ -10495,6 +10581,13 @@ def schedule_hub_upgrade(target_version: str = "") -> dict[str, Any]:
         timeout=15,
     )
     if result.returncode != 0:
+        save_upgrade_status(
+            state="failed",
+            unit=unit,
+            target_version=target_version,
+            message=(result.stderr or result.stdout or "Hub upgrade task could not be scheduled").strip(),
+            exit_code=result.returncode,
+        )
         raise RuntimeError((result.stderr or result.stdout or "failed to schedule Hub upgrade").strip())
     return {
         "unit": unit,
@@ -11858,6 +11951,7 @@ def api_nodes():
                     or agent_hint.get("activation_pending")
                 ),
                 "version": str(agent_info.get("version") or prepared_agent.get("version") or agent_hint.get("version") or "unrecognized"),
+                "upgrade_status": agent_info.get("upgrade_status") or agent_role_status.get("upgrade_status") or {},
                 "url": str(agent_hint.get("url") or urls["agent"]),
                 "activation_pending": bool(agent_hint.get("activation_pending")) and not agent_enabled,
             },
@@ -12222,6 +12316,7 @@ def api_hub_role_status():
             "hub": {
                 "enabled": True,
                 "version": local_git_version(),
+                "upgrade_status": load_upgrade_status(),
                 "policy_version": POLICY_VERSION,
                 "url": f"http://{host}:{PORT}",
             },
@@ -12229,6 +12324,7 @@ def api_hub_role_status():
                 "enabled": agent_enabled,
                 "prepared": (ROOT / "scripts" / "install-agent.sh").exists(),
                 "version": local_git_version(),
+                "upgrade_status": load_upgrade_status(),
                 "url": f"http://{host}:8787",
             },
         },
