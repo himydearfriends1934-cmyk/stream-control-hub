@@ -535,7 +535,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertNotIn('class="card node-space-card"', app.HTML)
         self.assertNotIn('class="upload-stack"', app.HTML)
         self.assertIn("function renderNodeSpaceRings", app.HTML)
-        self.assertIn("const diskByNodeId = new Map", app.HTML)
+        self.assertIn("const merged = [...(nodeDisks || [])]", app.HTML)
         self.assertIn("conic-gradient", app.HTML)
         self.assertIn("max-height: 248px", app.HTML)
         self.assertIn("grid-template-columns: repeat(auto-fit, minmax(128px, 1fr))", app.HTML)
