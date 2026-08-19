@@ -4578,7 +4578,8 @@ HTML = r"""
       const agentRows = orderedAgentRows(nodes.filter(shouldShowAgentNode));
       const activeHubs = nodes.filter((node) => {
         const role = node.roles?.hub || {};
-        return Boolean(role.enabled || role.activation_pending);
+        return Boolean(role.enabled || role.activation_pending)
+          && !sameOriginUrl(role.url || "");
       });
       const visibleHubCount = activeHubs.length + (localHubEnabled() ? 1 : 0);
       const onlineAgentCount = agentRows.filter((node) => Boolean(node.roles?.agent?.enabled)).length;
@@ -9507,13 +9508,86 @@ def iter_media_files() -> list[Path]:
     return files
 
 
+_LOCAL_TAILSCALE_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "ips": set()}
+
+
+def local_tailscale_ipv4s_for_cleanup() -> set[str]:
+    now = time.monotonic()
+    if now < float(_LOCAL_TAILSCALE_IP_CACHE.get("expires_at") or 0):
+        return set(_LOCAL_TAILSCALE_IP_CACHE.get("ips") or set())
+    try:
+        status = tailscale_status()
+    except Exception:
+        status = {}
+    self_info = status.get("self") if isinstance(status, dict) else {}
+    ips: set[str] = set()
+    for value in (self_info.get("tailscale_ips") or []) if isinstance(self_info, dict) else []:
+        candidate = str(value or "").split("%", 1)[0].strip()
+        try:
+            parsed = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if parsed.version == 4 and parsed in TAILSCALE_CGNAT:
+            ips.add(str(parsed))
+    _LOCAL_TAILSCALE_IP_CACHE["expires_at"] = now + 5
+    _LOCAL_TAILSCALE_IP_CACHE["ips"] = ips
+    return set(ips)
+
+
+def node_matches_local_tailscale_ip(node: dict[str, Any], local_ips: set[str]) -> bool:
+    if not local_ips:
+        return False
+    candidates = [node.get("tailscale_ip")]
+    for key in ("base_url", "agent_url", "hub_url", "hub_role_url"):
+        candidates.append(node.get(key))
+    role_hints = node.get("role_hints") if isinstance(node.get("role_hints"), dict) else {}
+    for hint in role_hints.values():
+        if isinstance(hint, dict):
+            candidates.append(hint.get("url"))
+    for value in candidates:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        if raw in local_ips:
+            return True
+        try:
+            host = urlparse(raw).hostname
+        except ValueError:
+            host = None
+        if host and str(host).split("%", 1)[0] in local_ips:
+            return True
+    return False
+
+
+def prune_local_hub_node_records(nodes: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    local_ips = local_tailscale_ipv4s_for_cleanup()
+    if not local_ips:
+        return nodes, []
+    kept: list[dict[str, Any]] = []
+    removed: list[str] = []
+    for node in nodes:
+        node_id = str(node.get("id") or "").strip()
+        if node_id and not node.get("is_local_hub") and node_matches_local_tailscale_ip(node, local_ips):
+            removed.append(node_id)
+            continue
+        kept.append(node)
+    return kept, removed
+
+
 def load_nodes() -> list[dict[str, Any]]:
     ensure_dirs()
     try:
         data = json.loads(NODES_FILE.read_text(encoding="utf-8"))
     except Exception:
         return []
-    return [node for node in data if isinstance(node, dict)]
+    nodes = [node for node in data if isinstance(node, dict)]
+    cleaned, removed = prune_local_hub_node_records(nodes)
+    if removed:
+        try:
+            write_json_atomic(NODES_FILE, cleaned)
+        except OSError:
+            pass
+    return cleaned
 
 
 def save_nodes(nodes: list[dict[str, Any]]) -> None:

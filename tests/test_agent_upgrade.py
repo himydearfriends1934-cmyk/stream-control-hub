@@ -370,6 +370,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("function shouldShowAgentNode(node)", app.HTML)
         self.assertIn("function isHubOnlyNode(node)", app.HTML)
         self.assertIn("!isHubOnlyNode(node)", app.HTML)
+        self.assertIn("!sameOriginUrl(role.url || \"\")", app.HTML)
         self.assertIn("/api/nodes/delete", app.HTML)
         self.assertIn('id="roleSettingsDeleteNodeBtn"', app.HTML)
         self.assertIn("deleteNodeRecord(roleSettingsNodeId)", app.HTML)
@@ -1117,6 +1118,41 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertTrue(roles["agent"]["present"])
         self.assertTrue(roles["hub"]["activation_pending"])
         self.assertEqual(roles["hub"]["url"], "http://100.64.0.10:8788")
+
+    def test_load_nodes_prunes_current_hub_self_record(self):
+        from stream_control_hub import app
+
+        nodes = [
+            {
+                "id": "racknerd-0d8a401",
+                "name": "racknerd-0d8a401",
+                "base_url": "http://100.64.0.2:8787",
+                "tailscale_ip": "100.64.0.2",
+            },
+            {
+                "id": "other-node",
+                "name": "Other",
+                "base_url": "http://100.64.0.3:8787",
+                "tailscale_ip": "100.64.0.3",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app,
+                "tailscale_status",
+                return_value={"ok": True, "self": {"tailscale_ips": ["100.64.0.2"]}},
+            ), patch.object(
+                app,
+                "_LOCAL_TAILSCALE_IP_CACHE",
+                {"expires_at": 0.0, "ips": set()},
+            ):
+                loaded = app.load_nodes()
+                saved = json.loads(nodes_file.read_text(encoding="utf-8"))
+
+        self.assertEqual([item["id"] for item in loaded], ["other-node"])
+        self.assertEqual([item["id"] for item in saved], ["other-node"])
 
     def test_hub_deletes_node_record_only_from_config(self):
         from stream_control_hub import app
