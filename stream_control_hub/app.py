@@ -2326,7 +2326,8 @@ HTML = r"""
     .row-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-start; min-width: 0; }
     .node-row.agent-row .row-actions { grid-area: actions; }
     .node-version-pill { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d6fff0; font-size: 12px; font-weight: 900; }
-    .role-row { min-height: 54px; }
+    .role-row { position: relative; z-index: 0; min-height: 54px; }
+    .role-row.menu-open { z-index: 50; }
     .role-row .row-actions { grid-template-columns: minmax(72px, 1fr); }
     .role-group + .role-group { margin-top: 12px; }
     .role-group-title { display: flex; justify-content: space-between; align-items: center; margin: 0 0 6px; color: #d6fff0; }
@@ -2334,7 +2335,8 @@ HTML = r"""
     .role-row.disabled-role { opacity: 0.58; border-style: dashed; }
     .role-row.disabled-role:hover { opacity: 0.82; }
     .row-actions button.tiny { min-width: 54px; padding: 6px 7px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
-    .hub-function-menu { position: relative; min-width: 72px; }
+    .hub-function-menu { position: relative; z-index: 1; min-width: 72px; }
+    .hub-function-menu[open] { z-index: 60; }
     .hub-function-menu summary {
       list-style: none;
       cursor: pointer;
@@ -4462,22 +4464,21 @@ HTML = r"""
       const enabled = Boolean(role.enabled);
       const pending = Boolean(role.activation_pending);
       const version = role.version || "未安装";
-      const current = enabled && role.url && sameOriginUrl(role.url);
       const agentRole = node.roles?.agent || {};
       const agentPending = Boolean(agentRole.activation_pending);
       const agentEnabled = Boolean(agentRole.enabled);
       return `
-        <div class="node-row role-row ${current ? "control-hub" : ""}" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
+        <div class="node-row role-row" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
           <span>${stateDot(enabled, pending)}</span>
-          <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>${current ? "当前控制 Hub · " : ""}Hub 版本 ${escapeHtml(version)}</small><span class="node-profile-label">Profile</span><select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="选择这个 Hub 隶属的 YouTube Profile">${profileOptions(nodeProfileId(node))}</select></span>
-          <span class="node-state">${current ? "控制中" : enabled ? "已启用" : pending ? "激活中" : "未启用"}</span>
+          <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>Hub 版本 ${escapeHtml(version)}</small><span class="node-profile-label">Profile</span><select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="选择这个 Hub 隶属的 YouTube Profile">${profileOptions(nodeProfileId(node))}</select></span>
+          <span class="node-state">${enabled ? "已启用" : pending ? "激活中" : "未启用"}</span>
           <span class="node-state">8788</span>
           <span class="row-actions">
             <details class="hub-function-menu" data-hub-function-menu>
               <summary>功能</summary>
               <div class="hub-function-popover">
                 <button type="button" data-hub-action="view-resources" data-node-id="${escapeHtml(node.id)}">查看资源</button>
-                <button type="button" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}" ${current ? "disabled" : ""}>${current ? "当前 Hub" : "切换 Hub"}</button>
+                <button type="button" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}">切换 Hub</button>
                 ${agentEnabled
                   ? `<button type="button" disabled>Agent 已加入</button>`
                   : `<button type="button" class="${agentPending ? "" : "primary"}" data-role-action="activate-role" data-role="agent" data-node-id="${escapeHtml(node.id)}">${agentPending ? "Agent 激活中" : "激活 Agent"}</button>`}
@@ -8134,6 +8135,12 @@ HTML = r"""
       if (!row.dataset.nodeId) return;
       openNodeResources(row.dataset.nodeId);
     });
+    refs.hubNodeList.addEventListener("toggle", (event) => {
+      const functionMenu = event.target.closest("[data-hub-function-menu]");
+      if (!functionMenu) return;
+      const row = functionMenu.closest("[data-hub-row]");
+      if (row) row.classList.toggle("menu-open", functionMenu.open);
+    }, true);
     refs.hubNodeList.addEventListener("change", (event) => {
       const selectEl = event.target.closest("[data-node-profile-select]");
       if (selectEl) saveNodeYouTubeProfile(selectEl);
