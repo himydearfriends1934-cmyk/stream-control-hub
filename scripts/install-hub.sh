@@ -274,8 +274,11 @@ health_check_hub() {
 transactional_refresh_hub() {
   [ -d "$INSTALL_DIR/.git" ] || return 0
   git -C "$INSTALL_DIR" fetch origin "$BRANCH"
-  if [ -n "$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=all)" ]; then
-    echo "Refusing upgrade: the HUB checkout has local changes." >&2
+  local_changes="$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=all -- \
+    . ':(exclude)data' ':(exclude)agent_data' ':(exclude)media')"
+  if [ -n "$local_changes" ]; then
+    echo "Refusing upgrade: the HUB checkout has local code changes." >&2
+    printf '%s\n' "$local_changes" >&2
     return 6
   fi
   old_commit="$(git -C "$INSTALL_DIR" rev-parse HEAD)"

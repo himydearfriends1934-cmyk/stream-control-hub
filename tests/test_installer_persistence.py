@@ -171,6 +171,16 @@ class InstallerPersistenceTests(unittest.TestCase):
         self.assertIn('git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"', hub)
         self.assertNotIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"', hub)
 
+    def test_hub_upgrade_ignores_runtime_media_and_data_paths(self):
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn("media/", gitignore)
+        self.assertIn(":(exclude)data", hub)
+        self.assertIn(":(exclude)agent_data", hub)
+        self.assertIn(":(exclude)media", hub)
+        self.assertIn("local code changes", hub)
+
     def test_hub_role_activation_defers_restart_until_env_exists(self):
         hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
 
