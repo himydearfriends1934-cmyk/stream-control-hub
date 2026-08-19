@@ -7821,6 +7821,8 @@ HTML = r"""
       }
       const row = event.target.closest("[data-hub-row]");
       if (!row) return;
+      // The local Hub row is informational only and has no node_id to switch to.
+      if (row.dataset.localHubRow !== undefined || !row.dataset.nodeId) return;
       switchHubWithFallback(row.dataset.nodeId);
     });
     refs.hubNodeList.addEventListener("change", (event) => {
