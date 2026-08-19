@@ -7507,7 +7507,7 @@ HTML = r"""
       if (sourceButton) sourceButton.disabled = true;
       try {
         const data = await postJson("/api/roles/agent/activate", {
-          control_hub_url: window.location.origin,
+          allow_unbound: true,
         });
         refs.updateBox.textContent = JSON.stringify(data, null, 2);
         log(data.ok ? "本地 Hub 的 Agent 激活任务已提交" : `本地 Hub 激活 Agent 失败：${data.message || "未知错误"}`);
@@ -9947,22 +9947,28 @@ def update_private_env_file(path: Path, updates: dict[str, str]) -> None:
 
 
 def schedule_agent_role_activation(
-    control_hub_url: str,
+    control_hub_url: str = "",
     *,
     agent_name: str = "",
     agent_token: str = "",
+    allow_unbound: bool = False,
 ) -> dict[str, Any]:
     try:
         assert_role("hub", ROOT)
     except RoleConflictError as exc:
         raise RuntimeError(f"Agent activation requires the current HUB role: {exc}") from exc
+    control_hub_url = str(control_hub_url or "").strip().rstrip("/")
+    if not control_hub_url and not allow_unbound:
+        raise RuntimeError("a control Hub URL is required unless unbound Agent activation is enabled")
     if not shutil.which("systemd-run"):
         raise RuntimeError("systemd-run is required to activate the Agent role")
     unit = f"stream-control-agent-activate-{int(time.time())}"
     root = shlex.quote(str(ROOT))
     control_hub = shlex.quote(control_hub_url)
+    clear_control_hub = bool(allow_unbound and not control_hub_url)
     env_updates = {
         "STREAM_AGENT_CONTROL_HUB": control_hub_url,
+        "STREAM_AGENT_CONTROL_HUB_CLEAR": "1" if clear_control_hub else "0",
         "STREAM_AGENT_NAME": (
             agent_name
             or os.environ.get("STREAM_AGENT_NAME", "")
@@ -9976,6 +9982,7 @@ def schedule_agent_role_activation(
     update_private_env_file(ROOT / ".agent.env", env_updates)
     script = (
         f"set -eu; sleep 2; env INSTALL_DIR={root} STREAM_AGENT_CONTROL_HUB={control_hub} "
+        f"STREAM_AGENT_CONTROL_HUB_CLEAR={'1' if clear_control_hub else '0'} "
         "ROLE_SWITCH_CONFIRMED=1 "
         f"CHOICE=1 sh {root}/scripts/install-agent.sh"
     )
@@ -9987,7 +9994,12 @@ def schedule_agent_role_activation(
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "failed to schedule Agent activation").strip())
-    return {"unit": unit, "role": "agent", "control_hub": control_hub_url}
+    return {
+        "unit": unit,
+        "role": "agent",
+        "control_hub": control_hub_url,
+        "unbound": clear_control_hub,
+    }
 
 
 def schedule_hub_upgrade() -> dict[str, Any]:
@@ -11752,15 +11764,19 @@ def api_hub_role_status():
 @APP.post("/api/roles/agent/activate")
 def api_activate_agent_role():
     payload = request.get_json(silent=True) or {}
-    control_hub_url = str(payload.get("control_hub_url") or request.host_url.rstrip("/")).strip().rstrip("/")
-    parsed = urlparse(control_hub_url)
-    if not parsed.hostname or not is_private_or_loopback_host(parsed.hostname):
-        return jsonify({"ok": False, "message": "control_hub_url must use a private or Tailscale address"}), 400
+    allow_unbound = bool(payload.get("allow_unbound"))
+    raw_control_hub_url = str(payload.get("control_hub_url") or "").strip().rstrip("/")
+    control_hub_url = raw_control_hub_url or ("" if allow_unbound else request.host_url.rstrip("/"))
+    if control_hub_url:
+        parsed = urlparse(control_hub_url)
+        if not parsed.hostname or not is_private_or_loopback_host(parsed.hostname):
+            return jsonify({"ok": False, "message": "control_hub_url must use a private or Tailscale address"}), 400
     try:
         result = schedule_agent_role_activation(
             control_hub_url,
             agent_name=str(payload.get("agent_name") or "").strip(),
             agent_token=str(payload.get("agent_token") or "").strip(),
+            allow_unbound=allow_unbound,
         )
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409

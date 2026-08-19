@@ -97,6 +97,27 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(result["role"], "agent")
         self.assertIn("ROLE_SWITCH_CONFIRMED=1", run.call_args.args[0][-1])
 
+    def test_hub_can_schedule_an_unbound_agent_conversion(self):
+        from stream_control_hub import app
+
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "install-agent.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            with patch.object(app, "ROOT", root), patch.object(
+                app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(app.subprocess, "run", return_value=completed) as run:
+                result = app.schedule_agent_role_activation("", allow_unbound=True)
+
+            saved_env = (root / ".agent.env").read_text(encoding="utf-8")
+
+        command = run.call_args.args[0][-1]
+        self.assertTrue(result["unbound"])
+        self.assertIn("STREAM_AGENT_CONTROL_HUB=\n", saved_env)
+        self.assertIn("STREAM_AGENT_CONTROL_HUB_CLEAR=1\n", saved_env)
+        self.assertIn("STREAM_AGENT_CONTROL_HUB='' STREAM_AGENT_CONTROL_HUB_CLEAR=1", command)
+
     def test_agent_activates_hub_from_shared_checkout(self):
         from stream_control_hub import headless_agent
 
