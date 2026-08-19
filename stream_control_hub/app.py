@@ -2382,6 +2382,21 @@ HTML = r"""
     .role-settings-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.58); }
     .role-settings-item small { display: block; margin-top: 3px; color: var(--muted); }
     .role-settings-item .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .operation-progress-modal { width: min(560px, 100%); }
+    .operation-progress-target { color: var(--muted); font-size: 13px; }
+    .operation-progress-track { height: 12px; margin: 14px 0 8px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
+    .operation-progress-fill { display: block; width: 0%; height: 100%; background: var(--accent); transition: width 0.3s ease; }
+    .operation-progress-meta { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+    .operation-progress-meta strong { font-size: 22px; color: var(--text); }
+    .operation-progress-meta span { color: var(--muted); text-align: right; }
+    .operation-progress-steps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; margin: 16px 0 10px; padding: 0; list-style: none; }
+    .operation-progress-step { min-width: 0; padding-top: 7px; border-top: 2px solid var(--line); color: var(--muted); font-size: 11px; text-align: center; }
+    .operation-progress-step.active { border-color: var(--accent-2); color: var(--text); font-weight: 800; }
+    .operation-progress-step.done { border-color: var(--accent); color: #b7f7dc; }
+    .operation-progress-step.fail { border-color: var(--danger); color: #fecdd3; }
+    .operation-progress-message { min-height: 42px; margin: 8px 0 0; color: var(--muted); line-height: 1.45; white-space: pre-wrap; }
+    .operation-progress-modal.failed .operation-progress-fill { background: var(--danger); }
+    .operation-progress-modal.done .operation-progress-fill { background: var(--accent); }
     .control-transfer-box { display: grid; gap: 8px; margin-top: 10px; padding: 10px; border: 1px dashed var(--line); border-radius: 10px; background: rgba(7,18,14,.42); }
     .control-transfer-box h3 { margin: 0; font-size: 15px; }
     .control-transfer-box input { width: 100%; }
@@ -3137,6 +3152,27 @@ HTML = r"""
     </div>
   </div>
 
+  <div class="modal-backdrop" id="operationProgressModal" aria-hidden="true">
+    <div class="wizard-modal operation-progress-modal" role="dialog" aria-modal="true" aria-labelledby="operationProgressTitle">
+      <div class="wizard-head">
+        <div>
+          <h2 id="operationProgressTitle">操作进行中</h2>
+          <p id="operationProgressTarget" class="operation-progress-target"></p>
+        </div>
+        <button class="wizard-close" id="operationProgressClose" aria-label="关闭" disabled>×</button>
+      </div>
+      <div class="operation-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="操作进度">
+        <span class="operation-progress-fill" id="operationProgressFill"></span>
+      </div>
+      <div class="operation-progress-meta">
+        <strong id="operationProgressPercent">0%</strong>
+        <span id="operationProgressStage">准备提交任务</span>
+      </div>
+      <ol class="operation-progress-steps" id="operationProgressSteps"></ol>
+      <p class="operation-progress-message" id="operationProgressMessage"></p>
+    </div>
+  </div>
+
   <div class="modal-backdrop" id="choiceModal" aria-hidden="true">
     <div class="wizard-modal choice-modal" role="dialog" aria-modal="true" aria-labelledby="choiceTitle">
       <div class="wizard-head">
@@ -3351,6 +3387,15 @@ HTML = r"""
       roleSettingsSaveNameBtn: document.getElementById("roleSettingsSaveNameBtn"),
       roleSettingsDeleteNodeBtn: document.getElementById("roleSettingsDeleteNodeBtn"),
       roleSettingsClose: document.getElementById("roleSettingsClose"),
+      operationProgressModal: document.getElementById("operationProgressModal"),
+      operationProgressTitle: document.getElementById("operationProgressTitle"),
+      operationProgressTarget: document.getElementById("operationProgressTarget"),
+      operationProgressClose: document.getElementById("operationProgressClose"),
+      operationProgressFill: document.getElementById("operationProgressFill"),
+      operationProgressPercent: document.getElementById("operationProgressPercent"),
+      operationProgressStage: document.getElementById("operationProgressStage"),
+      operationProgressSteps: document.getElementById("operationProgressSteps"),
+      operationProgressMessage: document.getElementById("operationProgressMessage"),
       choiceModal: document.getElementById("choiceModal"),
       choiceIcon: document.getElementById("choiceIcon"),
       choiceTitle: document.getElementById("choiceTitle"),
@@ -3471,6 +3516,9 @@ HTML = r"""
     let nodes = [];
     let mediaLibrary = { resources: [], nodes: [], duplicate_retention: [] };
     let localRoleStatus = null;
+    let activeOperationProgress = null;
+    let operationProgressTimer = null;
+    let operationProgressPollInFlight = false;
     const AGENT_SLOT_COUNT = 10;
     let agentOrder = [];
     let agentOrderSavePromise = Promise.resolve();
@@ -5756,6 +5804,197 @@ HTML = r"""
       }
     }
 
+    function operationProgressSteps(operation) {
+      if (operation.kind === "upgrade") return ["提交升级", "拉取代码", "重启服务", "验证版本", "完成"];
+      if (operation.action === "deactivate") return ["提交任务", "停止旧角色", "清理元数据", "验证状态", "完成"];
+      return ["提交任务", "清理旧角色", "等待新服务", "验证角色", "完成"];
+    }
+
+    function renderOperationProgressSteps() {
+      const operation = activeOperationProgress;
+      if (!operation || !refs.operationProgressSteps) return;
+      refs.operationProgressSteps.innerHTML = operation.steps.map((label, index) => {
+        const state = operation.failed && index === operation.step
+          ? "fail"
+          : index < operation.step
+            ? "done"
+            : index === operation.step && !operation.terminal
+              ? "active"
+              : "";
+        return `<li class="operation-progress-step ${state}">${escapeHtml(label)}</li>`;
+      }).join("");
+    }
+
+    function setOperationProgress(patch = {}) {
+      if (!activeOperationProgress) return;
+      Object.assign(activeOperationProgress, patch);
+      const operation = activeOperationProgress;
+      const percent = Math.max(0, Math.min(100, Number(operation.percent || 0)));
+      refs.operationProgressFill.style.width = `${percent}%`;
+      refs.operationProgressPercent.textContent = `${Math.round(percent)}%`;
+      refs.operationProgressStage.textContent = operation.stage || "正在处理";
+      refs.operationProgressMessage.textContent = operation.message || "";
+      refs.operationProgressTarget.textContent = operation.target || "";
+      refs.operationProgressModal.classList.toggle("done", Boolean(operation.terminal && !operation.failed));
+      refs.operationProgressModal.classList.toggle("failed", Boolean(operation.failed));
+      refs.operationProgressModal.querySelector(".operation-progress-track")
+        ?.setAttribute("aria-valuenow", String(Math.round(percent)));
+      renderOperationProgressSteps();
+    }
+
+    function openOperationProgress(operation) {
+      if (!refs.operationProgressModal) return;
+      refs.operationProgressTitle.textContent = operation.title || "操作进行中";
+      refs.operationProgressClose.disabled = true;
+      refs.operationProgressModal.classList.remove("done", "failed");
+      refs.operationProgressModal.classList.add("open");
+      refs.operationProgressModal.setAttribute("aria-hidden", "false");
+      setOperationProgress({
+        percent: 5,
+        step: 0,
+        stage: "准备提交任务",
+        message: "正在提交后台任务，请不要重复点击。",
+      });
+    }
+
+    function finishOperationProgress(ok, message) {
+      if (!activeOperationProgress) return;
+      setOperationProgress({
+        percent: ok ? 100 : activeOperationProgress.percent,
+        step: ok ? 4 : activeOperationProgress.step,
+        stage: ok ? "已完成" : "操作失败",
+        message,
+        terminal: true,
+        failed: !ok,
+      });
+      refs.operationProgressClose.disabled = false;
+      if (operationProgressTimer) {
+        window.clearTimeout(operationProgressTimer);
+        operationProgressTimer = null;
+      }
+    }
+
+    function closeOperationProgress() {
+      if (!refs.operationProgressModal || !activeOperationProgress?.terminal) return;
+      if (operationProgressTimer) {
+        window.clearTimeout(operationProgressTimer);
+        operationProgressTimer = null;
+      }
+      activeOperationProgress = null;
+      refs.operationProgressModal.classList.remove("open", "done", "failed");
+      refs.operationProgressModal.setAttribute("aria-hidden", "true");
+      refs.operationProgressClose.disabled = true;
+    }
+
+    function beginOperationProgress({ kind, action = "", role = "", nodeId = "", nodeName = "", local = false, targetVersion = "" }) {
+      if (operationProgressTimer) window.clearTimeout(operationProgressTimer);
+      const label = role === "hub" ? "Hub" : "Agent";
+      const title = kind === "upgrade" ? `${label} 系统升级` : `${label} 角色转换`;
+      activeOperationProgress = {
+        kind,
+        action,
+        role,
+        nodeId: String(nodeId || ""),
+        nodeName: nodeName || nodeId || "当前节点",
+        local: Boolean(local),
+        targetVersion: String(targetVersion || ""),
+        startedAt: Date.now(),
+        percent: 5,
+        step: 0,
+        stage: "准备提交任务",
+        message: "正在提交后台任务，请不要重复点击。",
+        terminal: false,
+        failed: false,
+        steps: operationProgressSteps({ kind, action }),
+      };
+      openOperationProgress(activeOperationProgress);
+      return activeOperationProgress;
+    }
+
+    async function refreshOperationNodes() {
+      const resp = await fetch(`/api/nodes?_=${Date.now()}`, { cache: "no-store" });
+      if (!resp.ok) throw new Error(resp.statusText || "节点状态读取失败");
+      nodes = await resp.json();
+      if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
+      renderNodes();
+      return nodes;
+    }
+
+    async function pollOperationProgress() {
+      const operation = activeOperationProgress;
+      if (!operation || operation.terminal || operationProgressPollInFlight) return;
+      operationProgressPollInFlight = true;
+      const elapsed = Date.now() - operation.startedAt;
+      try {
+        if (elapsed > 15 * 60 * 1000) {
+          finishOperationProgress(false, "操作超过 15 分钟仍未完成。请刷新页面检查目标节点服务和版本，确认无误后再重试。");
+          return;
+        }
+        let info = null;
+        if (operation.local) {
+          const resp = await fetch(`/api/role-status?_=${Date.now()}`, { cache: "no-store" });
+          if (!resp.ok) throw new Error(resp.statusText || "本地角色状态暂不可用");
+          localRoleStatus = await resp.json();
+          renderNodes();
+          info = localRoleStatus?.roles?.[operation.role] || {};
+        } else {
+          const snapshot = await refreshOperationNodes();
+          const target = snapshot.find((item) => String(item.id) === operation.nodeId);
+          info = target?.roles?.[operation.role] || {};
+        }
+        const enabled = Boolean(info.enabled);
+        const pending = Boolean(info.activation_pending);
+        if (operation.kind === "upgrade") {
+          if (elapsed < 5000) {
+            setOperationProgress({ percent: 30, step: 1, stage: "后台升级任务已提交", message: "正在等待安装器拉取 GitHub 最新代码。" });
+          } else if (!enabled) {
+            setOperationProgress({ percent: 58, step: 2, stage: "服务重启中", message: "目标服务暂时不可用，正在等待升级后的服务重新上线。" });
+          } else if (elapsed < 10000) {
+            setOperationProgress({ percent: 82, step: 3, stage: "正在验证版本", message: operation.targetVersion ? `正在确认目标版本 ${operation.targetVersion}。` : "服务已恢复，正在确认版本和角色状态。" });
+          } else {
+            finishOperationProgress(true, operation.targetVersion ? `目标服务已恢复，当前版本已完成升级验证：${operation.targetVersion}。` : "目标服务已恢复，升级任务已完成。");
+          }
+        } else if (operation.action === "deactivate") {
+          if (!enabled && !pending) {
+            finishOperationProgress(true, `${operation.nodeName} 的 ${operation.role === "hub" ? "Hub" : "Agent"} 已停止，旧角色状态已清理。`);
+          } else if (pending) {
+            setOperationProgress({ percent: 62, step: 2, stage: "正在清理旧角色", message: "旧角色正在退出，等待服务状态稳定。" });
+          } else {
+            setOperationProgress({ percent: 36, step: 1, stage: "正在停止旧角色", message: "后台任务已收到，正在停止目标服务。" });
+          }
+        } else if (enabled) {
+          finishOperationProgress(true, `${operation.nodeName} 的 ${operation.role === "hub" ? "Hub" : "Agent"} 已上线，角色转换完成。`);
+        } else if (pending) {
+          setOperationProgress({ percent: 62, step: 2, stage: "等待新服务上线", message: "角色转换任务已执行，正在等待新服务恢复并完成健康检查。" });
+        } else if (info.prepared) {
+          setOperationProgress({ percent: 34, step: 1, stage: "正在准备角色", message: "安装器已准备目标角色，旧角色正在退出。" });
+        } else {
+          setOperationProgress({ percent: 22, step: 1, stage: "正在切换角色", message: "后台任务已提交，正在等待目标节点返回状态。" });
+        }
+      } catch (error) {
+        const message = friendlyError(error, "目标服务暂时不可访问");
+        const operationMessage = operation.local
+          ? "当前控制台正在重启或切换端口，页面恢复后会继续检查。"
+          : `目标节点暂时不可访问：${message}。正在等待服务恢复。`;
+        setOperationProgress({
+          percent: Math.max(Number(operation.percent || 0), operation.local ? 58 : 45),
+          step: operation.kind === "upgrade" ? 2 : 2,
+          stage: operation.kind === "upgrade" ? "等待服务恢复" : "等待新服务上线",
+          message: operationMessage,
+        });
+      } finally {
+        operationProgressPollInFlight = false;
+        if (activeOperationProgress && !activeOperationProgress.terminal) {
+          operationProgressTimer = window.setTimeout(pollOperationProgress, 2200);
+        }
+      }
+    }
+
+    function startOperationProgressPolling() {
+      if (operationProgressTimer) window.clearTimeout(operationProgressTimer);
+      operationProgressTimer = window.setTimeout(pollOperationProgress, 900);
+    }
+
     async function refreshRunningAgentParameters() {
       if (agentStreamRefreshInFlight || !nodes.length) return;
       agentStreamRefreshInFlight = true;
@@ -6215,8 +6454,27 @@ HTML = r"""
     async function upgradeCurrentHubFromPrompt(checkData) {
       refs.updateBox.textContent = "正在提交后台升级任务...";
       uiMessage("正在让 VPS 后台升级 Hub，请不要重复点击。");
-      const resp = await fetch("/api/upgrade", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({}) });
-      const data = await resp.json();
+      const operation = beginOperationProgress({
+        kind: "upgrade",
+        action: "upgrade",
+        role: "hub",
+        nodeId: "__local_hub__",
+        nodeName: "当前控制 Hub",
+        local: true,
+        targetVersion: checkData?.remote_label || checkData?.remote || "",
+      });
+      let resp;
+      let data;
+      try {
+        resp = await fetch("/api/upgrade", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({}) });
+        data = await resp.json();
+      } catch (error) {
+        const message = friendlyError(error, "Hub 升级任务提交失败");
+        finishOperationProgress(false, message);
+        refs.updateBox.textContent = message;
+        log(message);
+        return;
+      }
       refs.updateBox.textContent = data.ok
         ? [
             "升级任务已提交",
@@ -6234,6 +6492,17 @@ HTML = r"""
           ].join("\n");
       uiMessage(data.ok ? "升级任务已提交，Hub 重启后刷新页面即可。" : "升级任务提交失败，请查看更新模块详情。");
       log(data.ok ? "当前 Hub GitHub 升级任务已提交" : `当前 Hub 升级失败：${data.message || resp.statusText}`);
+      if (data.ok) {
+        setOperationProgress({
+          percent: 18,
+          step: 0,
+          stage: "后台升级任务已提交",
+          message: data.message || "Hub 正在从 GitHub main 拉取最新代码并重启。",
+        });
+        startOperationProgressPolling(operation);
+      } else {
+        finishOperationProgress(false, data.message || resp.statusText || "Hub 升级任务提交失败。");
+      }
     }
 
     async function checkDailyGithubUpdates() {
@@ -6532,9 +6801,18 @@ HTML = r"""
         const data = await postJson("/api/tailscale/activate-agent", { tailscale_ip: targetIp });
         refs.updateBox.textContent = JSON.stringify(data, null, 2);
         if (!data.ok) throw new Error(data.message || "Agent 激活失败");
+        const operation = beginOperationProgress({
+          kind: "role",
+          action: "activate",
+          role: "agent",
+          nodeId: data.node_id || node?.id || "",
+          nodeName: label,
+        });
+        setOperationProgress({ percent: 18, step: 0, stage: "后台任务已提交", message: data.message || `${label} 正在执行 Agent 激活任务。` });
         log(`Tailscale 节点 Agent 激活任务已提交：${label}`);
         setTailscaleLog(data, "Agent 激活任务已提交");
         await refreshAll();
+        startOperationProgressPolling(operation);
       } catch (error) {
         const message = friendlyError(error, "Tailscale 节点激活 Agent 失败");
         log(message);
@@ -7485,40 +7763,66 @@ HTML = r"""
         }
       }
       const path = deactivating ? `/api/nodes/roles/${role}/deactivate` : activating ? `/api/nodes/roles/${role}/activate` : `/api/nodes/roles/${role}/upgrade`;
-      const data = await postNodeAction(path, { node_id: nodeId });
-      refs.updateBox.textContent = JSON.stringify(data, null, 2);
-      log(data.ok ? `${roleLabel} 任务已提交：${nodeName}` : `${roleLabel} 操作失败：${data.message || nodeName}`);
-      if (data.ok) {
-        await refreshAll();
-        for (const delay of [5000, 10000, 15000]) {
-          const updated = nodes.find((item) => String(item.id) === String(nodeId));
-          const updatedRole = updated?.roles?.[role] || {};
-          if (updatedRole.enabled) break;
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          await refreshAll();
+      const operation = beginOperationProgress({
+        kind: activating || deactivating ? "role" : "upgrade",
+        action: activating ? "activate" : deactivating ? "deactivate" : "upgrade",
+        role,
+        nodeId,
+        nodeName,
+      });
+      try {
+        const data = await postNodeAction(path, { node_id: nodeId });
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        log(data.ok ? `${roleLabel} 任务已提交：${nodeName}` : `${roleLabel} 操作失败：${data.message || nodeName}`);
+        if (!data.ok) {
+          finishOperationProgress(false, data.message || `${roleLabel} 操作提交失败。`);
+          if (sourceButton) sourceButton.disabled = false;
+          return;
         }
-      } else if (sourceButton) {
-        sourceButton.disabled = false;
+        setOperationProgress({
+          percent: 18,
+          step: 0,
+          stage: "后台任务已提交",
+          message: data.message || `${nodeName} 正在执行后台任务。`,
+        });
+        await refreshAll().catch(() => null);
+        startOperationProgressPolling(operation);
+      } catch (error) {
+        const message = friendlyError(error, `${roleLabel} 操作提交失败`);
+        finishOperationProgress(false, message);
+        log(message);
+        if (sourceButton) sourceButton.disabled = false;
       }
     }
 
     async function activateLocalHubAgent(sourceButton = null) {
       if (!confirm("当前控制 Hub 将停止并切换为 Agent。\n\nHub 配置和视频会保留；切换完成后请在 Tailscale Agent 列表中把该节点加入 Agent 表。是否继续？")) return;
       if (sourceButton) sourceButton.disabled = true;
+      const operation = beginOperationProgress({
+        kind: "role",
+        action: "activate",
+        role: "agent",
+        nodeId: "__local_hub__",
+        nodeName: "当前控制 Hub",
+        local: true,
+      });
       try {
         const data = await postJson("/api/roles/agent/activate", {
           allow_unbound: true,
         });
         refs.updateBox.textContent = JSON.stringify(data, null, 2);
         log(data.ok ? "本地 Hub 的 Agent 激活任务已提交" : `本地 Hub 激活 Agent 失败：${data.message || "未知错误"}`);
-        if (!data.ok && sourceButton) sourceButton.disabled = false;
-        if (data.ok) {
-          alert("Agent 激活任务已提交。Hub 会自动停止，服务上线后可从 Tailscale Agent 列表加入 Agent 表。");
+        if (!data.ok) {
+          finishOperationProgress(false, data.message || "本地 Hub 激活 Agent 失败。");
+          if (sourceButton) sourceButton.disabled = false;
+          return;
         }
+        setOperationProgress({ percent: 18, step: 0, stage: "后台任务已提交", message: "当前 Hub 将停止，随后切换到 Agent 8787。" });
+        startOperationProgressPolling(operation);
       } catch (error) {
         const message = friendlyError(error, "本地 Hub 激活 Agent 失败");
         log(message);
-        alert(message);
+        finishOperationProgress(false, message);
         if (sourceButton) sourceButton.disabled = false;
       }
     }
@@ -8146,6 +8450,10 @@ HTML = r"""
       if (selectEl) saveNodeYouTubeProfile(selectEl);
     });
     refs.roleSettingsClose.addEventListener("click", () => setRoleSettingsOpen(false));
+    refs.operationProgressClose.addEventListener("click", closeOperationProgress);
+    refs.operationProgressModal.addEventListener("click", (event) => {
+      if (event.target === refs.operationProgressModal) closeOperationProgress();
+    });
     refs.roleSettingsModal.addEventListener("click", async (event) => {
       if (event.target === refs.roleSettingsModal) {
         setRoleSettingsOpen(false);
