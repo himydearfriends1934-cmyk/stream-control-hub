@@ -5986,6 +5986,23 @@ HTML = r"""
       return String(value || "").trim().split(/\s+/, 1)[0].toLowerCase();
     }
 
+    async function latestOperationSourceVersion(operation) {
+      const now = Date.now();
+      if (operation.sourceVersionCheckedAt && now - operation.sourceVersionCheckedAt < 10000) {
+        return operation.sourceVersion || "";
+      }
+      operation.sourceVersionCheckedAt = now;
+      try {
+        const resp = await fetch(`/api/github/check?_=${now}`, { cache: "no-store", headers: authHeaders() });
+        if (!resp.ok) return "";
+        const data = await resp.json();
+        operation.sourceVersion = operationVersion(data.remote || data.remote_label || "");
+        return operation.sourceVersion;
+      } catch (_) {
+        return "";
+      }
+    }
+
     async function refreshOperationNodes() {
       const resp = await fetch(`/api/nodes?_=${Date.now()}`, { cache: "no-store" });
       if (!resp.ok) throw new Error(resp.statusText || "节点状态读取失败");
@@ -6034,7 +6051,12 @@ HTML = r"""
           } else if (!enabled) {
             setOperationProgress({ percent: 58, step: 2, stage: "服务重启中", message: "目标服务暂时不可用，正在等待升级后的服务重新上线。" });
           } else if (!versionMatches) {
-            setOperationProgress({ percent: 82, step: 3, stage: "正在验证版本", message: `服务已恢复，但当前版本 ${actualVersion || "未识别"} 仍不是目标版本 ${targetVersion || "最新版本"}，继续等待升级结果。` });
+            const sourceVersion = targetVersion && actualVersion ? await latestOperationSourceVersion(operation) : "";
+            if (sourceVersion && actualVersion === sourceVersion) {
+              finishOperationProgress(true, `目标服务已恢复，当前版本 ${actualVersion} 已是 GitHub main 的最新版本。`);
+            } else {
+              setOperationProgress({ percent: 82, step: 3, stage: "正在验证版本", message: `服务已恢复，但当前版本 ${actualVersion || "未识别"} 仍不是目标版本 ${targetVersion || "最新版本"}，继续等待升级结果。` });
+            }
           } else {
             finishOperationProgress(true, targetVersion ? `目标服务已恢复，当前版本已完成升级验证：${targetVersion}。` : "目标服务已恢复，升级任务已完成。");
           }

@@ -418,6 +418,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("function beginOperationProgress", app.HTML)
         self.assertIn("function pollOperationProgress", app.HTML)
         self.assertIn("function operationProgressSteps", app.HTML)
+        self.assertIn("function latestOperationSourceVersion", app.HTML)
         self.assertIn("startOperationProgressPolling", app.HTML)
         self.assertIn("upgradeStatus.state", app.HTML)
         self.assertIn("后台升级任务失败", app.HTML)
