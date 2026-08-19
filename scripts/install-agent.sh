@@ -250,11 +250,13 @@ health_check_agent() {
     *) probe_host="$STREAM_AGENT_HOST" ;;
   esac
   token="$(existing_env_value STREAM_AGENT_CONTROL_TOKEN)"
+  expected_version="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || true)"
   probe_url="http://$probe_host:$STREAM_AGENT_PORT/api/status"
   for _ in $(seq 1 20); do
+    status="$(curl -fsS --max-time 3 -H "X-Control-Token: $token" "$probe_url" 2>/dev/null || true)"
     if systemctl is-active --quiet stream-control-headless-agent.service \
-      && curl -fsS --max-time 3 -H "X-Control-Token: $token" "$probe_url" >/dev/null 2>&1 \
-      && ! systemctl is-active --quiet stream-control-hub.service; then
+      && ! systemctl is-active --quiet stream-control-hub.service \
+      && printf '%s' "$status" | grep -q "\"version\":\"$expected_version\""; then
       return 0
     fi
     sleep 1

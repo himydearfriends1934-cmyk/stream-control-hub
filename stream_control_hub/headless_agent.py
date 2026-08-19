@@ -146,7 +146,35 @@ def current_systemd_service() -> str:
     return matches[-1] if matches else ""
 
 
-def schedule_agent_upgrade() -> dict[str, Any]:
+def normalize_target_version(value: Any) -> str:
+    parts = str(value or "").strip().split(None, 1)
+    candidate = parts[0] if parts else ""
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", candidate):
+        return candidate[:7].lower()
+    return ""
+
+
+def latest_source_version() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", AGENT_SOURCE_REPO, AGENT_SOURCE_BRANCH],
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    expected_ref = f"refs/heads/{AGENT_SOURCE_BRANCH}"
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == expected_ref:
+            return normalize_target_version(parts[0])
+    return ""
+
+
+def schedule_agent_upgrade(target_version: str = "") -> dict[str, Any]:
     try:
         assert_role("agent", ROOT)
     except RoleConflictError as exc:
@@ -167,6 +195,7 @@ def schedule_agent_upgrade() -> dict[str, Any]:
             "Agent upgrade requires the managed stream-control-headless-agent.service installation; "
             "reinstall the Agent once before using in-product upgrades."
         )
+    target_version = normalize_target_version(target_version) or latest_source_version()
     script = (
         "set -eu; "
         f"mkdir -p {data_dir}; "
@@ -176,7 +205,10 @@ def schedule_agent_upgrade() -> dict[str, Any]:
         "sleep 2; "
         f"test -z \"$(git -C {root} status --porcelain --untracked-files=no)\"; "
         f"env BRANCH={branch} CHOICE=1 INSTALL_DIR={root} "
-        f"sh {root}/scripts/install-agent.sh"
+        f"sh {root}/scripts/install-agent.sh; "
+        f"actual_version=\"$(git -C {root} rev-parse --short HEAD)\"; "
+        f"if [ -n {shlex.quote(target_version)} ] && [ \"$actual_version\" != {shlex.quote(target_version)} ]; then "
+        f"echo \"Agent upgrade finished at $actual_version, expected {shlex.quote(target_version)}\" >&2; exit 78; fi"
     )
     install_mode = "transactional-managed-installer"
     result = subprocess.run(
@@ -191,6 +223,7 @@ def schedule_agent_upgrade() -> dict[str, Any]:
         "unit": unit,
         "from_version": version["version"],
         "target_branch": AGENT_SOURCE_BRANCH,
+        "target_version": target_version,
         "install_mode": install_mode,
         "service": service,
     }
@@ -2924,8 +2957,9 @@ def api_restart_stream():
 
 @APP.post("/api/upgrade")
 def api_upgrade():
+    payload = request.get_json(silent=True) or {}
     try:
-        result = schedule_agent_upgrade()
+        result = schedule_agent_upgrade(str(payload.get("target_version") or ""))
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
     return jsonify({

@@ -220,11 +220,13 @@ class AgentUpgradeTests(unittest.TestCase):
             ), patch.object(
                 headless_agent.subprocess, "run", return_value=completed
             ) as run:
-                headless_agent.schedule_agent_upgrade()
+                headless_agent.schedule_agent_upgrade("def5678")
 
         command = run.call_args.args[0][-1]
         self.assertIn("INSTALL_DIR=", command)
         self.assertIn(str(root), command)
+        self.assertIn('actual_version="$(git -C', command)
+        self.assertIn('expected def5678', command)
 
     def test_role_status_reports_inactive_counterpart_as_prepared(self):
         from stream_control_hub import app, headless_agent
@@ -285,12 +287,14 @@ class AgentUpgradeTests(unittest.TestCase):
             headless_agent, "schedule_agent_upgrade", return_value=scheduled
         ) as schedule:
             response = headless_agent.APP.test_client().post(
-                "/api/upgrade", environ_base={"REMOTE_ADDR": "127.0.0.1"}
+                "/api/upgrade",
+                json={"target_version": "def5678"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
             )
 
         self.assertEqual(response.status_code, 202)
         self.assertTrue(response.get_json()["accepted"])
-        schedule.assert_called_once_with()
+        schedule.assert_called_once_with("def5678")
 
     def test_agent_hub_activation_accepts_seed_nodes(self):
         from stream_control_hub import headless_agent
@@ -336,13 +340,15 @@ class AgentUpgradeTests(unittest.TestCase):
                 app,
                 "post_node_json",
                 return_value={"ok": True, "accepted": True, "message": "scheduled"},
-            ) as post:
+            ) as post, patch.object(app, "latest_source_version", return_value="def5678"):
                 response = app.APP.test_client().post(
                     "/api/nodes/upgrade", json={"node_id": "node-b"}
                 )
 
         self.assertEqual(response.status_code, 202)
-        post.assert_called_once_with(nodes[1], "/api/upgrade", {}, timeout=30)
+        post.assert_called_once_with(
+            nodes[1], "/api/upgrade", {"target_version": "def5678"}, timeout=30
+        )
 
     def test_ui_remembers_last_agent_and_keeps_role_actions_in_settings(self):
         from stream_control_hub import app

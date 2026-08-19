@@ -12,6 +12,7 @@ import hmac
 import hashlib
 import ipaddress
 import platform
+import re
 import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -1026,6 +1027,35 @@ APP.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("STREAM_HUB_MAX_UPLOAD_BYT
 def local_git_version() -> str:
     result = run_command(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], timeout=5)
     return str(result.get("stdout") or "unmanaged").strip() or "unmanaged"
+
+
+def normalize_target_version(value: Any) -> str:
+    parts = str(value or "").strip().split(None, 1)
+    candidate = parts[0] if parts else ""
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", candidate):
+        return candidate[:7].lower()
+    return ""
+
+
+def latest_source_version() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", SOURCE_REPO, SOURCE_BRANCH],
+            cwd=str(ROOT),
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    expected_ref = f"refs/heads/{SOURCE_BRANCH}"
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == expected_ref:
+            return normalize_target_version(parts[0])
+    return ""
 
 
 def service_active(name: str) -> bool:
@@ -5906,6 +5936,10 @@ HTML = r"""
       return activeOperationProgress;
     }
 
+    function operationVersion(value) {
+      return String(value || "").trim().split(/\s+/, 1)[0].toLowerCase();
+    }
+
     async function refreshOperationNodes() {
       const resp = await fetch(`/api/nodes?_=${Date.now()}`, { cache: "no-store" });
       if (!resp.ok) throw new Error(resp.statusText || "节点状态读取失败");
@@ -5940,14 +5974,17 @@ HTML = r"""
         const enabled = Boolean(info.enabled);
         const pending = Boolean(info.activation_pending);
         if (operation.kind === "upgrade") {
+          const targetVersion = operationVersion(operation.targetVersion);
+          const actualVersion = operationVersion(info.version);
+          const versionMatches = !targetVersion || actualVersion === targetVersion;
           if (elapsed < 5000) {
             setOperationProgress({ percent: 30, step: 1, stage: "后台升级任务已提交", message: "正在等待安装器拉取 GitHub 最新代码。" });
           } else if (!enabled) {
             setOperationProgress({ percent: 58, step: 2, stage: "服务重启中", message: "目标服务暂时不可用，正在等待升级后的服务重新上线。" });
-          } else if (elapsed < 10000) {
-            setOperationProgress({ percent: 82, step: 3, stage: "正在验证版本", message: operation.targetVersion ? `正在确认目标版本 ${operation.targetVersion}。` : "服务已恢复，正在确认版本和角色状态。" });
+          } else if (!versionMatches) {
+            setOperationProgress({ percent: 82, step: 3, stage: "正在验证版本", message: `服务已恢复，但当前版本 ${actualVersion || "未识别"} 仍不是目标版本 ${targetVersion || "最新版本"}，继续等待升级结果。` });
           } else {
-            finishOperationProgress(true, operation.targetVersion ? `目标服务已恢复，当前版本已完成升级验证：${operation.targetVersion}。` : "目标服务已恢复，升级任务已完成。");
+            finishOperationProgress(true, targetVersion ? `目标服务已恢复，当前版本已完成升级验证：${targetVersion}。` : "目标服务已恢复，升级任务已完成。");
           }
         } else if (operation.action === "deactivate") {
           if (!enabled && !pending) {
@@ -6456,12 +6493,16 @@ HTML = r"""
         nodeId: "__local_hub__",
         nodeName: "当前控制 Hub",
         local: true,
-        targetVersion: checkData?.remote_label || checkData?.remote || "",
+        targetVersion: operationVersion(checkData?.remote_label || checkData?.remote || ""),
       });
       let resp;
       let data;
       try {
-        resp = await fetch("/api/upgrade", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({}) });
+        resp = await fetch("/api/upgrade", {
+          method: "POST",
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ target_version: operation.targetVersion }),
+        });
         data = await resp.json();
       } catch (error) {
         const message = friendlyError(error, "Hub 升级任务提交失败");
@@ -6488,6 +6529,7 @@ HTML = r"""
       uiMessage(data.ok ? "升级任务已提交，Hub 重启后刷新页面即可。" : "升级任务提交失败，请查看更新模块详情。");
       log(data.ok ? "当前 Hub GitHub 升级任务已提交" : `当前 Hub 升级失败：${data.message || resp.statusText}`);
       if (data.ok) {
+        operation.targetVersion = operationVersion(data.result?.target_version || operation.targetVersion);
         setOperationProgress({
           percent: 18,
           step: 0,
@@ -7806,6 +7848,9 @@ HTML = r"""
           stage: "后台任务已提交",
           message: data.message || `${nodeName} 正在执行后台任务。`,
         });
+        if (operation.kind === "upgrade") {
+          operation.targetVersion = data.target_version || data.result?.target_version || "";
+        }
         await refreshAll().catch(() => null);
         startOperationProgressPolling(operation);
       } catch (error) {
@@ -10421,7 +10466,7 @@ def schedule_agent_role_activation(
     }
 
 
-def schedule_hub_upgrade() -> dict[str, Any]:
+def schedule_hub_upgrade(target_version: str = "") -> dict[str, Any]:
     try:
         assert_role("hub", ROOT)
     except RoleConflictError as exc:
@@ -10431,13 +10476,17 @@ def schedule_hub_upgrade() -> dict[str, Any]:
     unit = f"stream-control-hub-upgrade-{int(time.time())}"
     root = shlex.quote(str(ROOT))
     branch = shlex.quote(SOURCE_BRANCH)
+    target_version = normalize_target_version(target_version) or latest_source_version()
     script = (
         "set -eu; "
         "sleep 2; "
         f"test -z \"$(git -C {root} status --porcelain --untracked-files=no)\"; "
         f"env BRANCH={branch} CHOICE=1 "
         f"INSTALL_DIR={root} "
-        f"STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 sh {root}/scripts/install-hub.sh"
+        f"STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 sh {root}/scripts/install-hub.sh; "
+        f"actual_version=\"$(git -C {root} rev-parse --short HEAD)\"; "
+        f"if [ -n {shlex.quote(target_version)} ] && [ \"$actual_version\" != {shlex.quote(target_version)} ]; then "
+        f"echo \"HUB upgrade finished at $actual_version, expected {shlex.quote(target_version)}\" >&2; exit 78; fi"
     )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
@@ -10447,7 +10496,13 @@ def schedule_hub_upgrade() -> dict[str, Any]:
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "failed to schedule Hub upgrade").strip())
-    return {"unit": unit, "role": "hub", "from_version": local_git_version(), "target_branch": SOURCE_BRANCH}
+    return {
+        "unit": unit,
+        "role": "hub",
+        "from_version": local_git_version(),
+        "target_branch": SOURCE_BRANCH,
+        "target_version": target_version,
+    }
 
 
 def schedule_hub_deactivation() -> dict[str, Any]:
@@ -12218,8 +12273,9 @@ def api_deactivate_agent_role_from_hub():
 
 @APP.post("/api/upgrade")
 def api_upgrade_hub():
+    payload = request.get_json(silent=True) or {}
     try:
-        result = schedule_hub_upgrade()
+        result = schedule_hub_upgrade(str(payload.get("target_version") or ""))
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
     return jsonify({"ok": True, "accepted": True, "message": "HUB upgrade scheduled; the HUB service and role conflict state will be reconciled", "result": result}), 202
@@ -13668,9 +13724,10 @@ def api_nodes_upgrade():
     upgrade_api = str(node.get("upgrade_api") or "/api/upgrade").strip() or "/api/upgrade"
     if not upgrade_api.startswith("/"):
         upgrade_api = f"/{upgrade_api}"
-    result = post_node_json(node, upgrade_api, {}, timeout=30)
+    target_version = latest_source_version() or local_git_version()
+    result = post_node_json(node, upgrade_api, {"target_version": target_version}, timeout=30)
     status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
-    return jsonify({"node_id": node_id, **result}), status_code
+    return jsonify({"node_id": node_id, "target_version": target_version, **result}), status_code
 
 
 @APP.post("/api/nodes/roles/<role>/activate")
@@ -13756,15 +13813,16 @@ def api_upgrade_node_role(role: str):
     node = node_by_id(node_id)
     if not node:
         return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
+    target_version = latest_source_version() or local_git_version()
     if role == "agent":
-        result = post_node_json(node, "/api/upgrade", {}, timeout=30)
+        result = post_node_json(node, "/api/upgrade", {"target_version": target_version}, timeout=30)
     elif role == "hub":
         hub_url = node_role_urls(node)["hub"]
-        result = post_url_json(f"{hub_url}/api/upgrade", {}, timeout=30)
+        result = post_url_json(f"{hub_url}/api/upgrade", {"target_version": target_version}, timeout=30)
     else:
         return jsonify({"ok": False, "message": "unsupported role"}), 404
     status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
-    return jsonify({"node_id": node_id, "role": role, **result}), status_code
+    return jsonify({"node_id": node_id, "role": role, "target_version": target_version, **result}), status_code
 
 
 @APP.post("/api/nodes/roles/<role>/deactivate")
