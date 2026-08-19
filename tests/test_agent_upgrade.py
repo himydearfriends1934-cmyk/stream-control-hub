@@ -21,6 +21,10 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertNotIn("systemctl restart stream-control-hub.service", script)
         self.assertIn('git -C "$INSTALL_DIR" init', hub_script)
         self.assertIn("transactional_refresh_hub", hub_script)
+        self.assertIn("STREAM_MEDIA_DIR", script)
+        self.assertIn("STREAM_MEDIA_DIR", hub_script)
+        self.assertIn("migrate_shared_media", script)
+        self.assertIn("migrate_shared_media", hub_script)
         self.assertNotIn("systemctl restart stream-control-headless-agent.service", hub_script)
         self.assertNotIn('INSTALL_DIR exists but is not a git checkout', script)
         self.assertNotIn('INSTALL_DIR exists but is not a git checkout', hub_script)
@@ -638,6 +642,9 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('data-tailscale-activate-agent-ip', app.HTML)
         self.assertIn('data-local-hub-agent-action="activate"', app.HTML)
         self.assertIn('data-role-action="switch-hub"', app.HTML)
+        self.assertIn("data-hub-function-menu", app.HTML)
+        self.assertIn('data-hub-action="view-resources"', app.HTML)
+        self.assertNotIn('<button class="tiny" data-role-action="switch-hub"', app.HTML)
         self.assertIn("openNodeResources(row.dataset.nodeId)", app.HTML)
         self.assertIn('String(openResourceNodeId || "")', app.HTML)
         self.assertIn('id="transferHubNodeSelect"', app.HTML)
@@ -910,6 +917,46 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(saved[0]["hub_url"], "http://100.64.0.10:8788")
         self.assertTrue(saved[0]["role_hints"]["hub"]["activation_pending"])
 
+    def test_hub_activation_cleans_stale_agent_role_metadata(self):
+        from stream_control_hub import app
+
+        nodes = [{
+            "id": "node-a",
+            "name": "Node A",
+            "base_url": "http://100.64.0.10:8787",
+            "agent_url": "http://100.64.0.10:8787",
+            "public_base_url": "http://old.example",
+            "upload_base_url": "http://old.example",
+            "hub_url": "http://100.64.0.10:8788",
+            "control_hub_url": "http://old-hub:8788",
+            "hub_only": False,
+            "role_hints": {
+                "agent": {"enabled": True, "prepared": True, "url": "http://100.64.0.10:8787"},
+            },
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app,
+                "post_node_json",
+                return_value={"ok": True, "accepted": True, "result": {"url": "http://100.64.0.10:8788"}},
+            ):
+                response = app.APP.test_client().post(
+                    "/api/nodes/roles/hub/activate",
+                    json={"node_id": "node-a"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+            saved = json.loads(nodes_file.read_text(encoding="utf-8"))[0]
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(saved["hub_only"])
+        self.assertEqual(saved["hub_role_url"], "http://100.64.0.10:8788")
+        for key in ("base_url", "agent_url", "public_base_url", "upload_base_url", "control_hub_url"):
+            self.assertNotIn(key, saved)
+        self.assertNotIn("agent", saved["role_hints"])
+        self.assertTrue(saved["role_hints"]["hub"]["activation_pending"])
+
     def test_agent_activation_generates_token_and_records_pending_hint(self):
         from stream_control_hub import app
 
@@ -935,6 +982,56 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(post.call_args.args[1]["agent_token"], "generated-agent-token")
         self.assertEqual(saved[0]["token"], "generated-agent-token")
         self.assertTrue(saved[0]["role_hints"]["agent"]["activation_pending"])
+        self.assertFalse(saved[0].get("hub_only", False))
+        self.assertNotIn("hub_url", saved[0])
+        self.assertNotIn("hub_role_url", saved[0])
+        self.assertEqual(saved[0]["agent_url"], "http://100.64.0.10:8787")
+
+    def test_hub_status_falls_back_to_legacy_media_endpoint(self):
+        from stream_control_hub import app
+
+        node = {
+            "id": "racknerd",
+            "base_url": "http://100.64.0.10:8787",
+            "hub_url": "http://100.64.0.10:8788",
+        }
+        with patch.object(
+            app,
+            "request_hub_json",
+            side_effect=[
+                {"ok": False, "status_code": 404, "message": "not found"},
+                {"ok": True, "videos": [{"name": "loop.mp4", "size": 42}]},
+            ],
+        ) as hub_probe, patch.object(app, "request_node_json") as agent_probe:
+            status = app.request_node_status(node, timeout=1)
+
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["source_role"], "hub")
+        self.assertEqual(status["videos"][0]["name"], "loop.mp4")
+        self.assertEqual(hub_probe.call_count, 2)
+        agent_probe.assert_not_called()
+
+    def test_agent_media_listing_keeps_legacy_role_directory_visible(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "media"
+            legacy = root / "agent_data" / "media"
+            legacy.mkdir(parents=True)
+            (legacy / "kept.mp4").write_bytes(b"video")
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", root / "agent_data"
+            ), patch.object(headless_agent, "MEDIA_DIR", shared), patch.object(
+                headless_agent, "STATE_FILE", root / "state.json"
+            ):
+                videos = headless_agent.list_media()
+
+        self.assertEqual([item["name"] for item in videos], ["kept.mp4"])
+        video_path = Path(videos[0]["video_path"])
+        self.assertEqual(video_path.name, "kept.mp4")
+        self.assertEqual(video_path.parent.name, "media")
+        self.assertEqual(video_path.parent.parent.name, "agent_data")
 
     def test_nodes_api_reports_pending_role_hints_until_services_are_online(self):
         from stream_control_hub import app

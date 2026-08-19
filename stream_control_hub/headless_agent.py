@@ -37,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 load_env_file(ROOT / ".agent.env")
 DATA_DIR = Path(os.environ.get("STREAM_AGENT_DATA_DIR", str(ROOT / "agent_data")))
-MEDIA_DIR = DATA_DIR / "media"
+MEDIA_DIR = Path(os.environ.get("STREAM_MEDIA_DIR", str(DATA_DIR / "media")))
 STATE_FILE = DATA_DIR / "state.json"
 MEDIA_HASH_CACHE_FILE = DATA_DIR / "media-hashes.json"
 STREAM_RESTART_FILE = Path(os.environ.get("STREAM_AGENT_RESTART_FILE", str(DATA_DIR / "stream_restart.json")))
@@ -357,6 +357,43 @@ APP.config["MAX_CONTENT_LENGTH"] = MAX_CHUNK_BYTES + 1024 * 1024
 
 def ensure_dirs() -> None:
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def media_roots() -> list[Path]:
+    """Read the shared media root plus pre-shared role directories from older installs."""
+    candidates = [
+        MEDIA_DIR,
+        DATA_DIR / "media",
+        ROOT / "data" / "media",
+        ROOT / "agent_data" / "media",
+    ]
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        key = str(resolved).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots
+
+
+def iter_media_files() -> list[Path]:
+    files: list[Path] = []
+    seen: set[str] = set()
+    for root in media_roots():
+        if not root.is_dir():
+            continue
+        for path in root.iterdir():
+            if not path.is_file() or not media_allowed(path.name):
+                continue
+            key = path.name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(path)
+    return files
 
 
 def public_origin_from_ip(value: str) -> str:
@@ -1096,9 +1133,7 @@ def list_media() -> list[dict[str, Any]]:
     state = load_state()
     media_usage = state.get("media_usage") or {}
     items: list[dict[str, Any]] = []
-    for path in sorted(MEDIA_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if not path.is_file() or not media_allowed(path.name):
-            continue
+    for path in sorted(iter_media_files(), key=lambda p: p.stat().st_mtime, reverse=True):
         stat = path.stat()
         usage = media_usage.get(path.name) if isinstance(media_usage, dict) else {}
         usage = usage if isinstance(usage, dict) else {}
@@ -1169,13 +1204,17 @@ def media_by_name_or_path(value: str) -> Path:
         raise ValueError("missing media name")
     candidate = Path(raw)
     if not candidate.is_absolute():
-        candidate = MEDIA_DIR / safe_media_filename(raw)
+        filename = safe_media_filename(raw)
+        candidate = next(
+            (root / filename for root in media_roots() if (root / filename).is_file()),
+            media_roots()[0] / filename,
+        )
     resolved = candidate.resolve()
-    media_root = MEDIA_DIR.resolve()
-    try:
-        resolved.relative_to(media_root)
-    except ValueError as exc:
-        raise ValueError("media must be inside agent media directory") from exc
+    if not any(
+        resolved == root or root in resolved.parents
+        for root in media_roots()
+    ):
+        raise ValueError("media must be inside a configured media directory")
     if not resolved.is_file() or not media_allowed(resolved.name):
         raise ValueError("media file not found or unsupported")
     return resolved

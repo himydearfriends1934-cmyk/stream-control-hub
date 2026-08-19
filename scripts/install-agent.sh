@@ -11,6 +11,7 @@ STREAM_AGENT_CONTROL_HUB="${STREAM_AGENT_CONTROL_HUB:-}"
 STREAM_AGENT_PUBLIC_ORIGIN="${STREAM_AGENT_PUBLIC_ORIGIN:-}"
 STREAM_AUTO_RESTART_ENABLED="${STREAM_AUTO_RESTART_ENABLED:-}"
 STREAM_AGENT_TRUSTED_REMOTE_WRITES="${STREAM_AGENT_TRUSTED_REMOTE_WRITES:-}"
+STREAM_MEDIA_DIR="${STREAM_MEDIA_DIR:-}"
 YOUTUBE_CLIENT_ID="${YOUTUBE_CLIENT_ID:-}"
 YOUTUBE_CLIENT_SECRET="${YOUTUBE_CLIENT_SECRET:-}"
 TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
@@ -174,6 +175,7 @@ PY
 [ -n "$STREAM_AUTO_RESTART_ENABLED" ] || STREAM_AUTO_RESTART_ENABLED="1"
 [ -n "$STREAM_AGENT_TRUSTED_REMOTE_WRITES" ] || STREAM_AGENT_TRUSTED_REMOTE_WRITES="$(existing_env_value STREAM_AGENT_TRUSTED_REMOTE_WRITES)"
 [ -n "$STREAM_AGENT_TRUSTED_REMOTE_WRITES" ] || STREAM_AGENT_TRUSTED_REMOTE_WRITES="0"
+[ -n "$STREAM_MEDIA_DIR" ] || STREAM_MEDIA_DIR="$INSTALL_DIR/media"
 [ -n "$TAILSCALE_HOSTNAME" ] || TAILSCALE_HOSTNAME="$STREAM_AGENT_NAME"
 case "$(printf '%s' "$STREAM_AUTO_RESTART_ENABLED" | tr '[:upper:]' '[:lower:]')" in
   1|true|yes) STREAM_AUTO_RESTART_ENABLED="1" ;;
@@ -198,6 +200,42 @@ need_cmd() {
     echo "$1 is required but missing." >&2
     exit 1
   }
+}
+
+migrate_shared_media() {
+  STREAM_MEDIA_TARGET="$STREAM_MEDIA_DIR" STREAM_INSTALL_DIR="$INSTALL_DIR" python3 - <<'PY'
+import filecmp
+import os
+from pathlib import Path
+
+target = Path(os.environ["STREAM_MEDIA_TARGET"]).expanduser()
+install_dir = Path(os.environ["STREAM_INSTALL_DIR"]).expanduser()
+target.mkdir(parents=True, exist_ok=True)
+for source in (install_dir / "agent_data" / "media", install_dir / "data" / "media"):
+    source = source.resolve()
+    if source == target.resolve() or not source.is_dir():
+        continue
+    for item in list(source.iterdir()):
+        if not item.is_file():
+            continue
+        destination = target / item.name
+        if destination.exists():
+            if filecmp.cmp(item, destination, shallow=False):
+                item.unlink()
+                continue
+            counter = 1
+            while True:
+                candidate = target / f"{item.stem}-legacy-{counter}{item.suffix}"
+                if not candidate.exists():
+                    destination = candidate
+                    break
+                counter += 1
+        item.replace(destination)
+    try:
+        source.rmdir()
+    except OSError:
+        pass
+PY
 }
 
 health_check_agent() {
@@ -532,6 +570,7 @@ configure_agent_firewall
 need_cmd git
 need_cmd python3
 need_cmd systemctl
+migrate_shared_media
 git config --global --add safe.directory "$INSTALL_DIR" >/dev/null 2>&1 || true
 reconcile_agent_role
 write_agent_service_unit
@@ -599,6 +638,7 @@ STREAM_AGENT_NAME=$STREAM_AGENT_NAME
 STREAM_AGENT_CONTROL_HUB=$STREAM_AGENT_CONTROL_HUB
 STREAM_AGENT_PUBLIC_ORIGIN=$STREAM_AGENT_PUBLIC_ORIGIN
 STREAM_AGENT_DATA_DIR=$INSTALL_DIR/agent_data
+STREAM_MEDIA_DIR=$STREAM_MEDIA_DIR
 STREAM_AUTO_RESTART_ENABLED=$STREAM_AUTO_RESTART_ENABLED
 STREAM_AGENT_TRUSTED_REMOTE_WRITES=$STREAM_AGENT_TRUSTED_REMOTE_WRITES
 YOUTUBE_CLIENT_ID=$YOUTUBE_CLIENT_ID

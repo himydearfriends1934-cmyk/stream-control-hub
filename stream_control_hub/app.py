@@ -147,7 +147,7 @@ def schedule_motion_analysis(node: dict[str, Any], video_path: str) -> dict[str,
 load_env_file(ROOT / ".env")
 CONFIG_DIR = ROOT / "config"
 DATA_DIR = Path(os.environ.get("STREAM_HUB_DATA_DIR", str(ROOT / "data")))
-MEDIA_DIR = DATA_DIR / "media"
+MEDIA_DIR = Path(os.environ.get("STREAM_MEDIA_DIR", str(DATA_DIR / "media")))
 WORK_DIR = DATA_DIR / "work"
 NODES_FILE = Path(os.environ.get("STREAM_HUB_NODES_FILE", str(CONFIG_DIR / "nodes.json")))
 PORT = int(os.environ.get("STREAM_HUB_PORT", "8788"))
@@ -2327,13 +2327,53 @@ HTML = r"""
     .node-row.agent-row .row-actions { grid-area: actions; }
     .node-version-pill { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d6fff0; font-size: 12px; font-weight: 900; }
     .role-row { min-height: 54px; }
-    .role-row .row-actions { grid-template-columns: repeat(2, minmax(72px, 1fr)); }
+    .role-row .row-actions { grid-template-columns: minmax(72px, 1fr); }
     .role-group + .role-group { margin-top: 12px; }
     .role-group-title { display: flex; justify-content: space-between; align-items: center; margin: 0 0 6px; color: #d6fff0; }
     .role-group-title .role-count { margin-left: 5px; color: var(--accent); font-size: 13px; }
     .role-row.disabled-role { opacity: 0.58; border-style: dashed; }
     .role-row.disabled-role:hover { opacity: 0.82; }
     .row-actions button.tiny { min-width: 54px; padding: 6px 7px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+    .hub-function-menu { position: relative; min-width: 72px; }
+    .hub-function-menu summary {
+      list-style: none;
+      cursor: pointer;
+      min-height: 30px;
+      padding: 6px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.045);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 850;
+      text-align: center;
+      user-select: none;
+    }
+    .hub-function-menu summary::-webkit-details-marker { display: none; }
+    .hub-function-menu summary::after { content: "..."; margin-left: 5px; color: var(--muted); }
+    .hub-function-menu[open] summary { border-color: var(--accent); color: var(--accent); }
+    .hub-function-menu .hub-function-popover {
+      position: absolute;
+      z-index: 20;
+      top: calc(100% + 5px);
+      right: 0;
+      display: grid;
+      gap: 4px;
+      min-width: 148px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #10231c;
+      box-shadow: 0 16px 32px rgba(0,0,0,.32);
+    }
+    .hub-function-menu .hub-function-popover button {
+      width: 100%;
+      min-height: 30px;
+      padding: 6px 8px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .hub-function-menu .hub-function-popover button:disabled { opacity: .55; cursor: default; }
     .settings-button { min-width: 34px !important; font-size: 14px !important; line-height: 1; }
     .role-settings-modal { width: min(520px, 100%); }
     .role-settings-status { display: grid; gap: 8px; }
@@ -4433,11 +4473,17 @@ HTML = r"""
           <span class="node-state">${current ? "控制中" : enabled ? "已启用" : pending ? "激活中" : "未启用"}</span>
           <span class="node-state">8788</span>
           <span class="row-actions">
-            <button class="tiny" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}">${current ? "当前 Hub" : "切换 Hub"}</button>
-            ${agentEnabled
-              ? `<span class="pill">Agent 已加入</span>`
-              : `<button class="tiny ${agentPending ? "" : "primary"}" data-role-action="activate-role" data-role="agent" data-node-id="${escapeHtml(node.id)}">${agentPending ? "Agent 激活中" : "激活 Agent"}</button>`}
-            <button class="tiny settings-button" data-role-settings data-node-id="${escapeHtml(node.id)}" title="节点角色设置" aria-label="节点角色设置">⚙</button>
+            <details class="hub-function-menu" data-hub-function-menu>
+              <summary>功能</summary>
+              <div class="hub-function-popover">
+                <button type="button" data-hub-action="view-resources" data-node-id="${escapeHtml(node.id)}">查看资源</button>
+                <button type="button" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}" ${current ? "disabled" : ""}>${current ? "当前 Hub" : "切换 Hub"}</button>
+                ${agentEnabled
+                  ? `<button type="button" disabled>Agent 已加入</button>`
+                  : `<button type="button" class="${agentPending ? "" : "primary"}" data-role-action="activate-role" data-role="agent" data-node-id="${escapeHtml(node.id)}">${agentPending ? "Agent 激活中" : "激活 Agent"}</button>`}
+                <button type="button" data-role-settings data-node-id="${escapeHtml(node.id)}">角色设置</button>
+              </div>
+            </details>
           </span>
         </div>
       `;
@@ -4464,10 +4510,16 @@ HTML = r"""
           <span class="node-state">控制中</span>
           <span class="node-state">8788</span>
           <span class="row-actions">
-            <button class="tiny" type="button" disabled>当前 Hub</button>
-            ${agentEnabled
-              ? `<span class="pill">Agent 已激活</span>`
-              : `<button class="tiny ${agentPending ? "" : "primary"}" data-local-hub-agent-action="activate">${agentPending ? "Agent 激活中" : "激活 Agent"}</button>`}
+            <details class="hub-function-menu" data-hub-function-menu>
+              <summary>功能</summary>
+              <div class="hub-function-popover">
+                <button type="button" data-hub-action="view-resources" data-node-id="__local_hub__">查看资源</button>
+                <button type="button" disabled>当前 Hub</button>
+                ${agentEnabled
+                  ? `<button type="button" disabled>Agent 已激活</button>`
+                  : `<button type="button" class="${agentPending ? "" : "primary"}" data-local-hub-agent-action="activate">${agentPending ? "Agent 激活中" : "激活 Agent"}</button>`}
+              </div>
+            </details>
           </span>
         </div>
       `;
@@ -8036,8 +8088,20 @@ HTML = r"""
       }
     });
     refs.hubNodeList.addEventListener("click", (event) => {
+      const functionMenu = event.target.closest("[data-hub-function-menu]");
+      if (functionMenu && event.target.closest("summary")) {
+        event.stopPropagation();
+        return;
+      }
       if (event.target.closest("[data-node-profile-select]")) {
         event.stopPropagation();
+        return;
+      }
+      const resourceButton = event.target.closest("[data-hub-action=\"view-resources\"]");
+      if (resourceButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        openNodeResources(resourceButton.dataset.nodeId || "");
         return;
       }
       const localAgentButton = event.target.closest("[data-local-hub-agent-action]");
@@ -8873,6 +8937,83 @@ def reset_node_connection_metadata(node: dict[str, Any]) -> None:
         node.pop(key, None)
 
 
+def clean_node_role_transition(
+    node: dict[str, Any],
+    target_role: str,
+    *,
+    role_url: str = "",
+    activation_pending: bool = False,
+    control_hub_url: str = "",
+) -> dict[str, Any]:
+    """Keep one canonical role record after an Agent/Hub conversion."""
+    if target_role not in {"agent", "hub"}:
+        raise ValueError("unsupported target role")
+    updated = dict(node)
+    raw_hints = updated.get("role_hints")
+    hints = dict(raw_hints) if isinstance(raw_hints, dict) else {}
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    if target_role == "hub":
+        hub_url = str(role_url or node_role_urls(updated)["hub"]).strip().rstrip("/")
+        for key in (
+            "base_url",
+            "agent_url",
+            "public_base_url",
+            "upload_base_url",
+            "upload_base_urls",
+            "offline_since",
+            "control_hub_url",
+        ):
+            updated.pop(key, None)
+        updated["hub_url"] = hub_url
+        updated["hub_role_url"] = hub_url
+        updated["hub_only"] = True
+        hints.pop("agent", None)
+        hints["hub"] = {
+            **dict(hints.get("hub") or {}),
+            "activation_pending": bool(activation_pending),
+            "prepared": True,
+            "enabled": not activation_pending,
+            "url": hub_url,
+            "message": "Hub role transition completed" if not activation_pending else "Hub activation scheduled",
+            "updated_at": now,
+        }
+    else:
+        canonical_agent_url = node_role_urls({
+            **updated,
+            "hub_only": False,
+            "hub_url": "",
+            "hub_role_url": "",
+        })["agent"]
+        for key in (
+            "hub_url",
+            "hub_role_url",
+            "hub_only",
+            "hub_connected_at",
+        ):
+            updated.pop(key, None)
+        updated["base_url"] = canonical_agent_url
+        updated["agent_url"] = canonical_agent_url
+        if control_hub_url:
+            updated["control_hub_url"] = str(control_hub_url).rstrip("/")
+        hints.pop("hub", None)
+        hints["agent"] = {
+            **dict(hints.get("agent") or {}),
+            "activation_pending": bool(activation_pending),
+            "prepared": True,
+            "enabled": not activation_pending,
+            "url": canonical_agent_url,
+            "message": "Agent role transition completed" if not activation_pending else "Agent activation scheduled",
+            "updated_at": now,
+        }
+
+    if hints:
+        updated["role_hints"] = hints
+    else:
+        updated.pop("role_hints", None)
+    return updated
+
+
 def clean_node_seed(node: dict[str, Any]) -> dict[str, Any]:
     """Export a node record without stale runtime hints for a newly activated Hub."""
     result = dict(node)
@@ -9012,6 +9153,43 @@ def ensure_dirs() -> None:
         example = CONFIG_DIR / "nodes.example.json"
         if example.exists():
             shutil.copyfile(example, NODES_FILE)
+
+
+def media_roots() -> list[Path]:
+    """Read the shared media root plus pre-shared role directories from older installs."""
+    candidates = [
+        MEDIA_DIR,
+        DATA_DIR / "media",
+        ROOT / "data" / "media",
+        ROOT / "agent_data" / "media",
+    ]
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        key = str(resolved).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots
+
+
+def iter_media_files() -> list[Path]:
+    files: list[Path] = []
+    seen: set[str] = set()
+    for root in media_roots():
+        if not root.is_dir():
+            continue
+        for path in root.iterdir():
+            if not path.is_file() or path.suffix.lower() not in ALLOWED_MEDIA_EXTENSIONS:
+                continue
+            key = path.name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(path)
+    return files
 
 
 def load_nodes() -> list[dict[str, Any]]:
@@ -9430,6 +9608,17 @@ def save_node_updates(node_id: str, updates: dict[str, Any]) -> dict[str, Any] |
     return None
 
 
+def replace_node_record(node_id: str, updated: dict[str, Any]) -> dict[str, Any] | None:
+    nodes = load_nodes()
+    for index, node in enumerate(nodes):
+        if str(node.get("id") or "") != str(node_id):
+            continue
+        nodes[index] = dict(updated)
+        save_nodes(nodes)
+        return nodes[index]
+    return None
+
+
 def save_node_role_hint(node_id: str, role: str, updates: dict[str, Any]) -> dict[str, Any] | None:
     if role not in {"agent", "hub"}:
         return None
@@ -9534,6 +9723,10 @@ def request_node_json(node: dict[str, Any], path: str, *, timeout: int = 6) -> d
             data = resp.json()
         except ValueError:
             data = {"message": resp.text[:500]}
+        if path == "/api/media" and isinstance(data, list):
+            data = {"ok": resp.ok, "videos": data}
+        if not isinstance(data, dict):
+            data = {"message": "Agent returned an invalid response"}
         data["ok"] = resp.ok and bool(data.get("ok", True))
         data.setdefault("status_code", resp.status_code)
         return data
@@ -9564,7 +9757,16 @@ def request_hub_json(node: dict[str, Any], path: str = "/api/status", *, timeout
 
 def request_node_status(node: dict[str, Any], *, timeout: int = 10) -> dict[str, Any]:
     """Read status from either role so Hub-only nodes remain usable resource sources."""
-    hub_first = bool(node.get("hub_only"))
+    role_hints = node.get("role_hints") if isinstance(node.get("role_hints"), dict) else {}
+    hub_hint = role_hints.get("hub") if isinstance(role_hints.get("hub"), dict) else {}
+    hub_first = bool(
+        node.get("hub_only")
+        or node.get("hub_url")
+        or node.get("hub_role_url")
+        or hub_hint.get("enabled")
+        or hub_hint.get("prepared")
+        or hub_hint.get("activation_pending")
+    )
     probes = [
         ("hub", request_hub_json),
         ("agent", request_node_json),
@@ -9581,6 +9783,14 @@ def request_node_status(node: dict[str, Any], *, timeout: int = 10) -> dict[str,
         message = str(result.get("message") or "").strip()
         if message:
             errors.append(f"{role}: {message}")
+        media_result = probe(node, "/api/media", timeout=timeout)
+        if media_result.get("ok"):
+            media_result.setdefault("source_role", role)
+            media_result.setdefault("message", f"{role} status endpoint unavailable; media endpoint used")
+            return media_result
+        media_message = str(media_result.get("message") or "").strip()
+        if media_message:
+            errors.append(f"{role} media: {media_message}")
     return {"ok": False, "message": "; ".join(errors) or "node status unavailable"}
 
 
@@ -10973,9 +11183,7 @@ def ensure_media_disk_space(incoming_size: int) -> None:
 def list_media() -> list[dict[str, Any]]:
     ensure_dirs()
     items = []
-    for path in sorted(MEDIA_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if not path.is_file() or path.suffix.lower() not in ALLOWED_MEDIA_EXTENSIONS:
-            continue
+    for path in sorted(iter_media_files(), key=lambda p: p.stat().st_mtime, reverse=True):
         stat = path.stat()
         items.append({
             "name": path.name,
@@ -11817,25 +12025,16 @@ def api_tailscale_activate_agent():
         "id": node_id,
         "name": agent_name or str(node.get("name") or node_id),
         "enabled": True,
-        "base_url": base_url,
-        "hub_url": hub_url,
-        "control_hub_url": current_hub_source_url(),
         "tailscale_ip": str(ip),
         "token": agent_token,
-        "hub_only": True,
         "last_online_at": retention_timestamp_text(),
     })
-    hints = dict(node.get("role_hints") or {})
-    hints["agent"] = {
-        **dict(hints.get("agent") or {}),
-        "activation_pending": True,
-        "prepared": True,
-        "enabled": False,
-        "url": base_url,
-        "message": result.get("message") or "Agent activation scheduled",
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    node["role_hints"] = hints
+    node = clean_node_role_transition(
+        node,
+        "agent",
+        activation_pending=True,
+        control_hub_url=current_hub_source_url(),
+    )
     if target_index >= 0:
         nodes[target_index] = node
     else:
@@ -12151,10 +12350,13 @@ def api_media_push():
         media_name = safe_media_filename(str(payload.get("media_name") or ""))
     except ValueError as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
-    media_path = MEDIA_DIR / media_name
+    media_path = next(
+        (path for path in iter_media_files() if path.name.casefold() == media_name.casefold()),
+        None,
+    )
     if not node_ids:
         return jsonify({"ok": False, "message": "no nodes selected"}), 400
-    if not media_path.exists():
+    if media_path is None or not media_path.exists():
         return jsonify({"ok": False, "message": "media not found"}), 404
     if not media_path.is_file() or not media_allowed(media_path.name):
         return jsonify({"ok": False, "message": "unsupported media file"}), 400
@@ -13043,14 +13245,14 @@ def api_activate_node_role(role: str):
         existing_hub = request_hub_role_status(node)
         if existing_hub.get("ok") and existing_hub.get("enabled"):
             role_url = str(existing_hub.get("url") or hub_url).rstrip("/")
-            save_node_updates(node_id, {"hub_url": role_url, "last_online_at": retention_timestamp_text()})
-            save_node_role_hint(node_id, "hub", {
-                "activation_pending": False,
-                "prepared": True,
-                "enabled": True,
-                "url": role_url,
-                "message": "Hub already active",
-            })
+            updated = clean_node_role_transition(
+                node,
+                "hub",
+                role_url=role_url,
+                activation_pending=False,
+            )
+            updated["last_online_at"] = retention_timestamp_text()
+            replace_node_record(node_id, updated)
             return jsonify({
                 "ok": True,
                 "accepted": False,
@@ -13069,20 +13271,19 @@ def api_activate_node_role(role: str):
         if result.get("ok"):
             scheduled = result.get("result") if isinstance(result.get("result"), dict) else {}
             role_url = str(scheduled.get("url") or hub_url).rstrip("/")
-            save_node_updates(node_id, {"hub_url": role_url})
-            save_node_role_hint(node_id, "hub", {
-                "activation_pending": not bool(scheduled.get("already_active")),
-                "prepared": True,
-                "enabled": bool(scheduled.get("already_active")),
-                "url": role_url,
-                "message": result.get("message") or "Hub activation scheduled",
-            })
+            updated = clean_node_role_transition(
+                node,
+                "hub",
+                role_url=role_url,
+                activation_pending=not bool(scheduled.get("already_active")),
+            )
+            updated["last_online_at"] = retention_timestamp_text()
+            replace_node_record(node_id, updated)
     else:
         hub_url = node_role_urls(node)["hub"]
         if not hub_url:
             return jsonify({"ok": False, "node_id": node_id, "message": "Hub role is unavailable; SSH bootstrap is required"}), 409
         agent_token = str(node.get("token") or node.get("control_token") or "").strip() or secrets.token_urlsafe(32)
-        agent_url = node_role_urls(node)["agent"]
         result = post_url_json(
             f"{hub_url}/api/roles/agent/activate",
             {
@@ -13093,14 +13294,14 @@ def api_activate_node_role(role: str):
             timeout=30,
         )
         if result.get("ok"):
-            save_node_updates(node_id, {"token": agent_token, "base_url": agent_url})
-            save_node_role_hint(node_id, "agent", {
-                "activation_pending": True,
-                "prepared": True,
-                "enabled": False,
-                "url": agent_url,
-                "message": result.get("message") or "Agent activation scheduled",
-            })
+            updated = clean_node_role_transition(
+                node,
+                "agent",
+                activation_pending=True,
+                control_hub_url=current_hub_source_url(),
+            )
+            updated["token"] = agent_token
+            replace_node_record(node_id, updated)
     scheduled_result = result.get("result") if isinstance(result.get("result"), dict) else {}
     status_code = 200 if result.get("ok") and scheduled_result.get("already_active") else 202 if result.get("ok") else int(result.get("status_code") or 502)
     return jsonify({"node_id": node_id, "role": role, **result}), status_code

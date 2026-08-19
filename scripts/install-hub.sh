@@ -33,6 +33,7 @@ STREAM_HUB_HOST="${STREAM_HUB_HOST:-}"
 STREAM_HUB_PORT="${STREAM_HUB_PORT:-}"
 STREAM_HUB_NODES_FILE="${STREAM_HUB_NODES_FILE:-}"
 STREAM_HUB_TRUSTED_REMOTE_WRITES="${STREAM_HUB_TRUSTED_REMOTE_WRITES:-}"
+STREAM_MEDIA_DIR="${STREAM_MEDIA_DIR:-}"
 STREAM_HUB_SERVICE_MODE="${STREAM_HUB_SERVICE_MODE:-}"
 YOUTUBE_CLIENT_ID="${YOUTUBE_CLIENT_ID:-}"
 YOUTUBE_CLIENT_SECRET="${YOUTUBE_CLIENT_SECRET:-}"
@@ -45,6 +46,7 @@ REMOVE_DATA="${REMOVE_DATA:-${STREAM_HUB_REMOVE_DATA:-0}}"
 CHOICE="${CHOICE:-${STREAM_HUB_CHOICE:-}}"
 SUPPRESS_TOKEN_OUTPUT="${STREAM_HUB_SUPPRESS_TOKEN_OUTPUT:-0}"
 ROLE_SWITCH_CONFIRMED="${ROLE_SWITCH_CONFIRMED:-${STREAM_ROLE_SWITCH_CONFIRMED:-0}}"
+[ -n "$STREAM_MEDIA_DIR" ] || STREAM_MEDIA_DIR="$INSTALL_DIR/media"
 
 resolve_service_mode() {
   if [ -n "$STREAM_HUB_SERVICE_MODE" ]; then
@@ -129,6 +131,42 @@ need_cmd() {
     echo "$1 is required. Install it and run this installer again." >&2
     exit 1
   }
+}
+
+migrate_shared_media() {
+  STREAM_MEDIA_TARGET="$STREAM_MEDIA_DIR" STREAM_INSTALL_DIR="$INSTALL_DIR" python3 - <<'PY'
+import filecmp
+import os
+from pathlib import Path
+
+target = Path(os.environ["STREAM_MEDIA_TARGET"]).expanduser()
+install_dir = Path(os.environ["STREAM_INSTALL_DIR"]).expanduser()
+target.mkdir(parents=True, exist_ok=True)
+for source in (install_dir / "agent_data" / "media", install_dir / "data" / "media"):
+    source = source.resolve()
+    if source == target.resolve() or not source.is_dir():
+        continue
+    for item in list(source.iterdir()):
+        if not item.is_file():
+            continue
+        destination = target / item.name
+        if destination.exists():
+            if filecmp.cmp(item, destination, shallow=False):
+                item.unlink()
+                continue
+            counter = 1
+            while True:
+                candidate = target / f"{item.stem}-legacy-{counter}{item.suffix}"
+                if not candidate.exists():
+                    destination = candidate
+                    break
+                counter += 1
+        item.replace(destination)
+    try:
+        source.rmdir()
+    except OSError:
+        pass
+PY
 }
 
 hub_systemctl() {
@@ -408,6 +446,7 @@ install_packages
 need_cmd git
 need_cmd python3
 need_cmd curl
+migrate_shared_media
 git config --global --add safe.directory "$INSTALL_DIR" >/dev/null 2>&1 || true
 reconcile_hub_role
 write_hub_service_unit
@@ -526,6 +565,7 @@ STREAM_HUB_NODES_FILE=$NODES_FILE
 STREAM_HUB_HOST=$STREAM_HUB_HOST
 STREAM_HUB_PORT=$STREAM_HUB_PORT
 STREAM_HUB_TRUSTED_REMOTE_WRITES=$STREAM_HUB_TRUSTED_REMOTE_WRITES
+STREAM_MEDIA_DIR=$STREAM_MEDIA_DIR
 YOUTUBE_CLIENT_ID=$YOUTUBE_CLIENT_ID
 YOUTUBE_CLIENT_SECRET=$YOUTUBE_CLIENT_SECRET
 YOUTUBE_CREDENTIAL_FILE=$YOUTUBE_CREDENTIAL_FILE
