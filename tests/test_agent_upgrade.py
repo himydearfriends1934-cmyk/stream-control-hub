@@ -1153,6 +1153,24 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(video_path.parent.name, "media")
         self.assertEqual(video_path.parent.parent.name, "agent_data")
 
+    def test_agent_resolves_stale_absolute_media_path_from_shared_root(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "media"
+            legacy = root / "agent_data" / "media"
+            shared.mkdir(parents=True)
+            legacy.mkdir(parents=True)
+            video = shared / "kept.mp4"
+            video.write_bytes(b"video")
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", root / "agent_data"
+            ), patch.object(headless_agent, "MEDIA_DIR", shared):
+                resolved = headless_agent.resolve_media_path(str(legacy / video.name))
+
+        self.assertEqual(resolved, video.resolve())
+
     def test_nodes_api_reports_pending_role_hints_until_services_are_online(self):
         from stream_control_hub import app
 

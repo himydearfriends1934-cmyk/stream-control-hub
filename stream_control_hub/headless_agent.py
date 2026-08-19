@@ -1323,16 +1323,24 @@ def media_by_name_or_path(value: str) -> Path:
     if not raw:
         raise ValueError("missing media name")
     candidate = Path(raw)
+    roots = media_roots()
     if not candidate.is_absolute():
         filename = safe_media_filename(raw)
         candidate = next(
-            (root / filename for root in media_roots() if (root / filename).is_file()),
-            media_roots()[0] / filename,
+            (root / filename for root in roots if (root / filename).is_file()),
+            roots[0] / filename,
+        )
+    elif not candidate.is_file() and media_allowed(candidate.name):
+        # Recovery state can retain an absolute path from an older role-specific
+        # media directory after the installer moves files into the shared root.
+        candidate = next(
+            (root / candidate.name for root in roots if (root / candidate.name).is_file()),
+            candidate,
         )
     resolved = candidate.resolve()
     if not any(
         resolved == root or root in resolved.parents
-        for root in media_roots()
+        for root in roots
     ):
         raise ValueError("media must be inside a configured media directory")
     if not resolved.is_file() or not media_allowed(resolved.name):
