@@ -153,7 +153,17 @@ The Linux Hub and Headless Agent one-line installers use the same helper when `T
 
 The Agent automatically discovers its public IPv4 during install and update. It uses `api.ipify.org` first and falls back to `ifconfig.me/ip`, validates that the response is a global IPv4 address, and publishes `http://<public-ip>:8787` to the Hub. Browser uploads probe that public route first and automatically fall back to the Agent Tailscale address when the public port is unavailable. Users do not need to enter `upload_base_url` manually.
 
-Active streams are supervised by the Headless Agent. While a stream is desired, the Agent stores a mode `600` recovery payload in its private data directory, restarts an unexpectedly exited FFmpeg process with bounded exponential backoff, and exposes restart status in monitoring. A manual stop disables recovery and immediately removes the recovery payload. Stream keys are never returned by the API or written to the general runtime state file.
+Active streams are supervised by the Headless Agent. The Linux installer registers
+`stream-control-headless-agent.service` as an enabled system service with
+`Restart=always`, waits for network/Tailscale readiness, and starts a recovery
+check before serving the API. While a stream is desired, the Agent stores a mode
+`600` recovery payload in its private data directory, restarts an unexpectedly
+exited or stalled FFmpeg process with bounded exponential backoff, and exposes
+restart status in monitoring. A machine reboot, Agent crash, or Agent upgrade
+therefore brings the Agent back and resumes the stream from the saved payload.
+A manual stop disables recovery and immediately removes the recovery payload.
+Stream keys are never returned by the API or written to the general runtime
+state file.
 
 Smart Tune probes the selected media with `ffprobe`, preserves its aspect ratio, and chooses a guarded H.264/AAC starting point from the current [YouTube Live encoder recommendations](https://support.google.com/youtube/answer/2853702): 4 Mbps for 720p30, 6 Mbps for 720p60, 10 Mbps for 1080p30, 12 Mbps for 1080p60, 15/24 Mbps for 1440p30/60, and 30/35 Mbps for 2160p30/60. CPU, available memory, and the median TCP delivery rate previously observed on the Agent-owned FFmpeg socket can lower that starting point; 20% network headroom is retained. Set `STREAM_AGENT_EGRESS_CAPACITY_KBPS` to a trusted upload speed-test result when no prior socket estimate exists.
 

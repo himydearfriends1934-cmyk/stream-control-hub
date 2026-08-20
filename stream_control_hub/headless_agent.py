@@ -1883,8 +1883,15 @@ def stream_watchdog_tick() -> dict[str, Any]:
         return {"ok": True, "skipped": True, "reason": "disabled"}
     with STREAM_LIFECYCLE_LOCK:
         state = load_state()
-        if not state.get("stream_desired"):
+        recovery_payload = load_stream_restart_payload()
+        # The private recovery file is durable across service upgrades and can
+        # outlive a damaged runtime state file. A manual stop removes it first.
+        stream_desired = bool(state.get("stream_desired")) or recovery_payload is not None
+        if not stream_desired:
             return {"ok": True, "skipped": True, "reason": "not desired"}
+        if not state.get("stream_desired"):
+            state["stream_desired"] = True
+            save_state(state)
 
         now = time.time()
         pid = int(state.get("stream_pid") or 0)
@@ -1927,7 +1934,7 @@ def stream_watchdog_tick() -> dict[str, Any]:
         if now < next_retry_at:
             return {"ok": True, "waiting": True, "next_retry_at": next_retry_at}
 
-        payload = load_stream_restart_payload()
+        payload = recovery_payload
         if not payload:
             auto_restart.update({
                 "enabled": True,
@@ -3145,6 +3152,10 @@ def api_deactivate_agent_role():
 def main() -> None:
     assert_role("agent", ROOT)
     ensure_dirs()
+    # Recover before serving the API so a systemd restart resumes streaming
+    # immediately; the watchdog continues to handle later exits and stalls.
+    with suppress(Exception):
+        stream_watchdog_tick()
     start_stream_watchdog()
     try:
         from waitress import serve

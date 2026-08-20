@@ -120,6 +120,14 @@ class InstallerPersistenceTests(unittest.TestCase):
             self.assertIn(directive, hub)
             self.assertIn(directive, agent)
 
+    def test_agent_service_starts_after_network_and_tailscale_for_recovery(self):
+        agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
+
+        self.assertIn("After=network-online.target tailscaled.service", agent)
+        self.assertIn("Wants=network-online.target tailscaled.service", agent)
+        self.assertIn("ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub.headless_agent", agent)
+        self.assertIn("systemctl enable stream-control-headless-agent.service", agent)
+
     def test_role_installers_reconcile_existing_conflicting_services(self):
         hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
         agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")

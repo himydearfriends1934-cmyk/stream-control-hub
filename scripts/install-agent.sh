@@ -90,8 +90,8 @@ write_agent_service_unit() {
   cat > /etc/systemd/system/stream-control-headless-agent.service <<EOF
 [Unit]
 Description=Stream Control Hub Headless Agent
-After=network-online.target
-Wants=network-online.target
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
 Conflicts=stream-control-hub.service
 Before=stream-control-hub.service
 StartLimitIntervalSec=60
