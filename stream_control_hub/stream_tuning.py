@@ -86,6 +86,7 @@ def initial_stream_recommendation(
     cpu_count: int,
     memory_available_mb: int,
     egress_capacity_kbps: int = 0,
+    motion_level: str = "medium",
 ) -> dict[str, Any]:
     source_width = max(2, int(source.get("width") or 1280))
     source_height = max(2, int(source.get("height") or 720))
@@ -110,9 +111,17 @@ def initial_stream_recommendation(
     video_bitrate = max(800, video_bitrate)
 
     copy_safe = source_copy_compatible(source)
+    motion_level = str(motion_level or "medium").strip().lower()
+    if motion_level not in {"static", "medium", "dynamic"}:
+        motion_level = "medium"
+    # YouTube requires a controlled GOP. Even a compatible static source can
+    # carry long or irregular keyframe intervals, so remuxing it with Copy
+    # mode cannot satisfy the live encoder contract.
+    static_copy_safe = False
     reasons = [
         f"YouTube Live H.264 baseline for {width}x{height}@{fps} is {youtube_bitrate} Kbps.",
         f"Selected {preset} for {cpu_count} logical CPU(s) and {memory_available_mb or 'unknown'} MB available memory.",
+        f"Motion profile: {motion_level}.",
     ]
     warnings: list[str] = []
     if network_budget and network_budget < youtube_bitrate:
@@ -125,10 +134,12 @@ def initial_stream_recommendation(
         warnings.append("Measured upload capacity is below the minimum safe encoder budget; do not start a production stream.")
     if not copy_safe:
         warnings.append("Source is not safe for RTMP copy mode; H.264/AAC transcoding is required.")
+    elif motion_level == "static" and not static_copy_safe:
+        warnings.append("Static source still uses H.264/AAC transcoding so YouTube receives a controlled two-second GOP.")
 
     recommendation = {
-        "copy_mode": False,
-        "preset": preset,
+        "copy_mode": static_copy_safe,
+        "preset": "copy" if static_copy_safe else preset,
         "video_bitrate": video_bitrate,
         "audio_bitrate": audio_bitrate,
         "fps": fps,
@@ -138,6 +149,7 @@ def initial_stream_recommendation(
     }
     minimum = {
         **recommendation,
+        "copy_mode": False,
         "preset": "superfast",
         "video_bitrate": max(800, min(video_bitrate, int(youtube_bitrate * 0.60))),
         "fps": min(30, fps),
@@ -156,6 +168,8 @@ def initial_stream_recommendation(
             "network_budget_kbps": network_budget,
             "youtube_recommended_bitrate_kbps": youtube_bitrate,
             "copy_compatible": copy_safe,
+            "motion_level": motion_level,
+            "static_copy_safe": static_copy_safe,
             "reasons": reasons,
             "warnings": warnings,
         },

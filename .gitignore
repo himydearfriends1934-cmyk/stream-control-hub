@@ -6,6 +6,8 @@ __pycache__/
 .agent.env
 data/
 agent_data/
+media/
 logs/
 *.log
 node-registration.json
+run-hub.sh

@@ -2,7 +2,22 @@
 set -eu
 
 if [ -z "${INSTALL_DIR:-}" ]; then
-  if [ -d "/opt/stream-control-hub/.git" ]; then
+  EXISTING_INSTALL_DIR=""
+  if command -v systemctl >/dev/null 2>&1; then
+    EXISTING_INSTALL_DIR="$(systemctl show -p WorkingDirectory --value stream-control-hub.service 2>/dev/null || true)"
+    if [ -z "$EXISTING_INSTALL_DIR" ] && [ "$(id -u)" -ne 0 ]; then
+      EXISTING_INSTALL_DIR="$(systemctl --user show -p WorkingDirectory --value stream-control-hub.service 2>/dev/null || true)"
+    fi
+  fi
+  if [ -z "$EXISTING_INSTALL_DIR" ] && [ -f /etc/systemd/system/stream-control-hub.service ]; then
+    EXISTING_INSTALL_DIR="$(sed -n 's/^WorkingDirectory=//p' /etc/systemd/system/stream-control-hub.service | head -n 1)"
+  fi
+  if [ -z "$EXISTING_INSTALL_DIR" ] && [ -f "$HOME/.config/systemd/user/stream-control-hub.service" ]; then
+    EXISTING_INSTALL_DIR="$(sed -n 's/^WorkingDirectory=//p' "$HOME/.config/systemd/user/stream-control-hub.service" | head -n 1)"
+  fi
+  if [ -n "$EXISTING_INSTALL_DIR" ] && [ -d "$EXISTING_INSTALL_DIR" ]; then
+    INSTALL_DIR="$EXISTING_INSTALL_DIR"
+  elif [ -d "/opt/stream-control-hub/.git" ]; then
     INSTALL_DIR="/opt/stream-control-hub"
   elif [ -d "$HOME/stream-control-hub/.git" ]; then
     INSTALL_DIR="$HOME/stream-control-hub"
@@ -18,6 +33,7 @@ STREAM_HUB_HOST="${STREAM_HUB_HOST:-}"
 STREAM_HUB_PORT="${STREAM_HUB_PORT:-}"
 STREAM_HUB_NODES_FILE="${STREAM_HUB_NODES_FILE:-}"
 STREAM_HUB_TRUSTED_REMOTE_WRITES="${STREAM_HUB_TRUSTED_REMOTE_WRITES:-}"
+STREAM_MEDIA_DIR="${STREAM_MEDIA_DIR:-}"
 STREAM_HUB_SERVICE_MODE="${STREAM_HUB_SERVICE_MODE:-}"
 YOUTUBE_CLIENT_ID="${YOUTUBE_CLIENT_ID:-}"
 YOUTUBE_CLIENT_SECRET="${YOUTUBE_CLIENT_SECRET:-}"
@@ -29,6 +45,8 @@ UNINSTALL="${UNINSTALL:-0}"
 REMOVE_DATA="${REMOVE_DATA:-${STREAM_HUB_REMOVE_DATA:-0}}"
 CHOICE="${CHOICE:-${STREAM_HUB_CHOICE:-}}"
 SUPPRESS_TOKEN_OUTPUT="${STREAM_HUB_SUPPRESS_TOKEN_OUTPUT:-0}"
+ROLE_SWITCH_CONFIRMED="${ROLE_SWITCH_CONFIRMED:-${STREAM_ROLE_SWITCH_CONFIRMED:-0}}"
+[ -n "$STREAM_MEDIA_DIR" ] || STREAM_MEDIA_DIR="$INSTALL_DIR/media"
 
 resolve_service_mode() {
   if [ -n "$STREAM_HUB_SERVICE_MODE" ]; then
@@ -52,11 +70,281 @@ resolve_service_mode() {
 
 resolve_service_mode
 
+if [ -z "${STREAM_NODE_ROLE_FILE:-}" ]; then
+  if [ "$STREAM_HUB_SERVICE_MODE" = "system" ]; then
+    STREAM_NODE_ROLE_FILE="/etc/stream-control/role"
+  else
+    STREAM_NODE_ROLE_FILE="$HOME/.config/stream-control/role"
+  fi
+fi
+ENV_FILE="$INSTALL_DIR/.env"
+UPGRADE_LOCK_FILE="${STREAM_NODE_UPGRADE_LOCK_FILE:-$INSTALL_DIR/data/.upgrade.lock}"
+
+acquire_upgrade_lock() {
+  mkdir -p "$(dirname "$UPGRADE_LOCK_FILE")"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$UPGRADE_LOCK_FILE"
+    flock -n 9 || {
+      echo "Another Stream Control upgrade or install is already running." >&2
+      exit 75
+    }
+  else
+    lock_dir="${UPGRADE_LOCK_FILE}.d"
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+      echo "Another Stream Control upgrade or install is already running." >&2
+      exit 75
+    fi
+    trap 'rmdir "$lock_dir" >/dev/null 2>&1 || true' EXIT
+  fi
+}
+
+assert_single_role() {
+  current_role=""
+  if [ -f "$STREAM_NODE_ROLE_FILE" ]; then
+    current_role="$(head -n 1 "$STREAM_NODE_ROLE_FILE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+    if [ -n "$current_role" ] && [ "$current_role" != "hub" ] && [ "$ROLE_SWITCH_CONFIRMED" != "1" ]; then
+      echo "This machine is declared as $current_role. Deactivate that role before installing HUB." >&2
+      exit 6
+    fi
+  fi
+  if command -v systemctl >/dev/null 2>&1 \
+    && (systemctl is-active --quiet stream-control-headless-agent.service \
+      || systemctl is-enabled --quiet stream-control-headless-agent.service) \
+    && ! systemctl is-active --quiet stream-control-hub.service \
+    && [ "$current_role" != "hub" ] \
+    && [ "$ROLE_SWITCH_CONFIRMED" != "1" ]; then
+    echo "Agent service is active. Deactivate Agent before installing HUB." >&2
+    exit 6
+  fi
+}
+
+write_role_marker() {
+  mkdir -p "$(dirname "$STREAM_NODE_ROLE_FILE")"
+  temporary="${STREAM_NODE_ROLE_FILE}.tmp.$$"
+  printf 'hub\n' > "$temporary"
+  chmod 600 "$temporary" 2>/dev/null || true
+  mv -f "$temporary" "$STREAM_NODE_ROLE_FILE"
+}
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "$1 is required. Install it and run this installer again." >&2
     exit 1
   }
+}
+
+migrate_shared_media() {
+  STREAM_MEDIA_TARGET="$STREAM_MEDIA_DIR" STREAM_INSTALL_DIR="$INSTALL_DIR" python3 - <<'PY'
+import filecmp
+import os
+from pathlib import Path
+
+target = Path(os.environ["STREAM_MEDIA_TARGET"]).expanduser()
+install_dir = Path(os.environ["STREAM_INSTALL_DIR"]).expanduser()
+target.mkdir(parents=True, exist_ok=True)
+for source in (install_dir / "agent_data" / "media", install_dir / "data" / "media"):
+    source = source.resolve()
+    if source == target.resolve() or not source.is_dir():
+        continue
+    for item in list(source.iterdir()):
+        if not item.is_file():
+            continue
+        destination = target / item.name
+        if destination.exists():
+            if filecmp.cmp(item, destination, shallow=False):
+                item.unlink()
+                continue
+            counter = 1
+            while True:
+                candidate = target / f"{item.stem}-legacy-{counter}{item.suffix}"
+                if not candidate.exists():
+                    destination = candidate
+                    break
+                counter += 1
+        item.replace(destination)
+    try:
+        source.rmdir()
+    except OSError:
+        pass
+PY
+}
+
+hub_systemctl() {
+  if [ "$STREAM_HUB_SERVICE_MODE" = "system" ]; then
+    systemctl "$@"
+  else
+    systemctl --user "$@"
+  fi
+}
+
+has_active_ffmpeg() {
+  command -v pgrep >/dev/null 2>&1 && pgrep -x ffmpeg >/dev/null 2>&1
+}
+
+reconcile_hub_role() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  if systemctl is-active --quiet stream-control-headless-agent.service \
+    || systemctl is-enabled --quiet stream-control-headless-agent.service; then
+    current_role=""
+    if [ -f "$STREAM_NODE_ROLE_FILE" ]; then
+      current_role="$(head -n 1 "$STREAM_NODE_ROLE_FILE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+    fi
+    if [ "$ROLE_SWITCH_CONFIRMED" != "1" ] \
+      && ! systemctl is-active --quiet stream-control-hub.service \
+      && [ "$current_role" != "hub" ]; then
+      echo "Agent service is active or enabled. Deactivate Agent before installing HUB." >&2
+      return 6
+    fi
+    if [ "$ROLE_SWITCH_CONFIRMED" != "1" ] && has_active_ffmpeg; then
+      echo "An active FFmpeg stream was detected. Refusing to stop Agent during HUB upgrade; confirm the role switch explicitly." >&2
+      return 6
+    fi
+    echo "Disabling the conflicting Agent service for the HUB role."
+    systemctl disable --now stream-control-headless-agent.service
+  fi
+}
+
+write_hub_service_unit() {
+  if [ "$STREAM_HUB_SERVICE_MODE" = "system" ]; then
+    SERVICE_FILE="/etc/systemd/system/stream-control-hub.service"
+    SERVICE_TARGET="multi-user.target"
+    SYSTEMCTL="systemctl"
+  else
+    SERVICE_DIR="$HOME/.config/systemd/user"
+    mkdir -p "$SERVICE_DIR"
+    SERVICE_FILE="$SERVICE_DIR/stream-control-hub.service"
+    SERVICE_TARGET="default.target"
+    SYSTEMCTL="systemctl --user"
+  fi
+  cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Stream Control Hub
+After=network-online.target
+Wants=network-online.target
+Conflicts=stream-control-headless-agent.service
+Before=stream-control-headless-agent.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=-$ENV_FILE
+Environment=STREAM_NODE_ROLE=hub
+Environment=STREAM_NODE_ROLE_FILE=$STREAM_NODE_ROLE_FILE
+ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=$SERVICE_TARGET
+EOF
+  $SYSTEMCTL daemon-reload
+}
+
+health_check_hub() {
+  probe_host="$(sed -n 's/^STREAM_HUB_HOST=//p' "$INSTALL_DIR/.env" | head -n 1)"
+  probe_port="$(sed -n 's/^STREAM_HUB_PORT=//p' "$INSTALL_DIR/.env" | head -n 1)"
+  [ -n "$probe_host" ] || probe_host="127.0.0.1"
+  [ -n "$probe_port" ] || probe_port="8788"
+  case "$probe_host" in
+    0.0.0.0) probe_host="127.0.0.1" ;;
+    ::) probe_host="[::1]" ;;
+  esac
+  expected_version="$(git -C "$INSTALL_DIR" rev-parse --short HEAD)"
+  for _ in $(seq 1 20); do
+    status="$(curl -fsS --max-time 3 "http://$probe_host:$probe_port/api/role-status" 2>/dev/null || true)"
+    version="$(curl -fsS --max-time 3 "http://$probe_host:$probe_port/api/app-version" 2>/dev/null || true)"
+    if hub_systemctl is-active --quiet stream-control-hub.service \
+      && ! systemctl is-active --quiet stream-control-headless-agent.service \
+      && printf '%s' "$status" | grep -q '"hub"' \
+      && printf '%s' "$status" | grep -q '"enabled":true' \
+      && printf '%s' "$version" | grep -q "\"version\":\"$expected_version\""; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+transactional_refresh_hub() {
+  [ -d "$INSTALL_DIR/.git" ] || return 0
+  git -C "$INSTALL_DIR" fetch origin "$BRANCH"
+  local_changes="$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=all -- \
+    . ':(exclude)data' ':(exclude)agent_data' ':(exclude)media')"
+  if [ -n "$local_changes" ]; then
+    echo "Refusing upgrade: the HUB checkout has local code changes." >&2
+    printf '%s\n' "$local_changes" >&2
+    return 6
+  fi
+  old_commit="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
+  old_branch="$(git -C "$INSTALL_DIR" branch --show-current)"
+  candidate="$INSTALL_DIR/.upgrade-candidate.$$"
+  backup="$INSTALL_DIR/data/upgrade-backups/$(date +%Y%m%d%H%M%S)-$old_commit"
+  mkdir -p "$INSTALL_DIR/data/upgrade-backups" "$backup"
+  git -C "$INSTALL_DIR" worktree add --detach "$candidate" "origin/$BRANCH"
+  cleanup_candidate() {
+    git -C "$INSTALL_DIR" worktree remove --force "$candidate" >/dev/null 2>&1 || rm -rf "$candidate"
+  }
+  if ! python3 -m venv "$candidate/.venv" \
+    || ! "$candidate/.venv/bin/python" -m pip install -q --upgrade pip \
+    || ! "$candidate/.venv/bin/python" -m pip install -q -r "$candidate/requirements.txt" \
+    || ! "$candidate/.venv/bin/python" -m compileall -q "$candidate/stream_control_hub"; then
+    cleanup_candidate
+    rm -rf "$backup"
+    echo "Candidate HUB failed pre-activation validation; current version was kept." >&2
+    return 6
+  fi
+
+  code_items="stream_control_hub scripts config requirements.txt README.md run-hub.sh"
+  for item in $code_items; do
+    [ -e "$INSTALL_DIR/$item" ] && mv "$INSTALL_DIR/$item" "$backup/$item"
+  done
+  [ -e "$INSTALL_DIR/.venv" ] && mv "$INSTALL_DIR/.venv" "$backup/.venv"
+  for item in $code_items; do
+    [ -e "$candidate/$item" ] && cp -a "$candidate/$item" "$INSTALL_DIR/$item"
+  done
+  mv "$candidate/.venv" "$INSTALL_DIR/.venv"
+  # The candidate files are already in the main worktree. Reset the index and
+  # commit pointer to that exact candidate instead of asking checkout to
+  # overwrite the files it just received from the candidate worktree.
+  git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
+  # The candidate is no longer needed after its files and virtualenv are copied.
+  # Remove it before any service restart so an interrupted role switch cannot
+  # leave an untracked worktree that blocks the next recovery attempt.
+  cleanup_candidate
+  if [ ! -f "$ENV_FILE" ]; then
+    echo "HUB code refreshed; environment file will be initialized before service start."
+    return 0
+  fi
+  hub_systemctl restart stream-control-hub.service
+  if health_check_hub; then
+    cleanup_candidate
+    echo "HUB upgrade activated; rollback snapshot retained at $backup"
+    return 0
+  fi
+
+  echo "New HUB failed health checks; rolling back." >&2
+  hub_systemctl stop stream-control-hub.service >/dev/null 2>&1 || true
+  for item in $code_items; do
+    rm -rf "$INSTALL_DIR/$item"
+    [ -e "$backup/$item" ] && mv "$backup/$item" "$INSTALL_DIR/$item"
+  done
+  rm -rf "$INSTALL_DIR/.venv"
+  [ -e "$backup/.venv" ] && mv "$backup/.venv" "$INSTALL_DIR/.venv"
+  if [ -n "$old_branch" ]; then
+    git -C "$INSTALL_DIR" checkout -B "$old_branch" "$old_commit"
+  else
+    git -C "$INSTALL_DIR" checkout --detach "$old_commit"
+  fi
+  cleanup_candidate
+  hub_systemctl restart stream-control-hub.service >/dev/null 2>&1 || true
+  rm -rf "$backup"
+  return 6
 }
 
 install_packages() {
@@ -125,6 +413,7 @@ uninstall_hub() {
       systemctl --user daemon-reload >/dev/null 2>&1 || true
     fi
   fi
+  rm -f "$STREAM_NODE_ROLE_FILE"
   pkill -f "$INSTALL_DIR/.venv/bin/python -m stream_control_hub" >/dev/null 2>&1 || true
   pkill -f "$INSTALL_DIR/run-hub.sh" >/dev/null 2>&1 || true
   if [ ! -e "$INSTALL_DIR" ]; then
@@ -152,19 +441,30 @@ uninstall_hub() {
 resolve_action
 
 if [ "$ACTION" = "uninstall" ]; then
+  acquire_upgrade_lock
   uninstall_hub
   exit 0
 fi
 
+acquire_upgrade_lock
+assert_single_role
 install_packages
 need_cmd git
 need_cmd python3
 need_cmd curl
+migrate_shared_media
+git config --global --add safe.directory "$INSTALL_DIR" >/dev/null 2>&1 || true
+reconcile_hub_role
+write_hub_service_unit
+# The transactional refresh may restart the HUB before the final install
+# writes its environment file. During an explicit Agent-to-Hub switch, the
+# role marker must already match that unit.
+if [ "$ROLE_SWITCH_CONFIRMED" = "1" ]; then
+  write_role_marker
+fi
 
 if [ -d "$INSTALL_DIR/.git" ]; then
-  git -C "$INSTALL_DIR" fetch origin "$BRANCH"
-  git -C "$INSTALL_DIR" checkout "$BRANCH"
-  git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"
+  transactional_refresh_hub
 elif [ -e "$INSTALL_DIR" ]; then
   echo "Adopting existing Hub data directory without deleting local data or env: $INSTALL_DIR"
   git -C "$INSTALL_DIR" init
@@ -183,7 +483,6 @@ python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
 "$INSTALL_DIR/.venv/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
 
-ENV_FILE="$INSTALL_DIR/.env"
 TOKEN=""
 EXISTING_HOST=""
 EXISTING_PORT=""
@@ -242,7 +541,20 @@ fi
 [ -n "$STREAM_HUB_HOST" ] || STREAM_HUB_HOST="${EXISTING_HOST:-127.0.0.1}"
 [ -n "$STREAM_HUB_PORT" ] || STREAM_HUB_PORT="${EXISTING_PORT:-8788}"
 [ -n "$STREAM_HUB_NODES_FILE" ] || STREAM_HUB_NODES_FILE="${EXISTING_NODES_FILE:-$INSTALL_DIR/data/nodes.local.json}"
-[ -n "$STREAM_HUB_TRUSTED_REMOTE_WRITES" ] || STREAM_HUB_TRUSTED_REMOTE_WRITES="${EXISTING_TRUSTED_REMOTE_WRITES:-0}"
+if [ -z "$STREAM_HUB_TRUSTED_REMOTE_WRITES" ]; then
+  if [ -n "$EXISTING_TRUSTED_REMOTE_WRITES" ]; then
+    STREAM_HUB_TRUSTED_REMOTE_WRITES="$EXISTING_TRUSTED_REMOTE_WRITES"
+  else
+    case "$STREAM_HUB_HOST" in
+      100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*)
+        STREAM_HUB_TRUSTED_REMOTE_WRITES="1"
+        ;;
+      *)
+        STREAM_HUB_TRUSTED_REMOTE_WRITES="0"
+        ;;
+    esac
+  fi
+fi
 [ -n "$YOUTUBE_CLIENT_ID" ] || YOUTUBE_CLIENT_ID="$EXISTING_YOUTUBE_CLIENT_ID"
 [ -n "$YOUTUBE_CLIENT_SECRET" ] || YOUTUBE_CLIENT_SECRET="$EXISTING_YOUTUBE_CLIENT_SECRET"
 [ -n "$YOUTUBE_CREDENTIAL_FILE" ] || YOUTUBE_CREDENTIAL_FILE="${EXISTING_YOUTUBE_CREDENTIAL_FILE:-$INSTALL_DIR/data/youtube_credentials.json}"
@@ -259,15 +571,19 @@ mkdir -p "$(dirname "$NODES_FILE")"
 
 cat > "$ENV_FILE" <<EOF
 STREAM_HUB_CONTROL_TOKEN=$TOKEN
+STREAM_NODE_ROLE=hub
+STREAM_NODE_ROLE_FILE=$STREAM_NODE_ROLE_FILE
 STREAM_HUB_NODES_FILE=$NODES_FILE
 STREAM_HUB_HOST=$STREAM_HUB_HOST
 STREAM_HUB_PORT=$STREAM_HUB_PORT
 STREAM_HUB_TRUSTED_REMOTE_WRITES=$STREAM_HUB_TRUSTED_REMOTE_WRITES
+STREAM_MEDIA_DIR=$STREAM_MEDIA_DIR
 YOUTUBE_CLIENT_ID=$YOUTUBE_CLIENT_ID
 YOUTUBE_CLIENT_SECRET=$YOUTUBE_CLIENT_SECRET
 YOUTUBE_CREDENTIAL_FILE=$YOUTUBE_CREDENTIAL_FILE
 EOF
 chmod 600 "$ENV_FILE"
+write_role_marker
 
 cat > "$INSTALL_DIR/run-hub.sh" <<EOF
 #!/usr/bin/env sh
@@ -285,44 +601,10 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
-  if [ "$STREAM_HUB_SERVICE_MODE" = "system" ]; then
-    SERVICE_FILE="/etc/systemd/system/stream-control-hub.service"
-    SERVICE_TARGET="multi-user.target"
-    SYSTEMCTL="systemctl"
-  else
-    SERVICE_DIR="$HOME/.config/systemd/user"
-    mkdir -p "$SERVICE_DIR"
-    SERVICE_FILE="$SERVICE_DIR/stream-control-hub.service"
-    SERVICE_TARGET="default.target"
-    SYSTEMCTL="systemctl --user"
-  fi
-  cat > "$SERVICE_FILE" <<EOF
-[Unit]
-Description=Stream Control Hub
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=10
-
-[Service]
-WorkingDirectory=$INSTALL_DIR
-EnvironmentFile=$ENV_FILE
-ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub
-Restart=always
-RestartSec=3
-TimeoutStopSec=20
-KillMode=control-group
-UMask=0077
-
-[Install]
-WantedBy=$SERVICE_TARGET
-EOF
-  $SYSTEMCTL daemon-reload || true
-  if ! $SYSTEMCTL enable --now stream-control-hub.service; then
-    "$INSTALL_DIR/run-hub.sh" &
-  else
-    $SYSTEMCTL restart stream-control-hub.service
-  fi
+  write_hub_service_unit
+  $SYSTEMCTL enable stream-control-hub.service
+  $SYSTEMCTL reset-failed stream-control-hub.service || true
+  $SYSTEMCTL restart stream-control-hub.service
 else
   "$INSTALL_DIR/run-hub.sh" &
 fi
@@ -345,10 +627,6 @@ done
 if [ "$HEALTHY" != "1" ]; then
   echo "Hub health check failed at $PROBE_HOST:$STREAM_HUB_PORT." >&2
   exit 1
-fi
-
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet stream-control-headless-agent.service; then
-  systemctl restart stream-control-headless-agent.service
 fi
 
 echo "Stream Control Hub installed."

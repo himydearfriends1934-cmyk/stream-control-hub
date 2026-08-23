@@ -18,6 +18,17 @@ GOOGLE_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube"
+YOUTUBE_TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+YOUTUBE_RETRY_ATTEMPTS = 3
+YOUTUBE_RETRY_BASE_SECONDS = 0.25
+
+
+def _is_transient_status_code(status_code: int) -> bool:
+    return int(status_code or 0) in YOUTUBE_TRANSIENT_STATUS_CODES
+
+
+def _retry_delay(attempt: int) -> float:
+    return YOUTUBE_RETRY_BASE_SECONDS * (2 ** max(0, attempt))
 
 
 def youtube_health_recommendation(
@@ -104,11 +115,14 @@ def youtube_health_recommendation(
     elif "warning" in issue_levels and severity == "ok":
         severity = "warning"
 
-    video_high_types = {"bitratehigh"}
-    video_low_types = {"bitratelow"}
-    audio_high_types = {"audiobitratehigh"}
-    audio_low_types = {"audiobitratelow"}
-    frame_types = {"frameratehigh", "frameratemismatch"}
+    if copy_mode:
+        mark_action("YouTube Live requires transcoding so the Agent can enforce a controlled two-second GOP.")
+
+    video_high_types = {"bitratehigh", "videobitratehigh", "videobitrateishigh"}
+    video_low_types = {"bitratelow", "videobitratelow", "videobitrateislow"}
+    audio_high_types = {"audiobitratehigh", "audiobitrateishigh"}
+    audio_low_types = {"audiobitratelow", "audiobitrateislow"}
+    frame_types = {"frameratehigh", "framerateishigh", "videoframeratehigh", "frameratemismatch"}
     keyframe_types = {"gopmismatch", "gopsizelong", "gopsizeover", "gopsizeshort", "opengop"}
     resolution_types = {"resolutionmismatch", "videoresolutionsuboptimal", "videoresolutionunsupported"}
     transcode_types = {
@@ -216,10 +230,18 @@ def youtube_health_recommendation(
 
 
 class YouTubeAPIError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int = 502, reason: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 502,
+        reason: str = "",
+        transient: bool = False,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.reason = reason
+        self.transient = transient
 
 
 def _response_error(response: requests.Response, fallback: str) -> YouTubeAPIError:
@@ -245,7 +267,12 @@ def _response_error(response: requests.Response, fallback: str) -> YouTubeAPIErr
             "In Google Cloud Console, change the OAuth consent screen user type to External "
             "or add this Google account as a test user, then authorize YouTube again."
         )
-    return YouTubeAPIError(message, status_code=response.status_code or 502, reason=reason)
+    return YouTubeAPIError(
+        message,
+        status_code=response.status_code or 502,
+        reason=reason,
+        transient=_is_transient_status_code(response.status_code),
+    )
 
 
 class YouTubeAPIClient:
@@ -322,13 +349,38 @@ class YouTubeAPIClient:
             "authorized_at": str(credentials.get("authorized_at") or ""),
         }
 
+    def _post_form(self, url: str, data: dict[str, str]) -> requests.Response:
+        last_error: requests.RequestException | None = None
+        for attempt in range(YOUTUBE_RETRY_ATTEMPTS):
+            try:
+                response = requests.post(url, data=data, timeout=self.timeout)
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt + 1 < YOUTUBE_RETRY_ATTEMPTS:
+                    time.sleep(_retry_delay(attempt))
+                    continue
+                raise YouTubeAPIError(
+                    "YouTube API connection is temporarily unavailable",
+                    status_code=503,
+                    reason="network_error",
+                    transient=True,
+                ) from exc
+            if response.ok or not _is_transient_status_code(response.status_code) or attempt + 1 >= YOUTUBE_RETRY_ATTEMPTS:
+                return response
+            time.sleep(_retry_delay(attempt))
+        raise YouTubeAPIError(
+            "YouTube API connection is temporarily unavailable",
+            status_code=503,
+            reason="network_error",
+            transient=True,
+        ) from last_error
+
     def start_device_authorization(self) -> dict[str, Any]:
         if not self.configured:
             raise YouTubeAPIError("YOUTUBE_CLIENT_ID is not configured", status_code=409)
-        response = requests.post(
+        response = self._post_form(
             GOOGLE_DEVICE_CODE_URL,
-            data={"client_id": self.client_id, "scope": YOUTUBE_SCOPE},
-            timeout=self.timeout,
+            {"client_id": self.client_id, "scope": YOUTUBE_SCOPE},
         )
         if not response.ok:
             raise _response_error(response, "YouTube device authorization could not be started")
@@ -379,7 +431,7 @@ class YouTubeAPIClient:
         }
         if self.client_secret:
             token_payload["client_secret"] = self.client_secret
-        response = requests.post(GOOGLE_TOKEN_URL, data=token_payload, timeout=self.timeout)
+        response = self._post_form(GOOGLE_TOKEN_URL, token_payload)
         if not response.ok:
             error = _response_error(response, "YouTube authorization failed")
             if error.reason in {"authorization_pending", "slow_down"}:
@@ -422,7 +474,7 @@ class YouTubeAPIClient:
             }
             if self.client_secret:
                 token_payload["client_secret"] = self.client_secret
-            response = requests.post(GOOGLE_TOKEN_URL, data=token_payload, timeout=self.timeout)
+            response = self._post_form(GOOGLE_TOKEN_URL, token_payload)
             if not response.ok:
                 raise _response_error(response, "YouTube access token refresh failed")
             payload = response.json()
@@ -455,26 +507,49 @@ class YouTubeAPIClient:
         retry_auth: bool = True,
     ) -> dict[str, Any]:
         token = self._access_token_value()
-        response = requests.request(
-            method,
-            f"{YOUTUBE_API_BASE}/{resource.lstrip('/')}",
-            params=params,
-            json=body,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=self.timeout,
+        retry_attempts = YOUTUBE_RETRY_ATTEMPTS if method.upper() == "GET" else 1
+        for attempt in range(retry_attempts):
+            try:
+                response = requests.request(
+                    method,
+                    f"{YOUTUBE_API_BASE}/{resource.lstrip('/')}",
+                    params=params,
+                    json=body,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as exc:
+                if attempt + 1 < retry_attempts:
+                    time.sleep(_retry_delay(attempt))
+                    continue
+                raise YouTubeAPIError(
+                    "YouTube API connection is temporarily unavailable",
+                    status_code=503,
+                    reason="network_error",
+                    transient=True,
+                ) from exc
+            self._record_quota(method, resource)
+            if response.status_code == 401 and retry_auth:
+                with self._lock:
+                    self._access_token = ""
+                    self._access_token_expires_at = 0
+                return self._request(method, resource, params=params, body=body, retry_auth=False)
+            if response.ok:
+                if not response.content:
+                    return {}
+                payload = response.json()
+                return payload if isinstance(payload, dict) else {}
+            error = _response_error(response, f"YouTube API request failed: {resource}")
+            if error.transient and attempt + 1 < retry_attempts:
+                time.sleep(_retry_delay(attempt))
+                continue
+            raise error
+        raise YouTubeAPIError(
+            "YouTube API connection is temporarily unavailable",
+            status_code=503,
+            reason="network_error",
+            transient=True,
         )
-        self._record_quota(method, resource)
-        if response.status_code == 401 and retry_auth:
-            with self._lock:
-                self._access_token = ""
-                self._access_token_expires_at = 0
-            return self._request(method, resource, params=params, body=body, retry_auth=False)
-        if not response.ok:
-            raise _response_error(response, f"YouTube API request failed: {resource}")
-        if not response.content:
-            return {}
-        payload = response.json()
-        return payload if isinstance(payload, dict) else {}
 
     def _paged_items(
         self,
@@ -708,7 +783,7 @@ class YouTubeAPIClient:
         credentials = self._load_credentials()
         refresh_token = str(credentials.get("refresh_token") or "")
         if refresh_token:
-            response = requests.post(GOOGLE_REVOKE_URL, data={"token": refresh_token}, timeout=self.timeout)
+            response = self._post_form(GOOGLE_REVOKE_URL, {"token": refresh_token})
             if not response.ok:
                 raise _response_error(response, "YouTube authorization could not be revoked")
         self.credential_path.unlink(missing_ok=True)

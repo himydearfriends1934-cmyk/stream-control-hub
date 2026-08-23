@@ -139,9 +139,36 @@ if (-not (Test-Path $python)) {
 
 $dataDir = Join-Path $InstallDir "data"
 $nodesFile = Join-Path $dataDir "nodes.local.json"
+$mediaDir = Join-Path $InstallDir "media"
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+New-Item -ItemType Directory -Force -Path $mediaDir | Out-Null
 if (-not (Test-Path $nodesFile)) {
   "[]" | Set-Content -LiteralPath $nodesFile -Encoding UTF8
+}
+foreach ($legacyDir in @((Join-Path $InstallDir "agent_data\media"), (Join-Path $InstallDir "data\media"))) {
+  if (-not (Test-Path -LiteralPath $legacyDir -PathType Container)) { continue }
+  if ([System.IO.Path]::GetFullPath($legacyDir) -eq [System.IO.Path]::GetFullPath($mediaDir)) { continue }
+  Get-ChildItem -LiteralPath $legacyDir -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    $destination = Join-Path $mediaDir $_.Name
+    if (Test-Path -LiteralPath $destination) {
+      $same = $false
+      try {
+        $same = ((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash)
+      } catch {}
+      if ($same) {
+        Remove-Item -LiteralPath $_.FullName -Force
+        return
+      }
+      $counter = 1
+      do {
+        $candidate = Join-Path $mediaDir ("{0}-legacy-{1}{2}" -f $_.BaseName, $counter, $_.Extension)
+        $counter++
+      } while (Test-Path -LiteralPath $candidate)
+      $destination = $candidate
+    }
+    Move-Item -LiteralPath $_.FullName -Destination $destination
+  }
+  Remove-Item -LiteralPath $legacyDir -Force -ErrorAction SilentlyContinue
 }
 
 $envFile = Join-Path $InstallDir ".env"
@@ -189,7 +216,8 @@ if ($TrustedRemoteWrites -match "^(?i:1|true|yes)$") {
   "STREAM_HUB_NODES_FILE=$nodesFile",
   "STREAM_HUB_HOST=$HostName",
   "STREAM_HUB_PORT=$Port",
-  "STREAM_HUB_TRUSTED_REMOTE_WRITES=$TrustedRemoteWrites"
+  "STREAM_HUB_TRUSTED_REMOTE_WRITES=$TrustedRemoteWrites",
+  "STREAM_MEDIA_DIR=$mediaDir"
   "YOUTUBE_CLIENT_ID=$youtubeClientId"
   "YOUTUBE_CLIENT_SECRET=$youtubeClientSecret"
   "YOUTUBE_CREDENTIAL_FILE=$youtubeCredentialFile"

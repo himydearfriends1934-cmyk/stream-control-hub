@@ -11,8 +11,11 @@ import uuid
 import hmac
 import hashlib
 import ipaddress
+import platform
+import re
 import threading
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +32,9 @@ from flask import Flask, jsonify, make_response, request
 from werkzeug.utils import secure_filename
 
 from .env_file import load_env_file, update_env_file_values
+from .motion_analysis import classify_motion_samples, motion_profile_cache_key
+from .policy import POLICY_VERSION, issue_policy
+from .role_lock import RoleConflictError, assert_role, declared_role
 from .youtube_api import YouTubeAPIClient, YouTubeAPIError
 from .stream_tuning import youtube_live_bitrate_for_payload
 
@@ -53,13 +59,101 @@ def write_json_atomic(path: Path, payload: Any, *, mode: int | None = None) -> N
         temporary.unlink(missing_ok=True)
 
 
+def load_motion_profiles() -> dict[str, Any]:
+    with MOTION_PROFILES_LOCK:
+        try:
+            payload = json.loads(MOTION_PROFILES_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        return payload if isinstance(payload, dict) else {}
+
+
+def save_motion_profiles(payload: dict[str, Any]) -> None:
+    with MOTION_PROFILES_LOCK:
+        write_json_atomic(MOTION_PROFILES_FILE, payload, mode=0o600)
+
+
+def cached_motion_profile(node_id: str, video_path: str) -> dict[str, Any] | None:
+    profiles = load_motion_profiles().get("profiles") or {}
+    prefix = f"{node_id}:{video_path}:"
+    matches = [value for key, value in profiles.items() if str(key).startswith(prefix) and isinstance(value, dict)]
+    if not matches:
+        return None
+    return max(matches, key=lambda item: float(item.get("analyzed_at") or 0))
+
+
+def analyze_node_motion(node: dict[str, Any], video_path: str, *, sample_count: int = 12) -> dict[str, Any]:
+    result = post_node_json(
+        node,
+        "/api/media/motion-samples",
+        {"video_path": video_path, "sample_count": max(6, min(24, int(sample_count or 12)))},
+        timeout=240,
+    )
+    if not result.get("ok"):
+        return result
+    profile = classify_motion_samples(result.get("samples") or [])
+    file_info = result.get("file") or {}
+    source = result.get("source") or {}
+    key = motion_profile_cache_key(
+        str(node.get("id") or ""),
+        video_path,
+        size=int(file_info.get("size") or 0),
+        modified=float(file_info.get("modified") or 0),
+    )
+    profile_record = {
+        **profile,
+        "node_id": str(node.get("id") or ""),
+        "node_name": str(node.get("name") or node.get("id") or ""),
+        "video_path": video_path,
+        "file": {"size": int(file_info.get("size") or 0), "modified": float(file_info.get("modified") or 0)},
+        "source": source,
+        "analyzed_at": time.time(),
+        "analysis_version": 1,
+    }
+    profiles = load_motion_profiles()
+    records = profiles.setdefault("profiles", {})
+    for old_key in list(records):
+        if old_key.startswith(f"{node.get('id')}:{video_path}:") and old_key != key:
+            records.pop(old_key, None)
+    records[key] = profile_record
+    profiles["profiles"] = dict(list(records.items())[-1000:])
+    save_motion_profiles(profiles)
+    return {"ok": True, "profile": profile_record, "source": source, "file": file_info}
+
+
+def schedule_motion_analysis(node: dict[str, Any], video_path: str) -> dict[str, Any]:
+    node_id = str(node.get("id") or "")
+    key = f"{node_id}:{video_path}"
+    cached = cached_motion_profile(node_id, video_path)
+    if cached:
+        return {"scheduled": False, "cached": True, "profile": cached}
+    with MOTION_ANALYSIS_ACTIVE_LOCK:
+        if key in MOTION_ANALYSIS_ACTIVE:
+            return {"scheduled": False, "active": True}
+        MOTION_ANALYSIS_ACTIVE.add(key)
+
+    def worker() -> None:
+        try:
+            analyze_node_motion(node, video_path)
+        except Exception:
+            APP.logger.exception("motion analysis failed for node %s", node_id)
+        finally:
+            with MOTION_ANALYSIS_ACTIVE_LOCK:
+                MOTION_ANALYSIS_ACTIVE.discard(key)
+
+    threading.Thread(target=worker, name=f"motion-analysis-{node_id}", daemon=True).start()
+    return {"scheduled": True, "cached": False}
+
+
 load_env_file(ROOT / ".env")
 CONFIG_DIR = ROOT / "config"
 DATA_DIR = Path(os.environ.get("STREAM_HUB_DATA_DIR", str(ROOT / "data")))
-MEDIA_DIR = DATA_DIR / "media"
+MEDIA_DIR = Path(os.environ.get("STREAM_MEDIA_DIR", str(DATA_DIR / "media")))
 WORK_DIR = DATA_DIR / "work"
 NODES_FILE = Path(os.environ.get("STREAM_HUB_NODES_FILE", str(CONFIG_DIR / "nodes.json")))
 PORT = int(os.environ.get("STREAM_HUB_PORT", "8788"))
+AGENT_PORT = int(os.environ.get("STREAM_HUB_AGENT_PORT", "8787"))
+LOCAL_HUB_NODE_ID = "__local_hub__"
 SOURCE_REPO = os.environ.get(
     "STREAM_HUB_SOURCE_REPO",
     "https://github.com/himydearfriends1934-cmyk/stream-control-hub.git",
@@ -77,7 +171,7 @@ NODE_UPLOAD_PROBE_TIMEOUT_SECONDS = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_P
 MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND = int(os.environ.get("STREAM_HUB_MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND", str(32 * 1024)))
 MIN_FREE_AFTER_UPLOAD_BYTES = int(os.environ.get("STREAM_HUB_MIN_FREE_AFTER_UPLOAD_BYTES", str(2 * 1024 ** 3)))
 UPLOAD_POLICY_NAME = os.environ.get("STREAM_HUB_UPLOAD_POLICY_NAME", "safe-stable-fast-v1")
-HUB_LOCAL_NODE_ID = os.environ.get("STREAM_HUB_LOCAL_NODE_ID", "hub-local").strip() or "hub-local"
+HUB_LOCAL_NODE_ID = LOCAL_HUB_NODE_ID
 HUB_LOCAL_NODE_NAME = os.environ.get("STREAM_HUB_LOCAL_NODE_NAME", "Hub 本地").strip() or "Hub 本地"
 HUB_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_UPLOAD_CHUNK_BYTES", str(8 * 1024 ** 2)))
 HUB_UPLOAD_MAX_CHUNK_BYTES = int(
@@ -100,13 +194,27 @@ YOUTUBE_CREDENTIAL_FILE = Path(
 YOUTUBE_PROFILES_FILE = DATA_DIR / "youtube_profiles.json"
 YOUTUBE_USAGE_FILE = DATA_DIR / "youtube_api_usage.json"
 YOUTUBE_AUTOTUNE_STATE_FILE = DATA_DIR / "youtube_autotune_state.json"
+MOTION_PROFILES_FILE = DATA_DIR / "motion-profiles.json"
 YOUTUBE_AUTOTUNE_HISTORY_LIMIT = 50
 YOUTUBE_AUTOTUNE_HISTORY_TOTAL_LIMIT = 500
+YOUTUBE_AUTOTUNE_API_RETRY_BASE_SECONDS = max(
+    15, int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_API_RETRY_BASE_SECONDS", "30"))
+)
+YOUTUBE_AUTOTUNE_API_RETRY_MAX_SECONDS = max(
+    YOUTUBE_AUTOTUNE_API_RETRY_BASE_SECONDS,
+    int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_API_RETRY_MAX_SECONDS", "300")),
+)
+YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS = max(
+    1200, int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS", "1200"))
+)
 YOUTUBE_PROFILE_CREDENTIALS_DIR = DATA_DIR / "youtube_profile_credentials"
 YOUTUBE_DEFAULT_PROFILE_ID = "default"
 YOUTUBE_PROFILE_LOCK = threading.RLock()
 YOUTUBE_AUTOTUNE_STOP = threading.Event()
 YOUTUBE_AUTOTUNE_LOCK = threading.Lock()
+MOTION_PROFILES_LOCK = threading.RLock()
+MOTION_ANALYSIS_ACTIVE: set[str] = set()
+MOTION_ANALYSIS_ACTIVE_LOCK = threading.Lock()
 YOUTUBE_CLIENT_CACHE: dict[str, YouTubeAPIClient] = {}
 HUB_UPLOAD_TICKETS: dict[str, dict[str, Any]] = {}
 HUB_UPLOAD_TICKETS_LOCK = threading.Lock()
@@ -197,6 +305,7 @@ def default_youtube_profile() -> dict[str, Any]:
         "auto_tune_enabled": False,
         "auto_tune_interval_seconds": 300,
         "auto_tune_cooldown_seconds": 900,
+        "auto_tune_recovery_stable_seconds": YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS,
         "auto_tune_min_bitrate": 800,
         "auto_tune_max_bitrate": 40000,
         "created_at": "",
@@ -267,6 +376,9 @@ def public_youtube_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "auto_tune_enabled": bool(profile.get("auto_tune_enabled")),
         "auto_tune_interval_seconds": int(profile.get("auto_tune_interval_seconds") or 300),
         "auto_tune_cooldown_seconds": int(profile.get("auto_tune_cooldown_seconds") or 900),
+        "auto_tune_recovery_stable_seconds": max(
+            1200, int(profile.get("auto_tune_recovery_stable_seconds") or YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS)
+        ),
         "auto_tune_min_bitrate": int(profile.get("auto_tune_min_bitrate") or 800),
         "auto_tune_max_bitrate": int(profile.get("auto_tune_max_bitrate") or 40000),
         "usage": youtube_usage_for_profile(profile_id),
@@ -471,10 +583,12 @@ def youtube_autotune_apply_runtime(
     status: dict[str, Any],
     stream_config: dict[str, Any],
     entry: dict[str, Any],
+    motion_level: str = "medium",
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     runtime = youtube_autotune_smooth_runtime(entry, youtube_autotune_runtime_snapshot(status, stream_config))
     issue_fingerprint = youtube_autotune_issue_fingerprint(health)
-    if issue_fingerprint != "videoingestionstarved":
+    local_classification = str(runtime.get("classification") or "unknown")
+    if issue_fingerprint != "videoingestionstarved" and local_classification not in {"encoder_overloaded", "network_starved"}:
         return dict(recommendation), runtime, []
     result = dict(recommendation)
     decisions = []
@@ -482,6 +596,7 @@ def youtube_autotune_apply_runtime(
     explicit_bitrate = int((health.get("analysis") or {}).get("recommended_video_bitrate") or 0)
     fallback_bitrate = int(entry.get("youtube_recommended_bitrate") or 0) or youtube_autotune_resolution_bitrate(stream_config)
     classification = runtime["classification"]
+    motion_level = motion_level if motion_level in {"static", "medium", "dynamic"} else "medium"
     if classification == "encoder_overloaded":
         if not explicit_bitrate:
             result["video_bitrate"] = current_bitrate
@@ -500,14 +615,16 @@ def youtube_autotune_apply_runtime(
             decisions.append("Agent remains encoder-bound at 30 FPS; reduce frame rate to 24 FPS.")
         else:
             decisions.append("Agent is encoder-bound but already uses the fastest preset and 24 FPS; hold parameters for observation.")
+        if motion_level == "static":
+            decisions.append("Central motion analysis classifies this source as mostly static; preserve quality and avoid an unnecessary bitrate cut.")
     elif classification == "network_starved":
         if not explicit_bitrate:
             result["video_bitrate"] = current_bitrate
         result["preset"] = stream_config.get("preset") or "veryfast"
         decisions.append(
-            f"FFmpeg speed is stable but upload is only {runtime['upload_kbps']} Kbps; treat this as a network path issue and do not restart the encoder."
+            f"Central motion profile is {motion_level}; FFmpeg speed is stable but upload is only {runtime['upload_kbps']} Kbps; treat this as a network path issue and do not restart the encoder."
         )
-    elif classification == "healthy":
+    elif classification == "healthy" and issue_fingerprint == "videoingestionstarved":
         result["video_bitrate"] = explicit_bitrate or max(current_bitrate, fallback_bitrate)
         result["preset"] = stream_config.get("preset") or "veryfast"
         decisions.append(
@@ -555,6 +672,40 @@ def append_youtube_autotune_history(state: dict[str, Any], event: dict[str, Any]
     state["history"] = retained
 
 
+def youtube_api_error_is_transient(exc: Exception) -> bool:
+    if isinstance(exc, YouTubeAPIError):
+        return bool(getattr(exc, "transient", False) or exc.status_code in {429, 500, 502, 503, 504})
+    return isinstance(exc, requests.RequestException)
+
+
+def youtube_autotune_api_retry_delay(entry: dict[str, Any]) -> int:
+    failures = max(1, int(entry.get("api_failures") or 1))
+    return min(
+        YOUTUBE_AUTOTUNE_API_RETRY_MAX_SECONDS,
+        YOUTUBE_AUTOTUNE_API_RETRY_BASE_SECONDS * (2 ** min(failures - 1, 6)),
+    )
+
+
+def youtube_autotune_recovery_diff(
+    current: dict[str, Any], entry: dict[str, Any], profile: dict[str, Any]
+) -> dict[str, Any]:
+    """Restore one degraded setting toward the pre-incident configuration."""
+    baseline = entry.get("baseline_config") or {}
+    if not isinstance(baseline, dict):
+        return {}
+    # Quality is restored from the least disruptive encoder setting outward.
+    for key in ("preset", "fps", "resolution", "video_bitrate", "audio_bitrate", "keyframe_seconds"):
+        if key not in baseline or baseline.get(key) in (None, ""):
+            continue
+        if baseline.get(key) == current.get(key):
+            continue
+        candidate = {key: baseline.get(key)}
+        diff = youtube_autotune_payload_diff(current, candidate, profile)
+        if diff:
+            return diff
+    return {}
+
+
 def youtube_autotune_tick() -> dict[str, Any]:
     with YOUTUBE_AUTOTUNE_LOCK:
         now = time.time()
@@ -576,39 +727,96 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 continue
             if stream_config.get("stream_output_mode") != "youtube_api" or not stream_config.get("youtube_stream_id"):
                 continue
+            if str(stream_config.get("adaptive_mode") or "auto").strip().lower() == "off":
+                continue
             profile_id = safe_youtube_profile_id(str(stream_config.get("youtube_profile_id") or config.get("active_profile_id") or YOUTUBE_DEFAULT_PROFILE_ID))
             profile = profiles.get(profile_id)
             if not profile:
                 continue
             interval = max(60, int(profile.get("auto_tune_interval_seconds") or 300))
             cooldown = max(60, int(profile.get("auto_tune_cooldown_seconds") or 900))
+            recovery_wait = max(
+                1200,
+                int(profile.get("auto_tune_recovery_stable_seconds") or YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS),
+            )
             key = f"{node.get('id')}:{profile_id}:{stream_config.get('youtube_stream_id')}"
             entry = entries.setdefault(key, {"consecutive_issues": 0, "last_check": 0, "last_adjusted": 0})
-            if now - float(entry.get("last_check") or 0) < interval:
+            next_api_retry_at = float(entry.get("next_api_retry_at") or 0)
+            if next_api_retry_at and now < next_api_retry_at:
+                continue
+            if not next_api_retry_at and now - float(entry.get("last_check") or 0) < interval:
                 continue
             entry["last_check"] = now
             checked += 1
             node_id = str(node.get("id") or "")
+            video_path = str(stream_config.get("video_path") or "")
+            motion_profile = cached_motion_profile(node_id, video_path) if video_path else None
+            motion_level = str(
+                (motion_profile or {}).get("level") or stream_config.get("motion_level") or "medium"
+            ).lower()
+            if motion_level not in {"static", "medium", "dynamic"}:
+                motion_level = "medium"
+            if video_path and not motion_profile:
+                schedule_motion_analysis(node, video_path)
             event = {
                 "node_id": node_id,
                 "node_name": str(node.get("name") or node.get("id") or ""),
                 "profile_id": profile_id,
                 "stream_id": str(stream_config.get("youtube_stream_id") or ""),
                 "before": youtube_autotune_parameter_snapshot(stream_config),
+                "motion_level": motion_level,
+                "motion_profile": motion_profile or {},
             }
             try:
                 client = youtube_client_for_id(profile_id)
+                api_degraded = False
                 if not client.local_status().get("authorized"):
-                    entry["last_error"] = "profile is not authorized"
-                    append_youtube_autotune_history(state, {**event, "outcome": "error", "error": entry["last_error"]})
-                    continue
-                health = client.stream_health(str(stream_config.get("youtube_stream_id") or ""), stream_config)
+                    api_degraded = True
+                    health = {
+                        "ok": False,
+                        "severity": "unknown",
+                        "health": {},
+                        "analysis": {
+                            "warnings": ["YouTube API is unavailable; use local Agent telemetry."],
+                            "configuration_issues": [],
+                            "reasons": [],
+                        },
+                    }
+                else:
+                    try:
+                        health = client.stream_health(str(stream_config.get("youtube_stream_id") or ""), stream_config)
+                    except Exception as exc:
+                        if not youtube_api_error_is_transient(exc):
+                            raise
+                        api_degraded = True
+                        entry["api_failures"] = int(entry.get("api_failures") or 0) + 1
+                        retry_after_seconds = youtube_autotune_api_retry_delay(entry)
+                        entry["next_api_retry_at"] = now + retry_after_seconds
+                        health = {
+                            "ok": False,
+                            "severity": "unknown",
+                            "health": entry.get("last_health") or {},
+                            "analysis": {
+                                "warnings": ["YouTube API is temporarily unavailable; use local Agent telemetry."],
+                                "configuration_issues": [],
+                                "reasons": [],
+                            },
+                        }
+                if not api_degraded:
+                    entry.pop("next_api_retry_at", None)
+                    entry["api_failures"] = 0
+                    entry["last_error"] = ""
                 recommendation = health.get("recommendation") or {}
                 severity = str(health.get("severity") or "").lower()
                 issue_fingerprint = youtube_autotune_issue_fingerprint(health)
                 previous_fingerprint = str(entry.get("active_issue_fingerprint") or "")
+                if api_degraded and not issue_fingerprint and previous_fingerprint:
+                    # A transient API outage must not erase an already-confirmed local episode.
+                    issue_fingerprint = previous_fingerprint
                 legacy_entry = "active_issue_fingerprint" not in entry
-                if issue_fingerprint != previous_fingerprint:
+                if issue_fingerprint != previous_fingerprint and not (
+                    not issue_fingerprint and previous_fingerprint.startswith("runtime_")
+                ):
                     entry["active_issue_fingerprint"] = issue_fingerprint
                     entry["episode_adjustments"] = (
                         youtube_autotune_history_adjustments(state, event, issue_fingerprint)
@@ -618,12 +826,31 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     entry["recovery_applied"] = False
                     entry["consecutive_issues"] = 0
                     entry["runtime_samples"] = []
+                    entry["stable_since"] = 0
+                    entry["recovery_level"] = 0
+                    if issue_fingerprint:
+                        entry.pop("baseline_config", None)
                 explicit_bitrate = int((health.get("analysis") or {}).get("recommended_video_bitrate") or 0)
                 if explicit_bitrate:
                     entry["youtube_recommended_bitrate"] = explicit_bitrate
                 recommendation, runtime, runtime_decisions = youtube_autotune_apply_runtime(
-                    health, recommendation, status, stream_config, entry
+                    health, recommendation, status, stream_config, entry, motion_level
                 )
+                runtime_issue = str(runtime.get("classification") or "") in {"encoder_overloaded", "network_starved"}
+                if runtime_issue:
+                    runtime_fingerprint = f"runtime_{runtime['classification']}"
+                    if issue_fingerprint != runtime_fingerprint:
+                        issue_fingerprint = runtime_fingerprint
+                        if previous_fingerprint != runtime_fingerprint:
+                            entry["active_issue_fingerprint"] = runtime_fingerprint
+                            entry["episode_adjustments"] = 0
+                            entry["consecutive_issues"] = 0
+                            entry["recovery_applied"] = False
+                    if severity not in {"warning", "critical"}:
+                        severity = "critical" if (
+                            float(runtime.get("speed") or 1) < 0.95
+                            or float(runtime.get("system_cpu_percent") or 0) >= 95
+                        ) else "warning"
                 diff = youtube_autotune_payload_diff(stream_config, recommendation, profile)
                 event.update({
                     "severity": severity or "unknown",
@@ -638,14 +865,75 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 })
                 entry["last_health"] = health.get("health") or {}
                 entry["last_analysis"] = health.get("analysis") or {}
-                issue_active = severity in {"warning", "critical"} and bool(issue_fingerprint)
+                if api_degraded and not runtime_issue:
+                    append_youtube_autotune_history(state, {
+                        **event,
+                        "outcome": "api_retry",
+                        "after": event["before"],
+                        "retry_after_seconds": max(0, int(float(entry.get("next_api_retry_at") or now) - now)),
+                    })
+                    continue
+                issue_active = (
+                    severity in {"warning", "critical"} and bool(issue_fingerprint)
+                ) or runtime_issue or (api_degraded and bool(previous_fingerprint))
                 if not issue_active:
-                    entry["consecutive_issues"] = 0
-                    entry["active_issue_fingerprint"] = ""
-                    entry["episode_adjustments"] = 0
-                    entry["recovery_applied"] = False
-                    entry["last_error"] = ""
-                    append_youtube_autotune_history(state, {**event, "outcome": "no_change", "after": event["before"]})
+                    if int(entry.get("episode_adjustments") or 0) and entry.get("baseline_config"):
+                        stable_since = float(entry.get("stable_since") or 0)
+                        if not stable_since:
+                            stable_since = now
+                            entry["stable_since"] = stable_since
+                        stable_for = max(0, now - stable_since)
+                        recovery_diff = youtube_autotune_recovery_diff(stream_config, entry, profile)
+                        if stable_for < recovery_wait:
+                            event["stable_for_seconds"] = round(stable_for, 1)
+                            event["recovery_wait_seconds"] = recovery_wait
+                            append_youtube_autotune_history(state, {**event, "outcome": "stable_wait", "after": event["before"]})
+                            continue
+                        if not recovery_diff:
+                            entry["consecutive_issues"] = 0
+                            entry["active_issue_fingerprint"] = ""
+                            entry["episode_adjustments"] = 0
+                            entry["baseline_config"] = {}
+                            entry["stable_since"] = 0
+                            append_youtube_autotune_history(state, {**event, "outcome": "recovered", "after": event["before"]})
+                            continue
+                        event["changes"] = youtube_autotune_parameter_snapshot(recovery_diff)
+                        event["recommendation_reasons"] = list(event["recommendation_reasons"]) + [
+                            f"The stream stayed stable for {int(stable_for // 60)} minutes; restore one quality level only."
+                        ]
+                        recovery_payload = dict(stream_config)
+                        recovery_payload.update(recovery_diff)
+                        recovery_payload["stream_key"] = ""
+                        recovery_payload["youtube_profile_id"] = profile_id
+                        recovery_payload = issue_policy(recovery_payload, reason="autotune-recovery")
+                        result = post_node_json(node, "/api/start-stream", recovery_payload, timeout=60)
+                        entry["last_recovery_at"] = now
+                        entry["last_result"] = redacted_stream_result(result)
+                        if result.get("ok"):
+                            entry["episode_adjustments"] = max(0, int(entry.get("episode_adjustments") or 0) - 1)
+                            entry["recovery_level"] = int(entry.get("recovery_level") or 0) + 1
+                            entry["stable_since"] = now
+                            append_youtube_autotune_history(state, {
+                                **event,
+                                "outcome": "recovered_one_level",
+                                "after": recovery_payload,
+                                "agent_message": str(result.get("message") or "Agent parameters restored")[:500],
+                            })
+                        else:
+                            entry["last_error"] = result.get("message") or "recovery restart failed"
+                            append_youtube_autotune_history(state, {
+                                **event,
+                                "outcome": "recovery_failed",
+                                "after": event["before"],
+                                "error": str(entry["last_error"])[:500],
+                            })
+                    else:
+                        entry["consecutive_issues"] = 0
+                        entry["active_issue_fingerprint"] = ""
+                        entry["episode_adjustments"] = 0
+                        entry["recovery_applied"] = False
+                        entry["last_error"] = ""
+                        append_youtube_autotune_history(state, {**event, "outcome": "no_change", "after": event["before"]})
                     continue
                 if entry.get("recovery_applied"):
                     append_youtube_autotune_history(state, {**event, "outcome": "observing", "after": event["before"]})
@@ -655,6 +943,11 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     continue
                 entry["consecutive_issues"] = int(entry.get("consecutive_issues") or 0) + 1
                 entry["pending_diff"] = diff
+                entry.setdefault(
+                    "baseline_config",
+                    {key: stream_config.get(key) for key in ("preset", "fps", "resolution", "video_bitrate", "audio_bitrate", "keyframe_seconds")},
+                )
+                entry["stable_since"] = 0
                 required_checks = 2 if severity == "critical" else 3
                 if entry["consecutive_issues"] < required_checks:
                     append_youtube_autotune_history(state, {**event, "outcome": "pending", "after": event["before"]})
@@ -662,35 +955,18 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 if now - float(entry.get("last_adjusted") or 0) < cooldown:
                     append_youtube_autotune_history(state, {**event, "outcome": "cooldown", "after": event["before"]})
                     continue
-                recovery_action = int(entry.get("episode_adjustments") or 0) >= 2
-                if recovery_action:
-                    recovery_bitrate = int(entry.get("youtube_recommended_bitrate") or 0) or youtube_autotune_resolution_bitrate(stream_config)
-                    recovery_recommendation = dict(recommendation)
-                    recovery_recommendation["video_bitrate"] = recovery_bitrate
-                    diff = youtube_autotune_payload_diff(stream_config, recovery_recommendation, profile)
-                    event["recommended"] = youtube_autotune_parameter_snapshot(recovery_recommendation)
-                    event["changes"] = youtube_autotune_parameter_snapshot(diff)
-                    event["recommendation_reasons"] = list(event["recommendation_reasons"]) + [
-                        f"The same YouTube problem remained after two changes; restore the recommended {recovery_bitrate} Kbps on the third change."
-                    ]
-                    entry["pending_diff"] = diff
-                    if not diff:
-                        entry["recovery_applied"] = True
-                        append_youtube_autotune_history(state, {**event, "outcome": "observing", "after": event["before"]})
-                        continue
                 payload = dict(stream_config)
                 payload.update(diff)
                 payload["stream_key"] = ""
                 payload["youtube_profile_id"] = profile_id
-                if not payload.get("youtube_ingestion_url"):
-                    payload["youtube_ingestion_url"] = client.ingestion_target(str(payload.get("youtube_stream_id") or ""))
+                payload = issue_policy(payload, reason=f"autotune:{issue_fingerprint or 'runtime'}")
                 result = post_node_json(node, "/api/start-stream", payload, timeout=60)
                 entry["last_adjusted"] = now
                 entry["last_result"] = redacted_stream_result(result)
                 if result.get("ok"):
                     adjusted += 1
-                    entry["episode_adjustments"] = 3 if recovery_action else int(entry.get("episode_adjustments") or 0) + 1
-                    entry["recovery_applied"] = recovery_action
+                    entry["episode_adjustments"] = int(entry.get("episode_adjustments") or 0) + 1
+                    entry["recovery_applied"] = False
                     entry["consecutive_issues"] = 0
                     entry["last_error"] = ""
                     verified_status = request_node_json(node, "/api/status", timeout=8)
@@ -711,6 +987,20 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     })
             except Exception as exc:
                 entry["last_error"] = str(exc)
+                if youtube_api_error_is_transient(exc):
+                    entry["api_failures"] = int(entry.get("api_failures") or 0) + 1
+                    retry_after_seconds = youtube_autotune_api_retry_delay(entry)
+                    entry["next_api_retry_at"] = now + retry_after_seconds
+                    append_youtube_autotune_history(state, {
+                        **event,
+                        "outcome": "api_retry",
+                        "after": event["before"],
+                        "error": str(exc)[:500],
+                        "retry_after_seconds": retry_after_seconds,
+                    })
+                    continue
+                entry.pop("next_api_retry_at", None)
+                entry["api_failures"] = 0
                 append_youtube_autotune_history(state, {
                     **event,
                     "outcome": "error",
@@ -750,6 +1040,81 @@ APP.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("STREAM_HUB_MAX_UPLOAD_BYT
 def local_git_version() -> str:
     result = run_command(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], timeout=5)
     return str(result.get("stdout") or "unmanaged").strip() or "unmanaged"
+
+
+def load_upgrade_status() -> dict[str, Any]:
+    status_file = DATA_DIR / ".upgrade-status.json"
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_upgrade_status(
+    *,
+    state: str,
+    unit: str,
+    target_version: str,
+    message: str,
+    exit_code: int = 0,
+) -> None:
+    write_json_atomic(
+        DATA_DIR / ".upgrade-status.json",
+        {
+            "state": str(state or ""),
+            "unit": str(unit or ""),
+            "target_version": normalize_target_version(target_version),
+            "message": str(message or ""),
+            "exit_code": int(exit_code or 0),
+            "updated_at": time.time(),
+        },
+        mode=0o600,
+    )
+
+
+def upgrade_unit_active(unit: str) -> bool:
+    if not unit or not shutil.which("systemctl"):
+        return False
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", unit],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def normalize_target_version(value: Any) -> str:
+    parts = str(value or "").strip().split(None, 1)
+    candidate = parts[0] if parts else ""
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", candidate):
+        return candidate[:7].lower()
+    return ""
+
+
+def latest_source_version() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", SOURCE_REPO, SOURCE_BRANCH],
+            cwd=str(ROOT),
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    expected_ref = f"refs/heads/{SOURCE_BRANCH}"
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == expected_ref:
+            return normalize_target_version(parts[0])
+    return ""
 
 
 def service_active(name: str) -> bool:
@@ -1856,11 +2221,47 @@ HTML = r"""
     .node-row.offline-node:hover, .node-space-ring-item.offline-node:hover { opacity: .9; }
     .node-index {
       grid-area: index;
+      display: inline-flex;
+      align-items: center;
       justify-self: center;
+      gap: 3px;
       color: var(--accent);
       font-size: 12px;
       font-weight: 950;
       font-variant-numeric: tabular-nums;
+    }
+    .node-drag-handle {
+      width: 18px;
+      min-width: 18px;
+      height: 26px;
+      padding: 0;
+      border: 1px solid rgba(54, 211, 153, .35);
+      border-radius: 6px;
+      color: var(--muted);
+      background: rgba(7, 18, 14, .68);
+      cursor: grab;
+      line-height: 1;
+      font-size: 13px;
+      font-weight: 900;
+    }
+    .node-drag-handle:hover {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+    .node-drag-handle:active,
+    .node-row.dragging .node-drag-handle {
+      cursor: grabbing;
+    }
+    .node-index-number {
+      min-width: 10px;
+      text-align: center;
+    }
+    .node-row.dragging {
+      opacity: .48;
+    }
+    .node-row.drag-over {
+      border-color: #ff3b4f;
+      box-shadow: 0 0 0 2px rgba(255, 59, 79, .36);
     }
     .node-name { min-width: 0; display: grid; gap: 3px; align-content: center; }
     .node-row.agent-row .node-name { grid-area: identity; }
@@ -2014,23 +2415,149 @@ HTML = r"""
     .row-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-start; min-width: 0; }
     .node-row.agent-row .row-actions { grid-area: actions; }
     .node-version-pill { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d6fff0; font-size: 12px; font-weight: 900; }
-    .role-row { min-height: 54px; }
-    .role-row .row-actions { grid-template-columns: repeat(2, minmax(72px, 1fr)); }
+    .role-row { position: relative; z-index: 0; min-height: 54px; }
+    .role-row.menu-open { z-index: 50; }
+    .role-row .row-actions { grid-template-columns: minmax(72px, 1fr); }
     .role-group + .role-group { margin-top: 12px; }
     .role-group-title { display: flex; justify-content: space-between; align-items: center; margin: 0 0 6px; color: #d6fff0; }
     .role-group-title .role-count { margin-left: 5px; color: var(--accent); font-size: 13px; }
     .role-row.disabled-role { opacity: 0.58; border-style: dashed; }
     .role-row.disabled-role:hover { opacity: 0.82; }
     .row-actions button.tiny { min-width: 54px; padding: 6px 7px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+    .hub-function-menu { position: relative; z-index: 1; min-width: 72px; }
+    .hub-function-menu[open] { z-index: 60; }
+    .hub-function-menu summary {
+      list-style: none;
+      cursor: pointer;
+      min-height: 30px;
+      padding: 6px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.045);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 850;
+      text-align: center;
+      user-select: none;
+    }
+    .hub-function-menu summary::-webkit-details-marker { display: none; }
+    .hub-function-menu summary::after { content: "..."; margin-left: 5px; color: var(--muted); }
+    .hub-function-menu[open] summary { border-color: var(--accent); color: var(--accent); }
+    .hub-function-menu .hub-function-popover {
+      position: absolute;
+      z-index: 20;
+      top: calc(100% + 5px);
+      right: 0;
+      display: grid;
+      gap: 4px;
+      min-width: 148px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #10231c;
+      box-shadow: 0 16px 32px rgba(0,0,0,.32);
+    }
+    .hub-function-menu .hub-function-popover button {
+      width: 100%;
+      min-height: 30px;
+      padding: 6px 8px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .hub-function-menu .hub-function-popover button:disabled { opacity: .55; cursor: default; }
     .settings-button { min-width: 34px !important; font-size: 14px !important; line-height: 1; }
     .role-settings-modal { width: min(520px, 100%); }
     .role-settings-status { display: grid; gap: 8px; }
     .role-settings-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 18, 14, 0.58); }
     .role-settings-item small { display: block; margin-top: 3px; color: var(--muted); }
     .role-settings-item .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .operation-progress-modal { width: min(560px, 100%); }
+    .operation-progress-target { color: var(--muted); font-size: 13px; }
+    .operation-progress-track { height: 12px; margin: 14px 0 8px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
+    .operation-progress-fill { display: block; width: 0%; height: 100%; background: var(--accent); transition: width 0.3s ease; }
+    .operation-progress-meta { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+    .operation-progress-meta strong { font-size: 22px; color: var(--text); }
+    .operation-progress-meta span { color: var(--muted); text-align: right; }
+    .operation-progress-steps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; margin: 16px 0 10px; padding: 0; list-style: none; }
+    .operation-progress-step { min-width: 0; padding-top: 7px; border-top: 2px solid var(--line); color: var(--muted); font-size: 11px; text-align: center; }
+    .operation-progress-step.active { border-color: var(--accent-2); color: var(--text); font-weight: 800; }
+    .operation-progress-step.done { border-color: var(--accent); color: #b7f7dc; }
+    .operation-progress-step.fail { border-color: var(--danger); color: #fecdd3; }
+    .operation-progress-message { min-height: 42px; margin: 8px 0 0; color: var(--muted); line-height: 1.45; white-space: pre-wrap; }
+    .operation-progress-modal.failed .operation-progress-fill { background: var(--danger); }
+    .operation-progress-modal.done .operation-progress-fill { background: var(--accent); }
     .control-transfer-box { display: grid; gap: 8px; margin-top: 10px; padding: 10px; border: 1px dashed var(--line); border-radius: 10px; background: rgba(7,18,14,.42); }
     .control-transfer-box h3 { margin: 0; font-size: 15px; }
     .control-transfer-box input { width: 100%; }
+    .control-transfer-box select { width: 100%; }
+    .tailscale-peer-list { display: grid; gap: 7px; }
+    .tailscale-peer-option { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: rgba(7,18,14,.5); text-align: left; }
+    .tailscale-peer-option:hover, .tailscale-peer-option:focus-visible { border-color: var(--accent); background: rgba(54,211,153,.1); }
+    .tailscale-peer-option small { grid-column: 1 / -1; color: var(--muted); }
+    .tailscale-peer-option strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tailscale-peer-option .peer-action { color: var(--accent); font-size: 12px; font-weight: 800; }
+    .tailscale-peer-toolbar { display: flex; justify-content: flex-end; }
+    .agent-discovery {
+      margin: 8px 0 10px;
+      padding: 9px 10px;
+      border: 1px solid rgba(54, 211, 153, 0.34);
+      border-radius: 8px;
+      background: rgba(54, 211, 153, 0.05);
+      overflow: hidden;
+    }
+    .agent-discovery-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      list-style: none;
+      cursor: pointer;
+      user-select: none;
+    }
+    .agent-discovery-head::-webkit-details-marker { display: none; }
+    .agent-discovery-head::after {
+      content: "";
+      width: 7px;
+      height: 7px;
+      flex: 0 0 7px;
+      margin-left: 10px;
+      border-right: 2px solid var(--accent);
+      border-bottom: 2px solid var(--accent);
+      transform: rotate(45deg);
+      transition: transform .16s ease;
+    }
+    .agent-discovery[open] .agent-discovery-head {
+      margin-bottom: 8px;
+      border-bottom: 1px solid rgba(49, 89, 76, .55);
+      padding-bottom: 8px;
+    }
+    .agent-discovery[open] .agent-discovery-head::after { transform: rotate(225deg); }
+    .agent-discovery-head strong, .agent-discovery-head small { display: block; }
+    .agent-discovery-head strong { font-size: 13px; }
+    .agent-discovery-head small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .agent-discovery-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+    .agent-discovery-list { display: grid; gap: 6px; margin-top: 8px; }
+    .agent-discovery-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 2px 10px;
+      width: 100%;
+      padding: 8px 9px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--text);
+      background: rgba(7, 18, 14, 0.38);
+      text-align: left;
+    }
+    button.agent-discovery-item { cursor: pointer; }
+    button.agent-discovery-item:hover, button.agent-discovery-item:focus-visible {
+      border-color: var(--accent);
+      background: rgba(54, 211, 153, 0.1);
+    }
+    .agent-discovery-item small { grid-column: 1 / -1; color: var(--muted); }
+    .agent-discovery-item .peer-action { color: var(--accent); font-size: 12px; font-weight: 800; }
+    .agent-discovery-item.is-known .peer-action { color: var(--accent-2); }
+    .agent-discovery-empty { color: var(--muted); font-size: 12px; }
     .choice-modal { width: min(560px, calc(100vw - 28px)); text-align: left; }
     .choice-modal .choice-icon { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 16px; background: rgba(251, 191, 36, .16); color: #ffd166; font-size: 24px; box-shadow: inset 0 0 0 1px rgba(251, 191, 36, .32); }
     .choice-modal .wizard-head { align-items: center; }
@@ -2592,7 +3119,7 @@ HTML = r"""
         <div class="resource-header">
           <div>
             <h2>资源管理模块</h2>
-            <p>当前 Agent 媒体、副本位置与 Profile 归属。</p>
+            <p>所有 Agent / Hub 的媒体、副本位置与 Profile 归属。</p>
           </div>
           <span class="pill">resource table</span>
         </div>
@@ -2640,6 +3167,15 @@ HTML = r"""
         <div class="node-role-split" id="nodeRoleSplit">
         <div class="role-group node-role-pane agent-role-pane">
           <h3 class="role-group-title"><span>Agent 节点 <strong class="role-count"><span id="agentNodeCount">0</span> 台</strong></span><small>Profile / 直播流 / 直播视频</small></h3>
+          <details class="agent-discovery" id="agentDiscoveryPanel" open>
+            <summary class="agent-discovery-head">
+              <span><strong>Tailnet 自动发现</strong><small id="agentDiscoverySummary">正在扫描在线 Agent...</small></span>
+            </summary>
+            <div class="agent-discovery-toolbar">
+              <button type="button" id="refreshAgentDiscoveryBtn" title="刷新 Tailnet Agent">刷新</button>
+            </div>
+            <div class="agent-discovery-list" id="agentDiscoveryList">正在读取 Tailnet 设备...</div>
+          </details>
           <div class="node-table" id="nodeList">加载中...</div>
         </div>
         <details class="role-group node-role-pane hub-role-pane" id="hubNodePane">
@@ -2651,7 +3187,7 @@ HTML = r"""
 
       <details class="card upload-card">
         <summary class="upload-summary">
-          <span><strong>上传模块</strong><small>浏览器直传当前 Agent</small></span>
+          <span><strong>上传模块</strong><small>浏览器直传当前 Agent 或 Hub 临时资源库</small></span>
           <span class="pill">按需展开</span>
         </summary>
         <div class="upload-body">
@@ -2681,7 +3217,7 @@ HTML = r"""
         </div>
         <button class="wizard-close" id="roleSettingsClose" aria-label="关闭">×</button>
       </div>
-      <div class="wizard-existing-grid">
+      <div class="wizard-existing-grid" id="roleSettingsNameSection">
         <div class="wizard-field">
           <label>机器显示名称</label>
           <input id="roleSettingsNameInput" type="text" maxlength="80" placeholder="输入容易识别的名称">
@@ -2689,19 +3225,41 @@ HTML = r"""
         <button id="roleSettingsSaveNameBtn">保存名称</button>
       </div>
       <div class="role-settings-status" id="roleSettingsActions"></div>
-      <div class="role-settings-item">
+      <div class="role-settings-item" id="roleSettingsNodeRecord">
         <span><strong>节点记录</strong><small>删除前会先迁移该节点独有资源；失败则保留节点记录。</small></span>
         <button class="danger" id="roleSettingsDeleteNodeBtn">删除节点</button>
       </div>
-      <div class="control-transfer-box">
-        <h3>Hub 控制转移 / 换平台</h3>
-        <p>把当前 Hub 的节点信息合并导入到新 Hub，新 Hub 会接管这些 Agent / Hub 节点的控制入口。</p>
-        <input id="transferHubUrlInput" placeholder="新 Hub Tailscale IP 或地址，例如 100.x.x.x">
-        <input id="transferHubTokenInput" placeholder="新 Hub 控制 Token（如果新 Hub 设置了 Token）">
-        <button id="transferHubNodesBtn" class="primary">转移当前 Hub 节点信息到新 Hub</button>
+      <div class="control-transfer-box" id="roleSettingsTransferBox">
+        <h3>更换控制 Hub</h3>
+        <p>选择已激活且在线的 Hub，系统会自动转移节点信息并打开新控制台。</p>
+        <select id="transferHubNodeSelect" aria-label="选择新的控制 Hub">
+          <option value="">正在读取可用 Hub...</option>
+        </select>
+        <button id="transferHubNodesBtn" class="primary">一键转移并打开新 Hub</button>
         <button id="syncAllHubsBtn">同步节点信息到所有已激活 Hub</button>
       </div>
       <p>保护规则：点击操作后还会显示当前状态与影响范围，必须再次确认才会执行。</p>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="operationProgressModal" aria-hidden="true">
+    <div class="wizard-modal operation-progress-modal" role="dialog" aria-modal="true" aria-labelledby="operationProgressTitle">
+      <div class="wizard-head">
+        <div>
+          <h2 id="operationProgressTitle">操作进行中</h2>
+          <p id="operationProgressTarget" class="operation-progress-target"></p>
+        </div>
+        <button class="wizard-close" id="operationProgressClose" aria-label="关闭" disabled>×</button>
+      </div>
+      <div class="operation-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="操作进度">
+        <span class="operation-progress-fill" id="operationProgressFill"></span>
+      </div>
+      <div class="operation-progress-meta">
+        <strong id="operationProgressPercent">0%</strong>
+        <span id="operationProgressStage">准备提交任务</span>
+      </div>
+      <ol class="operation-progress-steps" id="operationProgressSteps"></ol>
+      <p class="operation-progress-message" id="operationProgressMessage"></p>
     </div>
   </div>
 
@@ -2751,20 +3309,16 @@ HTML = r"""
       <div class="wizard-head">
         <div>
           <h2 id="tailscaleWizardTitle">Agent 快速连接</h2>
-          <p>输入 Agent 的 Tailscale IP。Hub 会自动完成网络、服务和权限检查。</p>
+          <p>加入同一 Tailnet 后，Hub 会自动识别已安装 Agent；点击节点即可完成接入。</p>
         </div>
         <button class="wizard-close" id="tailscaleWizardClose" title="关闭">X</button>
       </div>
-      <div class="wizard-existing-grid">
-        <div class="wizard-field">
-          <label>Tailscale IP</label>
-          <input id="tailscaleExistingIpInput" type="text" autocomplete="off" placeholder="100.x.x.x">
+      <div class="wizard-status">
+        <div class="wizard-status-line"><strong>选择在线设备</strong><span>点击设备即可自动检测、配对并绑定到当前 Hub。</span></div>
+        <div class="tailscale-peer-toolbar">
+          <button id="refreshTailscalePeersBtn" type="button">刷新设备</button>
         </div>
-        <div class="wizard-field">
-          <label>Agent Token</label>
-          <input id="tailscaleExistingTokenInput" type="password" autocomplete="off" placeholder="optional">
-        </div>
-        <button class="primary wide-action" id="tailscaleUseExistingIpBtn">检测并连接</button>
+        <div class="tailscale-peer-list" id="tailscalePeerList">正在读取 Tailnet 设备...</div>
       </div>
       <div class="wizard-status">
         <div class="wizard-status-line"><strong>目标 VPS 尚未安装 Agent？</strong></div>
@@ -2772,7 +3326,7 @@ HTML = r"""
         <button id="copyAgentInstallBtn">复制一键安装命令</button>
       </div>
       <div class="wizard-status" id="tailscaleWizardLog">
-        <div class="wizard-status-line">请输入目标 Agent 的 100.x Tailscale IP。</div>
+        <div class="wizard-status-line">等待发现同一 Tailnet 中的 Agent。</div>
       </div>
     </div>
   </div>
@@ -2919,18 +3473,29 @@ HTML = r"""
       roleSettingsTitle: document.getElementById("roleSettingsTitle"),
       roleSettingsSummary: document.getElementById("roleSettingsSummary"),
       roleSettingsActions: document.getElementById("roleSettingsActions"),
+      roleSettingsNameSection: document.getElementById("roleSettingsNameSection"),
       roleSettingsNameInput: document.getElementById("roleSettingsNameInput"),
       roleSettingsSaveNameBtn: document.getElementById("roleSettingsSaveNameBtn"),
       roleSettingsDeleteNodeBtn: document.getElementById("roleSettingsDeleteNodeBtn"),
+      roleSettingsNodeRecord: document.getElementById("roleSettingsNodeRecord"),
+      roleSettingsTransferBox: document.getElementById("roleSettingsTransferBox"),
       roleSettingsClose: document.getElementById("roleSettingsClose"),
+      operationProgressModal: document.getElementById("operationProgressModal"),
+      operationProgressTitle: document.getElementById("operationProgressTitle"),
+      operationProgressTarget: document.getElementById("operationProgressTarget"),
+      operationProgressClose: document.getElementById("operationProgressClose"),
+      operationProgressFill: document.getElementById("operationProgressFill"),
+      operationProgressPercent: document.getElementById("operationProgressPercent"),
+      operationProgressStage: document.getElementById("operationProgressStage"),
+      operationProgressSteps: document.getElementById("operationProgressSteps"),
+      operationProgressMessage: document.getElementById("operationProgressMessage"),
       choiceModal: document.getElementById("choiceModal"),
       choiceIcon: document.getElementById("choiceIcon"),
       choiceTitle: document.getElementById("choiceTitle"),
       choiceSubtitle: document.getElementById("choiceSubtitle"),
       choiceMessage: document.getElementById("choiceMessage"),
       choiceActions: document.getElementById("choiceActions"),
-      transferHubUrlInput: document.getElementById("transferHubUrlInput"),
-      transferHubTokenInput: document.getElementById("transferHubTokenInput"),
+      transferHubNodeSelect: document.getElementById("transferHubNodeSelect"),
       transferHubNodesBtn: document.getElementById("transferHubNodesBtn"),
       syncAllHubsBtn: document.getElementById("syncAllHubsBtn"),
       editableHubTitle: document.getElementById("editableHubTitle"),
@@ -2969,9 +3534,12 @@ HTML = r"""
       tailscaleWizardModal: document.getElementById("tailscaleWizardModal"),
       tailscaleWizardClose: document.getElementById("tailscaleWizardClose"),
       tailscaleWizardLog: document.getElementById("tailscaleWizardLog"),
-      tailscaleExistingIpInput: document.getElementById("tailscaleExistingIpInput"),
-      tailscaleExistingTokenInput: document.getElementById("tailscaleExistingTokenInput"),
-      tailscaleUseExistingIpBtn: document.getElementById("tailscaleUseExistingIpBtn"),
+      tailscalePeerList: document.getElementById("tailscalePeerList"),
+      refreshTailscalePeersBtn: document.getElementById("refreshTailscalePeersBtn"),
+      agentDiscoveryPanel: document.getElementById("agentDiscoveryPanel"),
+      agentDiscoverySummary: document.getElementById("agentDiscoverySummary"),
+      agentDiscoveryList: document.getElementById("agentDiscoveryList"),
+      refreshAgentDiscoveryBtn: document.getElementById("refreshAgentDiscoveryBtn"),
       agentInstallCommand: document.getElementById("agentInstallCommand"),
       copyAgentInstallBtn: document.getElementById("copyAgentInstallBtn"),
       mediaInput: document.getElementById("mediaInput"),
@@ -3041,13 +3609,21 @@ HTML = r"""
     }, true);
     let nodes = [];
     let mediaLibrary = { resources: [], nodes: [], duplicate_retention: [] };
+    let localRoleStatus = null;
+    let activeOperationProgress = null;
+    let operationProgressTimer = null;
+    let operationProgressPollInFlight = false;
     const AGENT_SLOT_COUNT = 10;
+    let agentOrder = [];
+    let agentOrderSavePromise = Promise.resolve();
+    let draggedAgentId = "";
     let openResourceNodeId = "";
     let resourceAllMode = false;
     let resourceTableFilters = { name: "", size: "", age: "", profile: "", ownerNode: "" };
     let resourceNameFilterTimer = null;
     const PROFILE_FILTER_VISIBLE_SLOTS = 6;
     const MONITOR_DISCLOSURE_STORAGE_KEY = "streamHub.monitorSections";
+    const AGENT_DISCOVERY_DISCLOSURE_STORAGE_KEY = "streamHub.agentDiscoveryOpen";
 
     function monitorDisclosureState() {
       try {
@@ -3073,17 +3649,117 @@ HTML = r"""
         // Browser storage may be unavailable in private or restricted contexts.
       }
     }
+
+    function agentDiscoveryOpen() {
+      try {
+        const stored = localStorage.getItem(AGENT_DISCOVERY_DISCLOSURE_STORAGE_KEY);
+        return stored === null ? true : stored === "1";
+      } catch (_) {
+        return true;
+      }
+    }
+
+    function rememberAgentDiscoveryDisclosure(open) {
+      try {
+        localStorage.setItem(AGENT_DISCOVERY_DISCLOSURE_STORAGE_KEY, open ? "1" : "0");
+      } catch (_) {
+        // Browser storage may be unavailable in private or restricted contexts.
+      }
+    }
+
+    function initializeAgentDiscoveryDisclosure() {
+      if (!refs.agentDiscoveryPanel) return;
+      refs.agentDiscoveryPanel.addEventListener("toggle", (event) => {
+        rememberAgentDiscoveryDisclosure(Boolean(event.target.open));
+      });
+      refs.agentDiscoveryPanel.open = agentDiscoveryOpen();
+    }
+
     function initializeDashboardLayout() {
       if (!refs.dashboardGrid) return;
       refs.dashboardGrid.classList.add("fixed-layout-ready");
     }
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
-    let HUB_LOCAL_NODE_ID = "hub-local";
+    let HUB_LOCAL_NODE_ID = "__local_hub__";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
     function rememberSelectedNode(nodeId) {
       selectedNodeId = String(nodeId || "");
       if (selectedNodeId) localStorage.setItem(LAST_NODE_STORAGE_KEY, selectedNodeId);
       else localStorage.removeItem(LAST_NODE_STORAGE_KEY);
+    }
+
+    function normalizedAgentOrder(order = agentOrder, sourceNodes = nodes) {
+      const knownIds = new Set(
+        (sourceNodes || [])
+          .map((node) => String(node?.id || "").trim())
+          .filter(Boolean),
+      );
+      const result = [];
+      const seen = new Set();
+      const candidates = Array.isArray(order) ? order : [];
+      candidates.forEach((value) => {
+        const id = String(value || "").trim();
+        if (!id || !knownIds.has(id) || seen.has(id)) return;
+        seen.add(id);
+        result.push(id);
+      });
+      knownIds.forEach((id) => {
+        if (!seen.has(id)) result.push(id);
+      });
+      return result;
+    }
+
+    function syncAgentOrder(sourceNodes = nodes) {
+      const next = normalizedAgentOrder(agentOrder, sourceNodes);
+      const changed = JSON.stringify(next) !== JSON.stringify(agentOrder);
+      agentOrder = next;
+      return changed;
+    }
+
+    function orderedAgentRows(rows) {
+      const order = normalizedAgentOrder(agentOrder, nodes);
+      const rank = new Map(order.map((id, index) => [id, index]));
+      return [...rows].sort((left, right) => (
+        (rank.get(String(left.id || "")) ?? Number.MAX_SAFE_INTEGER)
+        - (rank.get(String(right.id || "")) ?? Number.MAX_SAFE_INTEGER)
+      ));
+    }
+
+    function saveAgentOrder(order = agentOrder) {
+      const payloadOrder = normalizedAgentOrder(order, nodes);
+      agentOrder = payloadOrder;
+      agentOrderSavePromise = agentOrderSavePromise
+        .catch(() => null)
+        .then(async () => {
+          const data = await postJson("/api/settings", { agent_order: payloadOrder });
+          if (!data.ok) throw new Error(data.message || "Agent 顺序保存失败");
+          if (Array.isArray(data.agent_order)) agentOrder = normalizedAgentOrder(data.agent_order, nodes);
+          log("AGENT 顺序已保存");
+          return data;
+        });
+      agentOrderSavePromise.catch((error) => log(friendlyError(error, "AGENT 顺序保存失败")));
+      return agentOrderSavePromise;
+    }
+
+    function moveAgentInOrder(sourceId, targetId, insertBefore) {
+      const source = String(sourceId || "");
+      const target = String(targetId || "");
+      if (!source || !target || source === target) return false;
+      const next = normalizedAgentOrder(agentOrder, nodes).filter((id) => id !== source);
+      const targetIndex = next.indexOf(target);
+      if (targetIndex < 0) return false;
+      next.splice(insertBefore ? targetIndex : targetIndex + 1, 0, source);
+      agentOrder = next;
+      renderNodes();
+      saveAgentOrder(next);
+      return true;
+    }
+
+    function clearAgentDragState() {
+      draggedAgentId = "";
+      refs.nodeList.querySelectorAll(".dragging, .drag-over").forEach((row) => {
+        row.classList.remove("dragging", "drag-over");
+      });
     }
     let lastTuneRecommendation = null;
     let activeUpload = null;
@@ -3095,11 +3771,14 @@ HTML = r"""
     let youtubeStreamsByProfile = {};
     let youtubeStreamLoadState = {};
     let youtubeStreamLoadedAt = {};
+    let tailscaleStatusCache = null;
     const YOUTUBE_PROFILE_VISIBLE_SLOTS = 6;
     const YOUTUBE_STREAM_CACHE_TTL_MS = 2 * 60 * 1000;
     const YOUTUBE_PROFILE_REFRESH_MS = 5 * 60 * 1000;
     const AGENT_STREAM_REFRESH_MS = 5 * 60 * 1000;
+    const TAILSCALE_DISCOVERY_REFRESH_MS = 30 * 1000;
     let agentStreamRefreshInFlight = false;
+    let tailscaleRefreshInFlight = null;
     let editingYouTubeProfileId = "";
     let youtubeProfileClickTimer = null;
 
@@ -3155,16 +3834,17 @@ HTML = r"""
       const state = prerequisiteSnapshot();
       renderChecklist(state);
       const missing = [];
+      const uploadNode = selectedUploadNode();
       if (!state.nodeReady) missing.push("选择推流服务器");
       if (!state.hasVideo) missing.push("选择视频");
       if (!state.hasTarget) missing.push(state.youtubeApiMode ? "选择 YouTube 直播流" : state.relayMode ? "" : "填写直播码");
       const smartReady = state.nodeReady && state.hasVideo && state.hasTarget;
       const previewReady = state.nodeReady && state.hasVideo;
-      const uploadReady = state.nodeReady && state.hasUploadFile && !activeUpload;
+      const uploadReady = Boolean(uploadNode?.id) && uploadNode.enabled !== false && state.hasUploadFile && !activeUpload;
       const hubUploadReady = state.hasUploadFile && !activeUpload;
       setButtonReady(refs.previewTuneBtn, previewReady, previewReady ? "" : "先选择推流服务器和视频");
       setButtonReady(refs.smartStartBtn, smartReady, smartReady ? "" : `还缺少：${missing.filter(Boolean).join("、")}`);
-      setButtonReady(refs.uploadBtn, uploadReady, uploadReady ? "" : state.nodeReady ? "先选择一个视频文件" : "先选择推流服务器");
+      setButtonReady(refs.uploadBtn, uploadReady, uploadReady ? "" : uploadNode?.id ? "先选择一个视频文件" : "先选择 Agent 或 Hub");
       setButtonReady(refs.uploadHubBtn, hubUploadReady, hubUploadReady ? "" : "先选择一个视频文件");
       if (!nodes.length) {
         uiMessage("还没有推流服务器。点击“接入节点”，输入 Tailscale 100.x 地址即可接入。");
@@ -3220,7 +3900,7 @@ HTML = r"""
     }
 
     function statusSummaryText() {
-      const agentRows = nodes.filter((node) => Boolean(node.roles?.agent?.enabled));
+      const agentRows = nodes.filter(shouldShowAgentNode);
       const onlineAgents = agentRows.filter((node) => nodeOnline(node)).length;
       const streamingAgents = agentRows.filter((node) => nodeStreaming(node)).length;
       const resources = mediaLibrary.resources || [];
@@ -3736,7 +4416,40 @@ HTML = r"""
     }
 
     function selectedNode() {
-      return nodes.find((node) => String(node.id) === String(selectedNodeId)) || nodes[0] || null;
+      return nodes.find((node) => shouldShowAgentNode(node) && String(node.id) === String(selectedNodeId))
+        || nodes.find((node) => shouldShowAgentNode(node))
+        || null;
+    }
+
+    function isLocalHubNodeId(nodeId) {
+      return String(nodeId || "") === "__local_hub__";
+    }
+
+    function mediaNodeById(nodeId) {
+      const id = String(nodeId || "");
+      if (!id) return null;
+      return (mediaLibrary.nodes || []).find((item) => String(item.node_id || "") === id)
+        || nodes.find((node) => String(node.id || "") === id)
+        || null;
+    }
+
+    function resourceScopeNode() {
+      return mediaNodeById(openResourceNodeId);
+    }
+
+    function selectedUploadNode() {
+      const scope = resourceScopeNode();
+      if (!resourceAllMode && scope && scope.role === "hub") {
+        return nodes.find((node) => String(node.id || "") === String(scope.node_id || ""))
+          || {
+            id: scope.node_id,
+            name: scope.node_name,
+            role: "hub",
+            is_local_hub: Boolean(scope.is_local_hub),
+            hub_only: true,
+          };
+      }
+      return selectedNode();
     }
 
     function autotuneParameterText(parameters = {}) {
@@ -3859,7 +4572,10 @@ HTML = r"""
       const agentVersion = h.agent?.version || "未识别";
       return `
         <div class="node-row agent-row ${streaming ? "running" : ""} ${selected ? "selected" : ""} ${online ? "" : "offline-node"}" data-node-row data-node-id="${escapeHtml(node.id)}" title="点击选中；删除/取消角色请打开后面的设置">
-          <span class="node-index">${rowIndex + 1}</span>
+          <span class="node-index">
+            <button type="button" class="node-drag-handle" data-node-drag-handle data-node-id="${escapeHtml(node.id)}" draggable="true" title="按住拖动排序" aria-label="拖动 Agent 排序">↕</button>
+            <span class="node-index-number">${rowIndex + 1}</span>
+          </span>
           <span class="node-name">
             <span class="node-agent-line">
               <strong class="node-name-edit" data-node-name-edit data-node-id="${escapeHtml(node.id)}" title="双击修改 Agent 名称">${escapeHtml(node.name || node.id)}</strong>
@@ -3899,44 +4615,86 @@ HTML = r"""
     function renderHubRow(node) {
       const role = node.roles?.hub || {};
       const enabled = Boolean(role.enabled);
+      const pending = Boolean(role.activation_pending);
       const version = role.version || "未安装";
-      const current = enabled && role.url && sameOriginUrl(role.url);
+      const agentRole = node.roles?.agent || {};
+      const agentPending = Boolean(agentRole.activation_pending);
+      const agentEnabled = Boolean(agentRole.enabled);
       return `
-        <div class="node-row role-row ${current ? "control-hub" : ""}" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
-          <span>${stateDot(enabled, false)}</span>
-          <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>${current ? "当前控制 Hub · " : ""}Hub 版本 ${escapeHtml(version)}</small><span class="node-profile-label">Profile</span><select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="选择这个 Hub 隶属的 YouTube Profile">${profileOptions(nodeProfileId(node))}</select></span>
-          <span class="node-state">${current ? "控制中" : enabled ? "已启用" : "未启用"}</span>
+        <div class="node-row role-row" data-hub-row data-node-id="${escapeHtml(node.id)}" data-hub-url="${escapeHtml(role.url || "")}">
+          <span>${stateDot(enabled, pending)}</span>
+          <span class="node-name"><strong>${escapeHtml(node.name || node.id)}</strong><small>Hub 版本 ${escapeHtml(version)}</small><span class="node-profile-label">Profile</span><select class="node-profile-select" data-node-profile-select data-node-id="${escapeHtml(node.id)}" title="选择这个 Hub 隶属的 YouTube Profile">${profileOptions(nodeProfileId(node))}</select></span>
+          <span class="node-state">${enabled ? "已启用" : pending ? "激活中" : "未启用"}</span>
           <span class="node-state">8788</span>
           <span class="row-actions">
-            <button class="tiny" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}">${current ? "当前 Hub" : "切换 Hub"}</button>
-            <button class="tiny settings-button" data-role-settings data-node-id="${escapeHtml(node.id)}" title="节点角色设置" aria-label="节点角色设置">⚙</button>
+            <details class="hub-function-menu" data-hub-function-menu>
+              <summary>功能</summary>
+              <div class="hub-function-popover">
+                <button type="button" data-hub-action="view-resources" data-node-id="${escapeHtml(node.id)}">查看资源</button>
+                <button type="button" data-role-action="switch-hub" data-node-id="${escapeHtml(node.id)}">切换 Hub</button>
+                ${agentEnabled
+                  ? `<button type="button" disabled>Agent 已加入</button>`
+                  : `<button type="button" class="${agentPending ? "" : "primary"}" data-role-action="activate-role" data-role="agent" data-node-id="${escapeHtml(node.id)}">${agentPending ? "Agent 激活中" : "激活 Agent"}</button>`}
+                <button type="button" data-role-settings data-node-id="${escapeHtml(node.id)}">角色设置</button>
+              </div>
+            </details>
+          </span>
+        </div>
+      `;
+    }
+
+    function localHubRole() {
+      return localRoleStatus?.roles?.hub || {};
+    }
+
+    function localHubEnabled() {
+      return Boolean(localHubRole().enabled);
+    }
+
+    function renderLocalHubRow() {
+      const role = localHubRole();
+      const version = role.version || "本地版本";
+      const agentRole = localRoleStatus?.roles?.agent || {};
+      const agentEnabled = Boolean(agentRole.enabled);
+      const agentPending = Boolean(agentRole.activation_pending);
+      return `
+        <div class="node-row role-row control-hub" data-hub-row data-local-hub-row>
+          <span>${stateDot(true, false)}</span>
+          <span class="node-name"><strong>当前控制 Hub</strong><small>本机控制台 · Hub 版本 ${escapeHtml(version)}</small><span class="node-profile-label">Profile ${escapeHtml(profileName(activeYouTubeProfileId))}</span></span>
+          <span class="node-state">控制中</span>
+          <span class="node-state">8788</span>
+          <span class="row-actions">
+            <button class="tiny settings-button" data-local-role-settings title="当前 Hub 功能设置" aria-label="当前 Hub 功能设置">⚙</button>
           </span>
         </div>
       `;
     }
 
     function renderNodes() {
-      const nodeHasResources = (nodeId) => (mediaLibrary.resources || []).some((resource) => resourceHasNode(resource, nodeId));
-      const shouldShowAgentRow = (node) => {
-        const nodeId = String(node.id || "");
-        const agentEnabled = Boolean(node.roles?.agent?.enabled);
-        return node.enabled !== false && (agentEnabled || nodeHasResources(nodeId));
-      };
-      const agentRows = nodes.filter(shouldShowAgentRow);
-      const activeHubs = nodes.filter((node) => Boolean(node.roles?.hub?.enabled));
+      const agentRows = orderedAgentRows(nodes.filter(shouldShowAgentNode));
+      const activeHubs = nodes.filter((node) => {
+        const role = node.roles?.hub || {};
+        return Boolean(role.enabled || role.activation_pending)
+          && !sameOriginUrl(role.url || "");
+      });
+      const visibleHubCount = activeHubs.length + (localHubEnabled() ? 1 : 0);
       const onlineAgentCount = agentRows.filter((node) => Boolean(node.roles?.agent?.enabled)).length;
       const agentCapacity = Math.max(AGENT_SLOT_COUNT, agentRows.length);
       refs.agentNodeCount.textContent = `${onlineAgentCount}/${agentCapacity}`;
-      refs.hubNodeCount.textContent = String(activeHubs.length);
+      refs.hubNodeCount.textContent = String(visibleHubCount);
+      renderTransferHubOptions();
       if (!nodes.length) {
         refs.nodeMonitor.innerHTML = renderMonitor(null);
         refs.nodeList.innerHTML = `<div class="guided-empty"><strong>等待接入 Agent</strong><span>点击“接入推流服务器”，或先复制一键安装命令到目标 VPS。</span><button class="primary" data-open-connect>连接 Agent</button></div>`;
-        refs.hubNodeList.innerHTML = `<div class="empty-state">还没有激活的 Hub。</div>`;
+        refs.hubNodeList.innerHTML = localHubEnabled() ? `
+          <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
+          ${renderLocalHubRow()}
+        ` : `<div class="empty-state">还没有激活的 Hub。</div>`;
         updatePrimaryActionStates();
         return;
       }
-      if (!nodes.some((node) => String(node.id) === String(selectedNodeId))) {
-        rememberSelectedNode(nodes[0].id || "");
+      if (!agentRows.some((node) => String(node.id) === String(selectedNodeId))) {
+        rememberSelectedNode(agentRows[0]?.id || "");
       }
       refs.nodeMonitor.innerHTML = renderMonitor(selectedNode());
       refs.nodeList.innerHTML = agentRows.length ? `
@@ -3949,8 +4707,9 @@ HTML = r"""
         </div>
         ${agentRows.map((node, index) => renderNodeRow(node, index)).join("")}
       ` : `<div class="empty-state">还没有配置 Agent 节点。</div>`;
-      refs.hubNodeList.innerHTML = activeHubs.length ? `
+      refs.hubNodeList.innerHTML = visibleHubCount ? `
         <div class="node-table-head"><span></span><span>Hub 节点</span><span>状态</span><span>端口</span><span>操作</span></div>
+        ${localHubEnabled() ? renderLocalHubRow() : ""}
         ${activeHubs.map((node) => renderHubRow(node)).join("")}
       ` : `<div class="empty-state">还没有已激活的 Hub。</div>`;
       updatePrimaryActionStates();
@@ -3994,23 +4753,43 @@ HTML = r"""
       return (item.copies || []).some((copy) => String(copy.node_id || "") === String(nodeId));
     }
 
+    function nodeHasResources(nodeId) {
+      return (mediaLibrary.resources || []).some((resource) => resourceHasNode(resource, nodeId));
+    }
+
+    function isHubOnlyNode(node) {
+      const hubRole = node?.roles?.hub || {};
+      const hubEnabled = Boolean(node?.hub_only || hubRole.enabled || hubRole.activation_pending);
+      const agentEnabled = Boolean(node?.roles?.agent?.enabled);
+      return hubEnabled && !agentEnabled;
+    }
+
+    function shouldShowAgentNode(node) {
+      const agentRole = node?.roles?.agent || {};
+      const agentPresent = Boolean(agentRole.present || agentRole.enabled);
+      return node?.enabled !== false && !isHubOnlyNode(node)
+        && (agentPresent || nodeHasResources(String(node?.id || "")));
+    }
+
     function renderNodeSpaceRings(nodeDisks) {
-      const diskByNodeId = new Map((nodeDisks || []).map((item) => [String(item.node_id || ""), item]));
       const nodeHasResources = (nodeId) => (mediaLibrary.resources || []).some((resource) => resourceHasNode(resource, nodeId));
-      const merged = nodes.filter((node) => {
+      const merged = [...(nodeDisks || [])];
+      const knownIds = new Set(merged.map((item) => String(item.node_id || "")));
+      nodes.filter((node) => {
         const nodeId = String(node.id || "");
-        return Boolean(node.roles?.agent?.enabled) || nodeHasResources(nodeId);
-      }).map((node) => {
+        return !knownIds.has(nodeId) && (Boolean(node.roles?.agent?.enabled) || nodeHasResources(nodeId));
+      }).forEach((node) => {
         const nodeId = String(node.id || "");
-        return diskByNodeId.get(nodeId) || {
+        merged.push({
           node_id: nodeId,
           node_name: node.name || node.id || "Agent",
+          role: node.roles?.hub?.enabled ? "hub" : "agent",
           online: false,
           total: 0,
           used: 0,
           free: 0,
           percent: 0,
-        };
+        });
       });
       const knownNodeIds = new Set(nodes.map((node) => String(node.id || "")));
       (nodeDisks || []).filter((item) => !knownNodeIds.has(String(item.node_id || ""))).forEach((item) => {
@@ -4056,7 +4835,7 @@ HTML = r"""
     }
 
     function resourceEntriesForScope(resources) {
-      const scopeNodeId = resourceAllMode ? "" : String(openResourceNodeId || selectedNodeId || "");
+      const scopeNodeId = resourceAllMode ? "" : String(openResourceNodeId || "");
       return resources.flatMap((item) => {
         const copies = (item.copies || []).filter((copy) => !scopeNodeId || String(copy.node_id || "") === scopeNodeId);
         return copies.map((copy) => ({ item, copy }));
@@ -4101,13 +4880,10 @@ HTML = r"""
       const selectedProfileOptions = profileFilterOptions(resourceTableFilters.profile);
       const selectedOwnerNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.ownerNode) + '"', 'value="' + escapeHtml(resourceTableFilters.ownerNode) + '" selected');
       const resourceNameOptions = allResources.map((item) => `<option value="${escapeHtml(item.name || "")}"></option>`).join("");
-      const scopeNode = resourceAllMode
-        ? null
-        : (nodes.find((node) => String(node.id) === String(openResourceNodeId || selectedNodeId))
-          || (mediaLibrary.nodes || []).find((node) => String(node.node_id) === String(openResourceNodeId || selectedNodeId)));
+      const scopeNode = resourceAllMode ? null : resourceScopeNode();
       const scopeLabel = scopeNode
-        ? `${scopeNode.name || scopeNode.node_name || scopeNode.id || scopeNode.node_id} 的资源`
-        : "全部资源";
+        ? `${scopeNode.node_name || scopeNode.name || scopeNode.node_id || scopeNode.id} 的${scopeNode.role === "hub" ? " Hub" : " Agent"}资源`
+        : "全部节点资源";
       refs.mediaList.innerHTML = `
         <div class="media-toolbar">
           <strong>${scopeLabel}${resourceTableFilters.profile ? ` · ${profileName(resourceTableFilters.profile)}` : ""}</strong>
@@ -5096,24 +5872,29 @@ HTML = r"""
       uiMessage("正在刷新 Hub、Agent 和资源状态...");
       showDiagnostics("正在刷新状态，请稍候...", { scroll: false });
       try {
-        const [nodeResp, libraryResp] = await Promise.all([
+        const [nodeResp, libraryResp, settingsResp, roleResp] = await Promise.all([
           fetch("/api/nodes"),
           fetch("/api/media-library"),
+          fetch("/api/settings").catch(() => null),
+          fetch("/api/role-status").catch(() => null),
           loadYouTubeProfiles().catch(() => null),
         ]);
         if (!nodeResp.ok) throw new Error(nodeResp.statusText || "节点状态读取失败");
         if (!libraryResp.ok) throw new Error(libraryResp.statusText || "媒体库读取失败");
+        if (settingsResp?.ok) applyHubSettings(await settingsResp.json());
+        localRoleStatus = roleResp?.ok ? await roleResp.json() : null;
         nodes = await nodeResp.json();
         mediaLibrary = await libraryResp.json();
-        const hubLocalNode = (mediaLibrary.nodes || []).find((item) => item && item.hub_local);
+        const hubLocalNode = (mediaLibrary.nodes || []).find((item) => item && (item.hub_local || item.is_local_hub));
         if (hubLocalNode && hubLocalNode.node_id) {
           HUB_LOCAL_NODE_ID = String(hubLocalNode.node_id);
         }
+        if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
         renderNodes();
         renderMedia();
         renderStreamControls();
         renderYouTubeAgentList();
-        renderTailscaleNodeOptions();
+        await refreshTailscalePeers({ silent: true });
         preloadNodeYouTubeStreams({ force: true });
         showDiagnostics(statusSummaryText(), { scroll: false });
         uiMessage("状态已刷新。AGENT 表、资源管理和开播表单已经更新。");
@@ -5128,6 +5909,232 @@ HTML = r"""
       }
     }
 
+    function operationProgressSteps(operation) {
+      if (operation.kind === "upgrade") return ["提交升级", "拉取代码", "重启服务", "验证版本", "完成"];
+      if (operation.action === "deactivate") return ["提交任务", "停止旧角色", "清理元数据", "验证状态", "完成"];
+      return ["提交任务", "清理旧角色", "等待新服务", "验证角色", "完成"];
+    }
+
+    function renderOperationProgressSteps() {
+      const operation = activeOperationProgress;
+      if (!operation || !refs.operationProgressSteps) return;
+      refs.operationProgressSteps.innerHTML = operation.steps.map((label, index) => {
+        const state = operation.failed && index === operation.step
+          ? "fail"
+          : index < operation.step
+            ? "done"
+            : index === operation.step && !operation.terminal
+              ? "active"
+              : "";
+        return `<li class="operation-progress-step ${state}">${escapeHtml(label)}</li>`;
+      }).join("");
+    }
+
+    function setOperationProgress(patch = {}) {
+      if (!activeOperationProgress) return;
+      Object.assign(activeOperationProgress, patch);
+      const operation = activeOperationProgress;
+      const percent = Math.max(0, Math.min(100, Number(operation.percent || 0)));
+      refs.operationProgressFill.style.width = `${percent}%`;
+      refs.operationProgressPercent.textContent = `${Math.round(percent)}%`;
+      refs.operationProgressStage.textContent = operation.stage || "正在处理";
+      refs.operationProgressMessage.textContent = operation.message || "";
+      refs.operationProgressTarget.textContent = operation.target || "";
+      refs.operationProgressModal.classList.toggle("done", Boolean(operation.terminal && !operation.failed));
+      refs.operationProgressModal.classList.toggle("failed", Boolean(operation.failed));
+      refs.operationProgressModal.querySelector(".operation-progress-track")
+        ?.setAttribute("aria-valuenow", String(Math.round(percent)));
+      renderOperationProgressSteps();
+    }
+
+    function openOperationProgress(operation) {
+      if (!refs.operationProgressModal) return;
+      refs.operationProgressTitle.textContent = operation.title || "操作进行中";
+      refs.operationProgressClose.disabled = true;
+      refs.operationProgressModal.classList.remove("done", "failed");
+      refs.operationProgressModal.classList.add("open");
+      refs.operationProgressModal.setAttribute("aria-hidden", "false");
+      setOperationProgress({
+        percent: 5,
+        step: 0,
+        stage: "准备提交任务",
+        message: "正在提交后台任务，请不要重复点击。",
+      });
+    }
+
+    function finishOperationProgress(ok, message) {
+      if (!activeOperationProgress) return;
+      setOperationProgress({
+        percent: ok ? 100 : activeOperationProgress.percent,
+        step: ok ? 4 : activeOperationProgress.step,
+        stage: ok ? "已完成" : "操作失败",
+        message,
+        terminal: true,
+        failed: !ok,
+      });
+      refs.operationProgressClose.disabled = false;
+      if (operationProgressTimer) {
+        window.clearTimeout(operationProgressTimer);
+        operationProgressTimer = null;
+      }
+    }
+
+    function closeOperationProgress() {
+      if (!refs.operationProgressModal || !activeOperationProgress?.terminal) return;
+      if (operationProgressTimer) {
+        window.clearTimeout(operationProgressTimer);
+        operationProgressTimer = null;
+      }
+      activeOperationProgress = null;
+      refs.operationProgressModal.classList.remove("open", "done", "failed");
+      refs.operationProgressModal.setAttribute("aria-hidden", "true");
+      refs.operationProgressClose.disabled = true;
+    }
+
+    function beginOperationProgress({ kind, action = "", role = "", nodeId = "", nodeName = "", local = false, targetVersion = "" }) {
+      if (operationProgressTimer) window.clearTimeout(operationProgressTimer);
+      const label = role === "hub" ? "Hub" : "Agent";
+      const title = kind === "upgrade" ? `${label} 系统升级` : `${label} 角色转换`;
+      activeOperationProgress = {
+        kind,
+        action,
+        role,
+        nodeId: String(nodeId || ""),
+        nodeName: nodeName || nodeId || "当前节点",
+        local: Boolean(local),
+        targetVersion: String(targetVersion || ""),
+        startedAt: Date.now(),
+        percent: 5,
+        step: 0,
+        stage: "准备提交任务",
+        message: "正在提交后台任务，请不要重复点击。",
+        terminal: false,
+        failed: false,
+        steps: operationProgressSteps({ kind, action }),
+      };
+      openOperationProgress(activeOperationProgress);
+      return activeOperationProgress;
+    }
+
+    function operationVersion(value) {
+      return String(value || "").trim().split(/\s+/, 1)[0].toLowerCase();
+    }
+
+    async function latestOperationSourceVersion(operation) {
+      const now = Date.now();
+      if (operation.sourceVersionCheckedAt && now - operation.sourceVersionCheckedAt < 10000) {
+        return operation.sourceVersion || "";
+      }
+      operation.sourceVersionCheckedAt = now;
+      try {
+        const resp = await fetch(`/api/github/check?_=${now}`, { cache: "no-store", headers: authHeaders() });
+        if (!resp.ok) return "";
+        const data = await resp.json();
+        operation.sourceVersion = operationVersion(data.remote || data.remote_label || "");
+        return operation.sourceVersion;
+      } catch (_) {
+        return "";
+      }
+    }
+
+    async function refreshOperationNodes() {
+      const resp = await fetch(`/api/nodes?_=${Date.now()}`, { cache: "no-store" });
+      if (!resp.ok) throw new Error(resp.statusText || "节点状态读取失败");
+      nodes = await resp.json();
+      if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
+      renderNodes();
+      return nodes;
+    }
+
+    async function pollOperationProgress() {
+      const operation = activeOperationProgress;
+      if (!operation || operation.terminal || operationProgressPollInFlight) return;
+      operationProgressPollInFlight = true;
+      const elapsed = Date.now() - operation.startedAt;
+      try {
+        if (elapsed > 15 * 60 * 1000) {
+          finishOperationProgress(false, "操作超过 15 分钟仍未完成。请刷新页面检查目标节点服务和版本，确认无误后再重试。");
+          return;
+        }
+        let info = null;
+        if (operation.local) {
+          const resp = await fetch(`/api/role-status?_=${Date.now()}`, { cache: "no-store" });
+          if (!resp.ok) throw new Error(resp.statusText || "本地角色状态暂不可用");
+          localRoleStatus = await resp.json();
+          renderNodes();
+          info = localRoleStatus?.roles?.[operation.role] || {};
+        } else {
+          const snapshot = await refreshOperationNodes();
+          const target = snapshot.find((item) => String(item.id) === operation.nodeId);
+          info = target?.roles?.[operation.role] || {};
+        }
+        const enabled = Boolean(info.enabled);
+        const pending = Boolean(info.activation_pending);
+        if (operation.kind === "upgrade") {
+          const targetVersion = operationVersion(operation.targetVersion);
+          const actualVersion = operationVersion(info.version);
+          const versionMatches = !targetVersion || actualVersion === targetVersion;
+          const upgradeStatus = info.upgrade_status || {};
+          const upgradeState = String(upgradeStatus.state || "").trim().toLowerCase();
+          if (upgradeState === "failed") {
+            finishOperationProgress(false, upgradeStatus.message || "后台升级任务失败，请查看目标节点日志后重试。");
+          } else if (elapsed < 5000) {
+            setOperationProgress({ percent: 30, step: 1, stage: "后台升级任务已提交", message: "正在等待安装器拉取 GitHub 最新代码。" });
+          } else if (upgradeState === "pending" || upgradeState === "running") {
+            setOperationProgress({ percent: 70, step: 2, stage: "升级任务执行中", message: upgradeStatus.message || "安装器正在更新代码并重启服务。" });
+          } else if (!enabled) {
+            setOperationProgress({ percent: 58, step: 2, stage: "服务重启中", message: "目标服务暂时不可用，正在等待升级后的服务重新上线。" });
+          } else if (!versionMatches) {
+            const sourceVersion = targetVersion && actualVersion ? await latestOperationSourceVersion(operation) : "";
+            if (sourceVersion && actualVersion === sourceVersion) {
+              finishOperationProgress(true, `目标服务已恢复，当前版本 ${actualVersion} 已是 GitHub main 的最新版本。`);
+            } else {
+              setOperationProgress({ percent: 82, step: 3, stage: "正在验证版本", message: `服务已恢复，但当前版本 ${actualVersion || "未识别"} 仍不是目标版本 ${targetVersion || "最新版本"}，继续等待升级结果。` });
+            }
+          } else {
+            finishOperationProgress(true, targetVersion ? `目标服务已恢复，当前版本已完成升级验证：${targetVersion}。` : "目标服务已恢复，升级任务已完成。");
+          }
+        } else if (operation.action === "deactivate") {
+          if (!enabled && !pending) {
+            finishOperationProgress(true, `${operation.nodeName} 的 ${operation.role === "hub" ? "Hub" : "Agent"} 已停止，旧角色状态已清理。`);
+          } else if (pending) {
+            setOperationProgress({ percent: 62, step: 2, stage: "正在清理旧角色", message: "旧角色正在退出，等待服务状态稳定。" });
+          } else {
+            setOperationProgress({ percent: 36, step: 1, stage: "正在停止旧角色", message: "后台任务已收到，正在停止目标服务。" });
+          }
+        } else if (enabled) {
+          finishOperationProgress(true, `${operation.nodeName} 的 ${operation.role === "hub" ? "Hub" : "Agent"} 已上线，角色转换完成。`);
+        } else if (pending) {
+          setOperationProgress({ percent: 62, step: 2, stage: "等待新服务上线", message: "角色转换任务已执行，正在等待新服务恢复并完成健康检查。" });
+        } else if (info.prepared) {
+          setOperationProgress({ percent: 34, step: 1, stage: "正在准备角色", message: "安装器已准备目标角色，旧角色正在退出。" });
+        } else {
+          setOperationProgress({ percent: 22, step: 1, stage: "正在切换角色", message: "后台任务已提交，正在等待目标节点返回状态。" });
+        }
+      } catch (error) {
+        const message = friendlyError(error, "目标服务暂时不可访问");
+        const operationMessage = operation.local
+          ? "当前控制台正在重启或切换端口，页面恢复后会继续检查。"
+          : `目标节点暂时不可访问：${message}。正在等待服务恢复。`;
+        setOperationProgress({
+          percent: Math.max(Number(operation.percent || 0), operation.local ? 58 : 45),
+          step: operation.kind === "upgrade" ? 2 : 2,
+          stage: operation.kind === "upgrade" ? "等待服务恢复" : "等待新服务上线",
+          message: operationMessage,
+        });
+      } finally {
+        operationProgressPollInFlight = false;
+        if (activeOperationProgress && !activeOperationProgress.terminal) {
+          operationProgressTimer = window.setTimeout(pollOperationProgress, 2200);
+        }
+      }
+    }
+
+    function startOperationProgressPolling() {
+      if (operationProgressTimer) window.clearTimeout(operationProgressTimer);
+      operationProgressTimer = window.setTimeout(pollOperationProgress, 900);
+    }
+
     async function refreshRunningAgentParameters() {
       if (agentStreamRefreshInFlight || !nodes.length) return;
       agentStreamRefreshInFlight = true;
@@ -5136,6 +6143,7 @@ HTML = r"""
         const nodeResp = await fetch("/api/nodes");
         if (!nodeResp.ok) throw new Error(nodeResp.statusText || "Agent 参数刷新失败");
         nodes = await nodeResp.json();
+        if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
         if (!hadStreamingAgents && !hasStreamingAgentRows()) return;
         renderNodes();
         renderStreamControls();
@@ -5150,15 +6158,117 @@ HTML = r"""
       }
     }
 
+    function isHubUploadTarget(node) {
+      return Boolean(
+        node?.is_local_hub
+        || node?.role === "hub"
+        || (node?.roles?.hub?.enabled && !node?.roles?.agent?.enabled),
+      );
+    }
+
+    async function uploadMediaToHub(node, file) {
+      refs.uploadBtn.dataset.busy = "1";
+      refs.uploadBtn.disabled = true;
+      refs.cancelUploadBtn.disabled = false;
+      const uploadState = {
+        uploadId: `hub_browser_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        target: null,
+        route: null,
+        xhr: null,
+        canceled: false,
+        cancelSent: false,
+        targetLabel: node.name || node.id || "Hub",
+        doneBytes: 0,
+        totalBytes: file.size,
+        percent: 0,
+      };
+      activeUpload = uploadState;
+      try {
+        const form = new FormData();
+        form.append("file", file, file.name);
+        const local = Boolean(node.is_local_hub || isLocalHubNodeId(node.id));
+        if (!local) form.append("node_id", String(node.id || ""));
+        const url = local ? "/api/media/upload" : "/api/hubs/media/upload";
+        renderTransfer({
+          status: "running",
+          badge: "上传中",
+          title: `上传到 ${node.name || node.id || "Hub"}`,
+          target: node.name || node.id || "Hub",
+          totalBytes: file.size,
+          message: `${file.name} 正在保存到 ${local ? "当前 Hub" : "远程 Hub"} 临时资源库。`,
+        });
+        const startedAt = performance.now();
+        const data = await uploadFormWithProgress(
+          url,
+          authHeaders(),
+          form,
+          (loaded, total) => {
+            const percent = total ? (loaded / total) * 100 : 0;
+            uploadState.doneBytes = loaded;
+            uploadState.percent = percent;
+            const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
+            renderTransfer({
+              status: "running",
+              badge: "上传中",
+              title: `上传到 ${node.name || node.id || "Hub"}`,
+              target: node.name || node.id || "Hub",
+              percent,
+              doneBytes: loaded,
+              totalBytes: total || file.size,
+              currentBps: loaded / elapsed,
+              averageBps: loaded / elapsed,
+              etaSeconds: loaded > 0 ? ((total || file.size) - loaded) / (loaded / elapsed) : 0,
+              message: `正在保存 ${file.name}，${Math.round(percent)}%。`,
+            });
+          },
+          uploadState,
+        );
+        if (uploadState.canceled) throw new Error("上传已取消");
+        renderTransfer({
+          status: "done",
+          badge: "完成",
+          title: "Hub 资源上传完成",
+          target: node.name || node.id || "Hub",
+          percent: 100,
+          doneBytes: file.size,
+          totalBytes: file.size,
+          averageBps: file.size / Math.max(0.001, (performance.now() - startedAt) / 1000),
+          message: `${file.name} 已保存到 ${node.name || node.id || "Hub"} 临时资源库。`,
+        });
+        await refreshAll();
+      } catch (error) {
+        renderTransfer({
+          status: "failed",
+          badge: uploadState.canceled ? "已取消" : "失败",
+          title: uploadState.canceled ? "上传已取消" : "Hub 资源上传失败",
+          target: node.name || node.id || "Hub",
+          percent: uploadState.percent || 0,
+          doneBytes: uploadState.doneBytes || 0,
+          totalBytes: file.size,
+          message: uploadState.canceled ? "上传已取消。" : friendlyError(error, "Hub 资源上传失败"),
+        });
+      } finally {
+        delete refs.uploadBtn.dataset.busy;
+        refs.uploadBtn.disabled = false;
+        refs.cancelUploadBtn.disabled = true;
+        if (activeUpload === uploadState) activeUpload = null;
+        updatePrimaryActionStates();
+      }
+    }
+
     async function uploadMedia() {
-      const node = selectedNode();
+      const node = selectedUploadNode();
       const file = refs.mediaInput.files[0];
       if (!node?.id) {
-        renderTransfer({ status: "failed", badge: "失败", title: "上传未开始", message: "请先在右侧选择一个目标 Agent。" });
+        renderTransfer({ status: "failed", badge: "失败", title: "上传未开始", message: "请先选择一个目标 Agent 或 Hub。" });
         return;
       }
       if (!file) {
         renderTransfer({ status: "failed", badge: "失败", title: "上传未开始", message: "请先选择一个视频文件。" });
+        return;
+      }
+      if (isHubUploadTarget(node)) {
+        await uploadMediaToHub(node, file);
         return;
       }
       refs.uploadBtn.dataset.busy = "1";
@@ -5646,8 +6756,31 @@ HTML = r"""
     async function upgradeCurrentHubFromPrompt(checkData) {
       refs.updateBox.textContent = "正在提交后台升级任务...";
       uiMessage("正在让 VPS 后台升级 Hub，请不要重复点击。");
-      const resp = await fetch("/api/upgrade", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({}) });
-      const data = await resp.json();
+      const operation = beginOperationProgress({
+        kind: "upgrade",
+        action: "upgrade",
+        role: "hub",
+        nodeId: "__local_hub__",
+        nodeName: "当前控制 Hub",
+        local: true,
+        targetVersion: operationVersion(checkData?.remote_label || checkData?.remote || ""),
+      });
+      let resp;
+      let data;
+      try {
+        resp = await fetch("/api/upgrade", {
+          method: "POST",
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ target_version: operation.targetVersion }),
+        });
+        data = await resp.json();
+      } catch (error) {
+        const message = friendlyError(error, "Hub 升级任务提交失败");
+        finishOperationProgress(false, message);
+        refs.updateBox.textContent = message;
+        log(message);
+        return;
+      }
       refs.updateBox.textContent = data.ok
         ? [
             "升级任务已提交",
@@ -5665,6 +6798,18 @@ HTML = r"""
           ].join("\n");
       uiMessage(data.ok ? "升级任务已提交，Hub 重启后刷新页面即可。" : "升级任务提交失败，请查看更新模块详情。");
       log(data.ok ? "当前 Hub GitHub 升级任务已提交" : `当前 Hub 升级失败：${data.message || resp.statusText}`);
+      if (data.ok) {
+        operation.targetVersion = operationVersion(data.result?.target_version || operation.targetVersion);
+        setOperationProgress({
+          percent: 18,
+          step: 0,
+          stage: "后台升级任务已提交",
+          message: data.message || "Hub 正在从 GitHub main 拉取最新代码并重启。",
+        });
+        startOperationProgressPolling(operation);
+      } else {
+        finishOperationProgress(false, data.message || resp.statusText || "Hub 升级任务提交失败。");
+      }
     }
 
     async function checkDailyGithubUpdates() {
@@ -5750,20 +6895,17 @@ HTML = r"""
     }
 
     async function showTailscaleStatus() {
-      setTailscaleWizardOpen(true);
-      setTailscaleStep("verify", "running");
-      setTailscaleLog("正在读取 Tailscale 状态...");
-      const resp = await fetch("/api/tailscale/status");
-      const data = await resp.json();
-      setTailscaleStep("verify", data.ok ? "done" : "fail");
-      setTailscaleLog(data);
-      refs.updateBox.textContent = JSON.stringify(data, null, 2);
+      setTailscaleWizardOpen(true, { refresh: false });
+      return refreshTailscalePeers();
     }
 
-    function setTailscaleWizardOpen(open) {
+    function setTailscaleWizardOpen(open, options = {}) {
       refs.tailscaleWizardModal.classList.toggle("open", open);
       refs.tailscaleWizardModal.setAttribute("aria-hidden", open ? "false" : "true");
-      if (open) loadLatestAgentInstallCommand();
+      if (open) {
+        loadLatestAgentInstallCommand();
+        if (options.refresh !== false) refreshTailscalePeers();
+      }
     }
 
     async function loadLatestAgentInstallCommand() {
@@ -5796,13 +6938,13 @@ HTML = r"""
         lines.push({ label: "Tailnet 设备", text: `${peers.length} 台（在线 ${onlinePeers} / 离线 ${offlinePeers}）`, tone: onlinePeers ? "done" : "" });
       }
       if (data?.node_id && data?.base_url) lines.push({ label: "Agent 连接", text: `${data.node_id} -> ${data.base_url}`, tone: "done" });
-      if (data?.previous_base_url) lines.push({ label: "原地址已保留", text: data.previous_base_url });
+      if (data?.connection_replaced) lines.push({ label: "旧连接", text: "旧 Hub 连接信息已清理，当前绑定已替换", tone: "done" });
       const detail = data?.error || data?.result?.stderr || data?.result?.message || data?.precheck?.message || "";
       if (!ok && detail) lines.push({ label: "失败原因", text: String(detail).slice(0, 260), tone: "fail" });
       if (ok && data?.node_id && data?.base_url) {
-        lines.push({ label: "连接完成", text: "Agent 已在线并保存，节点列表已刷新；现在可以关闭此窗口。", tone: "done" });
+        lines.push({ label: "连接完成", text: "Agent 已绑定到当前 Hub，节点列表已刷新。", tone: "done" });
       } else {
-        lines.push({ label: "下一步", text: ok ? "请输入 Agent 的 100.x 地址进行连接。" : "请按提示修复后重试。" });
+        lines.push({ label: "下一步", text: ok ? "选择上方在线设备继续。" : "请按提示修复后重试。" });
       }
       return lines;
     }
@@ -5824,16 +6966,222 @@ HTML = r"""
     }
 
     function setTailscaleBusy(busy) {
-      [refs.tailscaleUseExistingIpBtn]
-        .forEach((button) => { button.disabled = busy; });
+      [refs.refreshTailscalePeersBtn, refs.refreshAgentDiscoveryBtn]
+        .forEach((button) => { if (button) button.disabled = busy; });
+      refs.tailscalePeerList?.querySelectorAll("button").forEach((button) => { button.disabled = busy; });
+      refs.agentDiscoveryList?.querySelectorAll("button").forEach((button) => { button.disabled = busy; });
     }
 
-    function renderTailscaleNodeOptions() {
-      return;
+    function knownNodeForTailscaleIp(ip) {
+      return nodes.find((node) => (
+        String(node.tailscale_ip || "") === String(ip)
+        || String(node.base_url || "").includes(`://${ip}:`)
+        || String(node.hub_url || "").includes(`://${ip}:`)
+      ));
+    }
+
+    function tailscaleNodeJoinedAgent(ip) {
+      const node = knownNodeForTailscaleIp(ip);
+      return Boolean(node?.roles?.agent?.enabled);
+    }
+
+    function discoveredTailscaleNodes(data = tailscaleStatusCache) {
+      return (Array.isArray(data?.agent_nodes) ? data.agent_nodes : [])
+        .filter((item) => item && String(item.tailscale_ip || "").trim());
+    }
+
+    function discoveredNodeLabel(item, node = null) {
+      return item.agent_name
+        || item.host_name
+        || String(item.dns_name || "").split(".")[0]
+        || node?.name
+        || "Tailnet 设备";
+    }
+
+    function renderAgentDiscovery(data = tailscaleStatusCache) {
+      if (!refs.agentDiscoveryList) return;
+      const records = discoveredTailscaleNodes(data);
+      const onlineAgents = records.filter((item) => (
+        !item.self
+        && item.online !== false
+        && item.agent_installed
+        && !item.hub_enabled
+        && !tailscaleNodeJoinedAgent(item.tailscale_ip)
+      ));
+      const hubs = records.filter((item) => !item.self && item.online !== false && item.hub_enabled);
+      if (refs.agentDiscoverySummary) {
+        refs.agentDiscoverySummary.textContent = `发现 ${onlineAgents.length} 个可接入 Agent${hubs.length ? ` · ${hubs.length} 个 Hub` : ""}`;
+      }
+      if (!onlineAgents.length && !hubs.length) {
+        refs.agentDiscoveryList.innerHTML = `<div class="agent-discovery-empty">当前没有发现可直接接入的 Agent 或 Hub；确认目标机器已加入同一 Tailnet。</div>`;
+        return;
+      }
+      const agentItems = onlineAgents.map((item) => {
+        const ip = String(item.tailscale_ip || "");
+        const node = knownNodeForTailscaleIp(ip);
+        const name = discoveredNodeLabel(item, node);
+        const pending = Boolean(node?.roles?.agent?.activation_pending);
+        return `
+          <button type="button" class="agent-discovery-item ${pending ? "is-known" : ""}" data-discovery-agent-ip="${escapeHtml(ip)}" ${pending ? "disabled" : ""}>
+            <strong>${escapeHtml(name)}</strong>
+            <span class="peer-action">${pending ? "接入任务已提交" : "点击接入"}</span>
+            <small>${escapeHtml(ip)} · ${pending ? "等待 Agent 服务上线" : "已检测到 headless Agent"}${node?.name && node.name !== name ? ` · ${escapeHtml(node.name)}` : ""}</small>
+          </button>
+        `;
+      }).join("");
+      const hubItems = hubs.map((item) => {
+        const ip = String(item.tailscale_ip || "");
+        const node = knownNodeForTailscaleIp(ip);
+        const name = discoveredNodeLabel(item, node);
+        const pending = Boolean(node?.roles?.agent?.activation_pending);
+        return `
+          <button type="button" class="agent-discovery-item ${pending ? "is-known" : ""}" data-discovery-hub-ip="${escapeHtml(ip)}" ${pending ? "disabled" : ""}>
+            <strong>${escapeHtml(name)}</strong>
+            <span class="peer-action">${pending ? "Agent 激活中" : "激活 Agent"}</span>
+            <small>${escapeHtml(ip)} · ${pending ? "等待 Hub 自动切换为 Agent" : "已检测到 Hub，可从此处激活 Agent"}${node?.name && node.name !== name ? ` · ${escapeHtml(node.name)}` : ""}</small>
+          </button>
+        `;
+      }).join("");
+      refs.agentDiscoveryList.innerHTML = agentItems + hubItems;
+    }
+
+    function renderTailscaleNodeOptions(data = tailscaleStatusCache) {
+      if (!refs.tailscalePeerList) return;
+      renderAgentDiscovery(data);
+      const records = discoveredTailscaleNodes(data).filter((item) => (
+        !item.self
+        && item.online !== false
+        && !tailscaleNodeJoinedAgent(item.tailscale_ip)
+      ));
+      if (!records.length) {
+        refs.tailscalePeerList.innerHTML = `<div class="empty-state">没有待接入的在线 Tailnet 设备。已加入 Agent 表的节点不会重复显示。</div>`;
+        return;
+      }
+      refs.tailscalePeerList.innerHTML = records.map((item) => {
+        const ip = String(item.tailscale_ip || "");
+        const node = knownNodeForTailscaleIp(ip);
+        const name = discoveredNodeLabel(item, node);
+        const agentPending = Boolean(node?.roles?.agent?.activation_pending);
+        if (item.hub_enabled) {
+          return `
+            <button type="button" class="tailscale-peer-option ${agentPending ? "is-known" : ""}" data-tailscale-activate-agent-ip="${escapeHtml(ip)}" ${agentPending ? "disabled" : ""}>
+              <strong>${escapeHtml(name)}</strong>
+              <span class="peer-action">${agentPending ? "Agent 激活中" : "激活 Agent"}</span>
+              <small>${escapeHtml(ip)} · ${agentPending ? "等待 Hub 自动切换为 Agent" : "当前是 Hub，可激活为 Agent 后再加入 Agent 表"}</small>
+            </button>
+          `;
+        }
+        const connectable = Boolean(item.agent_installed && !item.hub_enabled);
+        const role = item.agent_installed
+          ? agentPending ? "Agent 激活中" : "已检测到 Agent"
+          : "未检测到 Agent";
+        if (!connectable) {
+          return `
+            <div class="agent-discovery-item">
+              <strong>${escapeHtml(name)}</strong>
+              <span class="peer-action">${escapeHtml(role)}</span>
+              <small>${escapeHtml(ip)} · 请在目标机器安装并启动 Agent 8787</small>
+            </div>
+          `;
+        }
+        return `
+          <button type="button" class="tailscale-peer-option ${agentPending ? "is-known" : ""}" data-tailscale-peer-ip="${escapeHtml(ip)}" ${agentPending ? "disabled" : ""}>
+            <strong>${escapeHtml(name)}</strong>
+            <span class="peer-action">${agentPending ? "接入任务已提交" : "点击接入"}</span>
+            <small>${escapeHtml(ip)} · ${escapeHtml(role)}${node?.name && node.name !== name ? ` · ${escapeHtml(node.name)}` : ""}</small>
+          </button>
+        `;
+      }).join("");
+    }
+
+    async function activateTailscaleAgent(ip, sourceButton = null) {
+      const targetIp = String(ip || "").trim();
+      if (!targetIp) return;
+      const node = knownNodeForTailscaleIp(targetIp);
+      const label = discoveredNodeLabel(
+        discoveredTailscaleNodes(tailscaleStatusCache).find((item) => String(item.tailscale_ip || "") === targetIp),
+        node,
+      );
+      if (!confirm(`确认在 ${label}（${targetIp}）上激活 Agent？\n\n目标 Hub 会自动停止并切换为 Agent；配置和视频会保留。切换完成后，再从 Tailscale 列表点击加入 Agent 表。`)) return;
+      if (sourceButton) sourceButton.disabled = true;
+      try {
+        const data = await postJson("/api/tailscale/activate-agent", { tailscale_ip: targetIp });
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        if (!data.ok) throw new Error(data.message || "Agent 激活失败");
+        const operation = beginOperationProgress({
+          kind: "role",
+          action: "activate",
+          role: "agent",
+          nodeId: data.node_id || node?.id || "",
+          nodeName: label,
+        });
+        setOperationProgress({ percent: 18, step: 0, stage: "后台任务已提交", message: data.message || `${label} 正在执行 Agent 激活任务。` });
+        log(`Tailscale 节点 Agent 激活任务已提交：${label}`);
+        setTailscaleLog(data, "Agent 激活任务已提交");
+        await refreshAll();
+        startOperationProgressPolling(operation);
+      } catch (error) {
+        const message = friendlyError(error, "Tailscale 节点激活 Agent 失败");
+        log(message);
+        setTailscaleLog({ ok: false, message });
+        if (sourceButton) sourceButton.disabled = false;
+      }
+    }
+
+    function renderTransferHubOptions() {
+      if (!refs.transferHubNodeSelect) return;
+      const hubs = nodes.filter((node) => {
+        const role = node.roles?.hub || {};
+        return role.enabled && role.url && !sameOriginUrl(role.url);
+      });
+      const current = refs.transferHubNodeSelect.value;
+      refs.transferHubNodeSelect.innerHTML = hubs.length
+        ? `<option value="">选择新的控制 Hub</option>${hubs.map((node) => {
+            const role = node.roles?.hub || {};
+            return `<option value="${escapeHtml(node.id)}">${escapeHtml(node.name || node.id)} · ${escapeHtml(role.version || "已激活")}</option>`;
+          }).join("")}`
+        : `<option value="">暂无可用的已激活 Hub</option>`;
+      if (hubs.some((node) => String(node.id) === String(current))) refs.transferHubNodeSelect.value = current;
+    }
+
+    async function refreshTailscalePeers({ silent = false } = {}) {
+      if (tailscaleRefreshInFlight) return tailscaleRefreshInFlight;
+      const task = (async () => {
+        if (!silent) {
+          setTailscaleStep("verify", "running");
+          setTailscaleLog("正在读取在线设备...");
+        }
+        try {
+          const resp = await fetch(`/api/tailscale/status?_=${Date.now()}`, { cache: "no-store" });
+          const data = await resp.json();
+          tailscaleStatusCache = data;
+          if (!silent) {
+            setTailscaleStep("verify", data.ok ? "done" : "fail");
+            setTailscaleLog(data);
+            refs.updateBox.textContent = JSON.stringify(data, null, 2);
+          }
+          renderTailscaleNodeOptions(data);
+          return data;
+        } catch (error) {
+          const data = { ok: false, message: friendlyError(error, "在线设备读取失败") };
+          tailscaleStatusCache = data;
+          if (!silent) {
+            setTailscaleStep("verify", "fail");
+            setTailscaleLog(data);
+            refs.updateBox.textContent = JSON.stringify(data, null, 2);
+          }
+          renderTailscaleNodeOptions(data);
+          return data;
+        }
+      })();
+      tailscaleRefreshInFlight = task.finally(() => {
+        tailscaleRefreshInFlight = null;
+      });
+      return tailscaleRefreshInFlight;
     }
 
     async function runTailscaleStep(step, label, action) {
-      setTailscaleWizardOpen(true);
+      setTailscaleWizardOpen(true, { refresh: false });
       setTailscaleBusy(true);
       setTailscaleStep(step, "running");
       setTailscaleLog(`${label}...`);
@@ -5898,13 +7246,12 @@ HTML = r"""
       return showTailscaleStatus();
     }
 
-    async function connectExistingTailscaleIp(confirm_rebind = false) {
+    async function connectExistingTailscaleIp(tailscale_ip = "", confirm_rebind = false) {
+      tailscale_ip = String(tailscale_ip || "").trim();
       confirm_rebind = confirm_rebind === true;
-      const tailscale_ip = refs.tailscaleExistingIpInput.value.trim();
-      const token = refs.tailscaleExistingTokenInput.value.trim();
       if (!tailscale_ip) {
         setTailscaleWizardOpen(true);
-        setTailscaleLog("请输入已有的 Tailscale IP，例如 100.x.x.x。");
+        setTailscaleLog("请先选择一个在线设备。");
         return;
       }
       const data = await runTailscaleStep("verify", "正在检查同一 Tailnet、Agent 服务并自动配对", async () => {
@@ -5913,8 +7260,8 @@ HTML = r"""
           headers: authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({
             tailscale_ip,
-            ...(token ? { token } : {}),
-            ...(confirm_rebind ? { confirm_rebind: true } : {}),
+            replace_connection: true,
+            confirm_rebind: true,
           }),
         });
         return resp.json();
@@ -5924,7 +7271,7 @@ HTML = r"""
         const requestedHub = data.requested_control_hub || "当前 Hub";
         const ok = window.confirm(`Agent 当前绑定 Hub：${currentHub}\n\n是否取消旧绑定，并重新绑定到新 Hub：${requestedHub}？`);
         if (ok) {
-          return connectExistingTailscaleIp(true);
+          return connectExistingTailscaleIp(tailscale_ip, true);
         }
         setTailscaleLog({
           ok: false,
@@ -5935,7 +7282,6 @@ HTML = r"""
         return;
       }
       if (data.ok) {
-        refs.tailscaleExistingTokenInput.value = "";
         if (data.hub_only) {
           if (data.node_id) rememberSelectedNode(data.node_id);
           log(`Hub-only 节点：${data.node_id || data.hub_url || tailscale_ip}，Agent 当前关闭`);
@@ -6286,16 +7632,21 @@ HTML = r"""
           refs.tuneBox.textContent = "媒体复制完成，正在刷新节点并启动 FFmpeg...";
           await refreshAll();
         }
-        if (!lastTuneRecommendation?.ok) {
+        let tuneForStart = null;
+        if (payload.adaptive_mode !== "off") {
           const tune = await postNodeAction("/api/nodes/stream/recommend", { ...payload, stream_key: "" });
+          lastTuneRecommendation = tune;
           if (tune.ok) {
             applyTuneRecommendation(tune);
             renderTuneRecommendation(tune);
+            tuneForStart = tune;
+          } else {
+            refs.tuneBox.textContent = tune.message || "智能调优失败，按当前固定参数继续启动。";
           }
         }
         const startPayload = streamPayload({ includeKey: true });
-        if (lastTuneRecommendation?.recommendation) {
-          Object.assign(startPayload, lastTuneRecommendation.recommendation);
+        if (tuneForStart?.recommendation) {
+          Object.assign(startPayload, tuneForStart.recommendation);
         }
         const data = await postNodeAction("/api/nodes/stream/start", startPayload);
         if (!data.ok) {
@@ -6596,6 +7947,32 @@ HTML = r"""
       refs.roleSettingsModal.classList.toggle("open", open);
       refs.roleSettingsModal.setAttribute("aria-hidden", open ? "false" : "true");
       if (!open) return;
+      const localHub = roleSettingsNodeId === "__local_hub__";
+      refs.roleSettingsNameSection.hidden = localHub;
+      refs.roleSettingsNodeRecord.hidden = localHub;
+      refs.roleSettingsTransferBox.hidden = localHub;
+      if (localHub) {
+        const hubRole = localHubRole();
+        const agentRole = localRoleStatus?.roles?.agent || {};
+        const agentPending = Boolean(agentRole.activation_pending);
+        refs.roleSettingsTitle.textContent = "当前控制 Hub · 功能设置";
+        refs.roleSettingsSummary.textContent = "当前 Hub 的角色切换与升级功能。激活 Agent 会同时关闭本机 Hub，保留配置和视频。";
+        refs.roleSettingsActions.innerHTML = `
+          <div class="role-settings-item">
+            <span><strong>角色切换</strong><small>当前状态：${agentPending ? "Agent 激活任务已提交，等待 Hub 关闭" : "Hub 已启用"}。</small></span>
+            <span class="actions">
+              <button class="primary" data-local-role-action="activate-agent" ${agentPending ? "disabled" : ""}>${agentPending ? "Agent 激活中" : "激活 Agent（关闭 Hub）"}</button>
+            </span>
+          </div>
+          <div class="role-settings-item">
+            <span><strong>Hub 升级</strong><small>当前版本：${escapeHtml(hubRole.version || "未识别")}。从 GitHub main 检查并升级当前 Hub。</small></span>
+            <span class="actions">
+              <button data-local-role-action="upgrade-hub">升级 Hub</button>
+            </span>
+          </div>
+        `;
+        return;
+      }
       const node = nodes.find((item) => String(item.id) === roleSettingsNodeId);
       if (!node) return setRoleSettingsOpen(false);
       refs.roleSettingsTitle.textContent = `${node.name || node.id} · 角色设置`;
@@ -6707,7 +8084,9 @@ HTML = r"""
       const warning = deactivating
         ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认取消 ${roleLabel} 功能？\n\n系统会停止并卸载该角色服务，默认保留配置/视频/节点数据；另一个角色不会被停止。`
         : activating
-        ? `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认激活 ${roleLabel}？\n\n安全提示：将启用已准备的独立 systemd 服务，开放 Tailscale ${role === "hub" ? "8788" : "8787"} 端口。现有 ${role === "hub" ? "Agent" : "Hub"} 会继续运行，配置与视频不会删除。`
+        ? role === "hub"
+          ? `${nodeName} 的 Hub 当前状态：${currentStatus}。\n\n是否确认启用 Hub？\n\n系统会自动停止 Agent 服务，保留配置和视频；切换完成后该节点会从 Agent 表转移到 Hub 表，并开放 Tailscale 8788。`
+          : `${nodeName} 的 Agent 当前状态：${currentStatus}。\n\n是否确认激活 Agent？\n\n系统会启用 Agent 8787；如果当前 Hub 正在运行，需要先停用 Hub。配置与视频不会删除。`
         : `${nodeName} 的 ${roleLabel} 当前状态：${currentStatus}。\n\n是否确认升级 ${roleLabel}？\n\nHub 与 Agent 共用一份 Git 代码；更新后，同机所有已激活角色都会重启到相同版本，未激活角色保持关闭。`;
       if (!deactivating && !confirm(warning)) return;
       setRoleSettingsOpen(false);
@@ -6720,20 +8099,82 @@ HTML = r"""
         }
       }
       const path = deactivating ? `/api/nodes/roles/${role}/deactivate` : activating ? `/api/nodes/roles/${role}/activate` : `/api/nodes/roles/${role}/upgrade`;
-      const data = await postNodeAction(path, { node_id: nodeId });
-      refs.updateBox.textContent = JSON.stringify(data, null, 2);
-      log(data.ok ? `${roleLabel} 任务已提交：${nodeName}` : `${roleLabel} 操作失败：${data.message || nodeName}`);
-      if (data.ok) {
-        await refreshAll();
-        for (const delay of [5000, 10000, 15000]) {
-          const updated = nodes.find((item) => String(item.id) === String(nodeId));
-          const updatedRole = updated?.roles?.[role] || {};
-          if (updatedRole.enabled) break;
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          await refreshAll();
+      const operation = beginOperationProgress({
+        kind: activating || deactivating ? "role" : "upgrade",
+        action: activating ? "activate" : deactivating ? "deactivate" : "upgrade",
+        role,
+        nodeId,
+        nodeName,
+      });
+      try {
+        const data = await postNodeAction(path, { node_id: nodeId });
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        log(data.ok ? `${roleLabel} 任务已提交：${nodeName}` : `${roleLabel} 操作失败：${data.message || nodeName}`);
+        if (!data.ok) {
+          finishOperationProgress(false, data.message || `${roleLabel} 操作提交失败。`);
+          if (sourceButton) sourceButton.disabled = false;
+          return;
         }
-      } else if (sourceButton) {
-        sourceButton.disabled = false;
+        setOperationProgress({
+          percent: 18,
+          step: 0,
+          stage: "后台任务已提交",
+          message: data.message || `${nodeName} 正在执行后台任务。`,
+        });
+        if (operation.kind === "upgrade") {
+          operation.targetVersion = data.target_version || data.result?.target_version || "";
+        }
+        await refreshAll().catch(() => null);
+        startOperationProgressPolling(operation);
+      } catch (error) {
+        const message = friendlyError(error, `${roleLabel} 操作提交失败`);
+        finishOperationProgress(false, message);
+        log(message);
+        if (sourceButton) sourceButton.disabled = false;
+      }
+    }
+
+    async function activateLocalHubAgent(sourceButton = null) {
+      if (!confirm("当前控制 Hub 将停止并切换为 Agent。\n\nHub 配置和视频会保留；切换完成后请在 Tailscale Agent 列表中把该节点加入 Agent 表。是否继续？")) return;
+      setRoleSettingsOpen(false);
+      if (sourceButton) sourceButton.disabled = true;
+      const operation = beginOperationProgress({
+        kind: "role",
+        action: "activate",
+        role: "agent",
+        nodeId: "__local_hub__",
+        nodeName: "当前控制 Hub",
+        local: true,
+      });
+      try {
+        const data = await postJson("/api/roles/agent/activate", {
+          allow_unbound: true,
+        });
+        refs.updateBox.textContent = JSON.stringify(data, null, 2);
+        log(data.ok ? "本地 Hub 的 Agent 激活任务已提交" : `本地 Hub 激活 Agent 失败：${data.message || "未知错误"}`);
+        if (!data.ok) {
+          finishOperationProgress(false, data.message || "本地 Hub 激活 Agent 失败。");
+          if (sourceButton) sourceButton.disabled = false;
+          return;
+        }
+        setOperationProgress({ percent: 18, step: 0, stage: "后台任务已提交", message: "当前 Hub 将停止，随后切换到 Agent 8787。" });
+        startOperationProgressPolling(operation);
+      } catch (error) {
+        const message = friendlyError(error, "本地 Hub 激活 Agent 失败");
+        log(message);
+        finishOperationProgress(false, message);
+        if (sourceButton) sourceButton.disabled = false;
+      }
+    }
+
+    async function handleLocalHubRoleAction(action, sourceButton = null) {
+      if (action === "activate-agent") {
+        await activateLocalHubAgent(sourceButton);
+        return;
+      }
+      if (action === "upgrade-hub") {
+        setRoleSettingsOpen(false);
+        await checkUpdatesAndPrompt();
       }
     }
 
@@ -6889,17 +8330,21 @@ HTML = r"""
     }
 
     async function transferHubNodes() {
-      const target = refs.transferHubUrlInput.value.trim();
-      const token = refs.transferHubTokenInput.value.trim();
-      if (!target) return alert("请输入新 Hub 地址。");
-      if (!confirm(`把当前 Hub 的节点信息转移到：\n${target}\n\n新 Hub 会合并这些节点信息，用来接管控制。是否继续？`)) return;
+      const nodeId = refs.transferHubNodeSelect.value.trim();
+      const targetNode = nodes.find((node) => String(node.id) === String(nodeId));
+      if (!nodeId || !targetNode) return alert("请先选择一个可用的目标 Hub。");
+      const targetLabel = targetNode.name || targetNode.id;
+      if (!confirm(`把当前 Hub 的节点信息转移到：\n${targetLabel}\n\n旧 Hub 连接信息会被清理，新 Hub 会接管控制。是否继续？`)) return;
       refs.transferHubNodesBtn.disabled = true;
       try {
-        const data = await postJson("/api/hub-transfer/nodes", { target_hub_url: target, target_token: token });
+        const data = await postJson("/api/hubs/transfer", { node_id: nodeId });
         refs.updateBox.textContent = JSON.stringify(data, null, 2);
         if (!data.ok) throw new Error(data.message || "控制转移失败");
-        log(`Hub 控制转移已完成：${data.imported_count || 0} 个节点 -> ${data.target_hub_url || target}`);
-        alert(`转移完成：${data.imported_count || 0} 个节点已导入新 Hub。\n\n${data.target_hub_url || target}`);
+        log(`Hub 控制转移已完成：${data.imported_count || 0} 个节点 -> ${targetLabel}`);
+        alert(`转移完成：${data.imported_count || 0} 个节点已导入新 Hub。\n\n即将打开新控制台。`);
+        if (data.target_hub_url && !sameOriginUrl(data.target_hub_url)) {
+          window.location.href = data.target_hub_url;
+        }
       } catch (error) {
         const message = friendlyError(error, "Hub 控制转移失败");
         log(message);
@@ -7157,6 +8602,44 @@ HTML = r"""
       beginNodeNameEdit(nameEl);
     });
 
+    refs.nodeList.addEventListener("dragstart", (event) => {
+      const handle = event.target.closest("[data-node-drag-handle]");
+      const row = event.target.closest("[data-node-row]");
+      if (!handle || !row) return;
+      draggedAgentId = String(row.dataset.nodeId || "");
+      row.classList.add("dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", draggedAgentId);
+      }
+    });
+    refs.nodeList.addEventListener("dragover", (event) => {
+      if (!draggedAgentId) return;
+      const row = event.target.closest("[data-node-row]");
+      if (!row || String(row.dataset.nodeId || "") === draggedAgentId) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      refs.nodeList.querySelectorAll(".drag-over").forEach((item) => {
+        if (item !== row) item.classList.remove("drag-over");
+      });
+      row.classList.add("drag-over");
+    });
+    refs.nodeList.addEventListener("drop", (event) => {
+      if (!draggedAgentId) return;
+      const row = event.target.closest("[data-node-row]");
+      if (!row) return;
+      event.preventDefault();
+      const targetId = String(row.dataset.nodeId || "");
+      const rect = row.getBoundingClientRect();
+      const insertBefore = event.clientY < rect.top + rect.height / 2;
+      const sourceId = draggedAgentId;
+      clearAgentDragState();
+      moveAgentInOrder(sourceId, targetId, insertBefore);
+    });
+    refs.nodeList.addEventListener("dragend", () => {
+      clearAgentDragState();
+    });
+
     refs.nodeList.addEventListener("pointerdown", (event) => {
       guardLockedNodeSelect(event);
     }, true);
@@ -7261,8 +8744,27 @@ HTML = r"""
       }
     });
     refs.hubNodeList.addEventListener("click", (event) => {
+      const functionMenu = event.target.closest("[data-hub-function-menu]");
+      if (functionMenu && event.target.closest("summary")) {
+        event.stopPropagation();
+        return;
+      }
       if (event.target.closest("[data-node-profile-select]")) {
         event.stopPropagation();
+        return;
+      }
+      const resourceButton = event.target.closest("[data-hub-action=\"view-resources\"]");
+      if (resourceButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        openNodeResources(resourceButton.dataset.nodeId || "");
+        return;
+      }
+      const localSettingsButton = event.target.closest("[data-local-role-settings]");
+      if (localSettingsButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        setRoleSettingsOpen(true, "__local_hub__");
         return;
       }
       const settingsButton = event.target.closest("[data-role-settings]");
@@ -7281,16 +8783,36 @@ HTML = r"""
       }
       const row = event.target.closest("[data-hub-row]");
       if (!row) return;
-      switchHubWithFallback(row.dataset.nodeId);
+      if (row.dataset.localHubRow !== undefined) {
+        openNodeResources("__local_hub__");
+        return;
+      }
+      if (!row.dataset.nodeId) return;
+      openNodeResources(row.dataset.nodeId);
     });
+    refs.hubNodeList.addEventListener("toggle", (event) => {
+      const functionMenu = event.target.closest("[data-hub-function-menu]");
+      if (!functionMenu) return;
+      const row = functionMenu.closest("[data-hub-row]");
+      if (row) row.classList.toggle("menu-open", functionMenu.open);
+    }, true);
     refs.hubNodeList.addEventListener("change", (event) => {
       const selectEl = event.target.closest("[data-node-profile-select]");
       if (selectEl) saveNodeYouTubeProfile(selectEl);
     });
     refs.roleSettingsClose.addEventListener("click", () => setRoleSettingsOpen(false));
+    refs.operationProgressClose.addEventListener("click", closeOperationProgress);
+    refs.operationProgressModal.addEventListener("click", (event) => {
+      if (event.target === refs.operationProgressModal) closeOperationProgress();
+    });
     refs.roleSettingsModal.addEventListener("click", async (event) => {
       if (event.target === refs.roleSettingsModal) {
         setRoleSettingsOpen(false);
+        return;
+      }
+      const localRoleButton = event.target.closest("[data-local-role-action]");
+      if (localRoleButton) {
+        await handleLocalHubRoleAction(localRoleButton.dataset.localRoleAction, localRoleButton);
         return;
       }
       const nodeActionButton = event.target.closest("[data-settings-node-action]");
@@ -7316,10 +8838,11 @@ HTML = r"""
       openNodeResources(card.dataset.resourceNodeId);
     });
     function openNodeResources(nodeId) {
-      if (String(nodeId || "") !== HUB_LOCAL_NODE_ID) rememberSelectedNode(nodeId);
-      openResourceNodeId = String(nodeId || "");
-      renderNodes();
+      const id = String(nodeId || "");
+      const agentNode = nodes.find((item) => String(item.id || "") === id && shouldShowAgentNode(item));
+      if (agentNode) rememberSelectedNode(id);
       selectResourceNodeScope(nodeId);
+      renderNodes();
       document.querySelector(".resource-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
       refs.mediaList.querySelector('[data-resource-filter="ownerNode"]')?.focus({ preventScroll: true });
     }
@@ -7500,23 +9023,26 @@ HTML = r"""
       }
     }
 
+    function applyHubSettings(data) {
+      const title = String(data?.hub_name || "").trim();
+      if (title) {
+        refs.editableHubTitle.textContent = title;
+        document.title = title;
+        localStorage.setItem(TITLE_STORAGE_KEY, title);
+      }
+      if (Array.isArray(data?.agent_order)) agentOrder = data.agent_order.map((id) => String(id || "").trim()).filter(Boolean);
+    }
+
     async function loadHubSettings() {
       try {
         const resp = await fetch("/api/settings");
-        const data = await resp.json();
-        const title = String(data.hub_name || "").trim();
-        if (title) {
-          refs.editableHubTitle.textContent = title;
-          document.title = title;
-          localStorage.setItem(TITLE_STORAGE_KEY, title);
-        }
+        if (resp.ok) applyHubSettings(await resp.json());
       } catch (_) {}
     }
 
     applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || "forest");
     refs.editableHubTitle.textContent = localStorage.getItem(TITLE_STORAGE_KEY) || "Stream Control Hub";
     document.title = refs.editableHubTitle.textContent;
-    loadHubSettings();
     refs.themeSelect.addEventListener("change", () => applyTheme(refs.themeSelect.value));
     refs.editableHubTitle.addEventListener("blur", saveCustomTitle);
     refs.editableHubTitle.addEventListener("keydown", (event) => {
@@ -7650,7 +9176,28 @@ HTML = r"""
       const button = event.target.closest(".youtube-more-menu button");
       if (button) window.setTimeout(() => { refs.youtubeMoreActions.open = false; }, 0);
     });
-    refs.tailscaleUseExistingIpBtn.addEventListener("click", connectExistingTailscaleIp);
+    refs.refreshTailscalePeersBtn.addEventListener("click", refreshTailscalePeers);
+    refs.refreshAgentDiscoveryBtn.addEventListener("click", () => refreshTailscalePeers());
+    refs.tailscalePeerList.addEventListener("click", (event) => {
+      const activateButton = event.target.closest("[data-tailscale-activate-agent-ip]");
+      if (activateButton) {
+        activateTailscaleAgent(activateButton.dataset.tailscaleActivateAgentIp || "", activateButton);
+        return;
+      }
+      const button = event.target.closest("[data-tailscale-peer-ip]");
+      if (!button) return;
+      connectExistingTailscaleIp(button.dataset.tailscalePeerIp || "");
+    });
+    refs.agentDiscoveryList.addEventListener("click", (event) => {
+      const hubButton = event.target.closest("[data-discovery-hub-ip]");
+      if (hubButton) {
+        activateTailscaleAgent(hubButton.dataset.discoveryHubIp || "", hubButton);
+        return;
+      }
+      const button = event.target.closest("[data-discovery-agent-ip]");
+      if (!button) return;
+      connectExistingTailscaleIp(button.dataset.discoveryAgentIp || "");
+    });
     refs.copyAgentInstallBtn.addEventListener("click", copyAgentInstallCommand);
     if (refs.pushSelectedBtn) refs.pushSelectedBtn.addEventListener("click", pushSelectedMedia);
     refs.previewTuneBtn.addEventListener("click", previewTune);
@@ -7664,10 +9211,12 @@ HTML = r"""
     [refs.presetInput, refs.videoBitrateInput, refs.audioBitrateInput, refs.fpsInput, refs.resolutionInput, refs.keyframeInput].forEach((el) => {
       el.addEventListener("input", () => { refs.tuneBox.dataset.copyMode = "0"; });
     });
+    initializeAgentDiscoveryDisclosure();
     initializeDashboardLayout();
     loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
     checkDailyGithubUpdates();
     window.setInterval(refreshRunningAgentParameters, AGENT_STREAM_REFRESH_MS);
+    window.setInterval(() => refreshTailscalePeers({ silent: true }), TAILSCALE_DISCOVERY_REFRESH_MS);
     window.setInterval(() => {
       loadYouTubeProfiles()
         .then(() => preloadNodeYouTubeStreams({ force: true }))
@@ -7870,12 +9419,115 @@ def tailscale_status_from_json(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tailscale_ipv4(peer: dict[str, Any]) -> str:
+    for value in peer.get("tailscale_ips") or []:
+        candidate = str(value or "").split("%", 1)[0].strip()
+        try:
+            parsed = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if parsed.version == 4 and parsed in TAILSCALE_CGNAT:
+            return str(parsed)
+    return ""
+
+
+def probe_tailscale_node(peer: dict[str, Any]) -> dict[str, Any]:
+    """Probe only public role endpoints; never request or return role credentials."""
+    ip = _tailscale_ipv4(peer)
+    result = {
+        "tailscale_ip": ip,
+        "host_name": str(peer.get("host_name") or ""),
+        "dns_name": str(peer.get("dns_name") or ""),
+        "online": peer.get("online") is not False,
+        "self": bool(peer.get("self")),
+        "agent_installed": False,
+        "agent_enabled": False,
+        "agent_name": "",
+        "agent_url": f"http://{ip}:{AGENT_PORT}" if ip else "",
+        "hub_installed": False,
+        "hub_enabled": False,
+        "hub_url": f"http://{ip}:{PORT}" if ip else "",
+    }
+    if not ip or peer.get("online") is False:
+        return result
+
+    agent_url = result["agent_url"]
+    try:
+        response = requests.get(f"{agent_url}/", timeout=2)
+        payload = response.json() if response.ok else {}
+        if response.ok and isinstance(payload, dict) and payload.get("mode") == "headless-agent":
+            result["agent_installed"] = True
+            result["agent_enabled"] = True
+            result["agent_name"] = str(payload.get("name") or payload.get("hostname") or "")
+    except (OSError, requests.RequestException, ValueError):
+        pass
+
+    hub_url = result["hub_url"]
+    try:
+        response = requests.get(f"{hub_url}/api/role-status", timeout=2)
+        payload = response.json() if response.ok else {}
+        roles = payload.get("roles") if isinstance(payload, dict) else {}
+        hub = roles.get("hub") if isinstance(roles, dict) else {}
+        if isinstance(hub, dict) and (response.ok or hub.get("enabled")):
+            result["hub_installed"] = bool(hub.get("prepared") or hub.get("enabled") or response.ok)
+            result["hub_enabled"] = bool(hub.get("enabled"))
+            result["hub_url"] = str(hub.get("url") or hub_url).rstrip("/")
+    except (OSError, requests.RequestException, ValueError):
+        pass
+
+    result["role"] = (
+        "hub" if result["hub_enabled"] and not result["agent_enabled"]
+        else "agent" if result["agent_installed"] and not result["hub_enabled"]
+        else "dual" if result["agent_installed"] and result["hub_enabled"]
+        else "unknown"
+    )
+    return result
+
+
+def enrich_tailscale_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Add fast, credential-free role discovery to a raw Tailscale status payload."""
+    if not status.get("ok"):
+        return status
+    self_info = status.get("self") if isinstance(status.get("self"), dict) else {}
+    candidates: list[dict[str, Any]] = []
+    if self_info:
+        candidates.append({**self_info, "self": True})
+    candidates.extend(
+        peer for peer in (status.get("peers") or [])
+        if isinstance(peer, dict)
+    )
+    unique: dict[str, dict[str, Any]] = {}
+    for peer in candidates:
+        ip = _tailscale_ipv4(peer)
+        if ip and ip not in unique:
+            unique[ip] = peer
+    if not unique:
+        return {**status, "agent_nodes": []}
+    with ThreadPoolExecutor(max_workers=min(12, len(unique))) as executor:
+        discovered = list(executor.map(probe_tailscale_node, unique.values()))
+    discovered = [item for item in discovered if item.get("tailscale_ip")]
+    discovered.sort(key=lambda item: (bool(item.get("self")), str(item.get("tailscale_ip") or "")))
+    return {**status, "agent_nodes": discovered}
+
+
 def online_tailscale_peer_for_ip(ip: str) -> dict[str, Any] | None:
     status = tailscale_status()
     if not status.get("ok"):
         return None
+    target_ip = str(ip or "").split("%", 1)[0]
+    self_info = status.get("self") if isinstance(status.get("self"), dict) else {}
+    self_ips = {str(item).split("%", 1)[0] for item in (self_info.get("tailscale_ips") or [])}
+    if target_ip in self_ips:
+        return {
+            "host_name": self_info.get("host_name"),
+            "dns_name": self_info.get("dns_name"),
+            "tailscale_ips": sorted(self_ips),
+            "online": True,
+            "self": True,
+        }
     for peer in status.get("peers") or []:
-        if ip in (peer.get("tailscale_ips") or []) and peer.get("online") is True:
+        peer_ips = {str(item).split("%", 1)[0] for item in (peer.get("tailscale_ips") or [])}
+        if target_ip in peer_ips and peer.get("online") is True:
             return peer
     return None
 
@@ -7939,6 +9591,126 @@ def pair_tailscale_agent(
         return payload
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
+
+
+def reset_node_connection_metadata(node: dict[str, Any]) -> None:
+    """Remove routing and role hints that belong to a previous Hub binding."""
+    for key in (
+        "public_base_url",
+        "upload_base_url",
+        "upload_base_urls",
+        "offline_since",
+        "hub_only",
+        "hub_connected_at",
+        "hub_url",
+        "control_hub_url",
+        "role_hints",
+    ):
+        node.pop(key, None)
+
+
+def clean_node_role_transition(
+    node: dict[str, Any],
+    target_role: str,
+    *,
+    role_url: str = "",
+    activation_pending: bool = False,
+    control_hub_url: str = "",
+) -> dict[str, Any]:
+    """Keep one canonical role record after an Agent/Hub conversion."""
+    if target_role not in {"agent", "hub"}:
+        raise ValueError("unsupported target role")
+    updated = dict(node)
+    raw_hints = updated.get("role_hints")
+    hints = dict(raw_hints) if isinstance(raw_hints, dict) else {}
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    if target_role == "hub":
+        hub_url = str(role_url or node_role_urls(updated)["hub"]).strip().rstrip("/")
+        for key in (
+            "base_url",
+            "agent_url",
+            "public_base_url",
+            "upload_base_url",
+            "upload_base_urls",
+            "offline_since",
+            "control_hub_url",
+        ):
+            updated.pop(key, None)
+        updated["hub_url"] = hub_url
+        updated["hub_role_url"] = hub_url
+        updated["hub_only"] = True
+        hints.pop("agent", None)
+        hints["hub"] = {
+            **dict(hints.get("hub") or {}),
+            "activation_pending": bool(activation_pending),
+            "prepared": True,
+            "enabled": not activation_pending,
+            "url": hub_url,
+            "message": "Hub role transition completed" if not activation_pending else "Hub activation scheduled",
+            "updated_at": now,
+        }
+    else:
+        canonical_agent_url = node_role_urls({
+            **updated,
+            "hub_only": False,
+            "hub_url": "",
+            "hub_role_url": "",
+        })["agent"]
+        for key in (
+            "hub_url",
+            "hub_role_url",
+            "hub_only",
+            "hub_connected_at",
+        ):
+            updated.pop(key, None)
+        updated["base_url"] = canonical_agent_url
+        updated["agent_url"] = canonical_agent_url
+        if control_hub_url:
+            updated["control_hub_url"] = str(control_hub_url).rstrip("/")
+        hints.pop("hub", None)
+        hints["agent"] = {
+            **dict(hints.get("agent") or {}),
+            "activation_pending": bool(activation_pending),
+            "prepared": True,
+            "enabled": not activation_pending,
+            "url": canonical_agent_url,
+            "message": "Agent role transition completed" if not activation_pending else "Agent activation scheduled",
+            "updated_at": now,
+        }
+
+    if hints:
+        updated["role_hints"] = hints
+    else:
+        updated.pop("role_hints", None)
+    return updated
+
+
+def clean_node_seed(node: dict[str, Any]) -> dict[str, Any]:
+    """Export a node record without stale runtime hints for a newly activated Hub."""
+    result = dict(node)
+    for key in (
+        "public_base_url",
+        "upload_base_url",
+        "upload_base_urls",
+        "offline_since",
+        "hub_only",
+        "hub_connected_at",
+        "hub_url",
+        "control_hub_url",
+        "role_hints",
+    ):
+        result.pop(key, None)
+    return result
+
+
+def clean_node_seeds(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [clean_node_seed(item) for item in nodes if isinstance(item, dict)]
+
+
+def hub_transfer_nodes() -> list[dict[str, Any]]:
+    """Return node records safe to import into a replacement Hub."""
+    return clean_node_seeds(load_nodes())
 
 
 def request_hub_status_url(hub_url: str, *, timeout: int = 5) -> dict[str, Any]:
@@ -8055,13 +9827,123 @@ def ensure_dirs() -> None:
             shutil.copyfile(example, NODES_FILE)
 
 
+def media_roots() -> list[Path]:
+    """Read the shared media root plus pre-shared role directories from older installs."""
+    candidates = [
+        MEDIA_DIR,
+        DATA_DIR / "media",
+        ROOT / "data" / "media",
+        ROOT / "agent_data" / "media",
+    ]
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        key = str(resolved).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots
+
+
+def iter_media_files() -> list[Path]:
+    files: list[Path] = []
+    seen: set[str] = set()
+    for root in media_roots():
+        if not root.is_dir():
+            continue
+        for path in root.iterdir():
+            if not path.is_file() or path.suffix.lower() not in ALLOWED_MEDIA_EXTENSIONS:
+                continue
+            key = path.name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(path)
+    return files
+
+
+_LOCAL_TAILSCALE_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "ips": set()}
+
+
+def local_tailscale_ipv4s_for_cleanup() -> set[str]:
+    now = time.monotonic()
+    if now < float(_LOCAL_TAILSCALE_IP_CACHE.get("expires_at") or 0):
+        return set(_LOCAL_TAILSCALE_IP_CACHE.get("ips") or set())
+    try:
+        status = tailscale_status()
+    except Exception:
+        status = {}
+    self_info = status.get("self") if isinstance(status, dict) else {}
+    ips: set[str] = set()
+    for value in (self_info.get("tailscale_ips") or []) if isinstance(self_info, dict) else []:
+        candidate = str(value or "").split("%", 1)[0].strip()
+        try:
+            parsed = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if parsed.version == 4 and parsed in TAILSCALE_CGNAT:
+            ips.add(str(parsed))
+    _LOCAL_TAILSCALE_IP_CACHE["expires_at"] = now + 5
+    _LOCAL_TAILSCALE_IP_CACHE["ips"] = ips
+    return set(ips)
+
+
+def node_matches_local_tailscale_ip(node: dict[str, Any], local_ips: set[str]) -> bool:
+    if not local_ips:
+        return False
+    candidates = [node.get("tailscale_ip")]
+    for key in ("base_url", "agent_url", "hub_url", "hub_role_url"):
+        candidates.append(node.get(key))
+    role_hints = node.get("role_hints") if isinstance(node.get("role_hints"), dict) else {}
+    for hint in role_hints.values():
+        if isinstance(hint, dict):
+            candidates.append(hint.get("url"))
+    for value in candidates:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        if raw in local_ips:
+            return True
+        try:
+            host = urlparse(raw).hostname
+        except ValueError:
+            host = None
+        if host and str(host).split("%", 1)[0] in local_ips:
+            return True
+    return False
+
+
+def prune_local_hub_node_records(nodes: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    local_ips = local_tailscale_ipv4s_for_cleanup()
+    if not local_ips:
+        return nodes, []
+    kept: list[dict[str, Any]] = []
+    removed: list[str] = []
+    for node in nodes:
+        node_id = str(node.get("id") or "").strip()
+        if node_id and not node.get("is_local_hub") and node_matches_local_tailscale_ip(node, local_ips):
+            removed.append(node_id)
+            continue
+        kept.append(node)
+    return kept, removed
+
+
 def load_nodes() -> list[dict[str, Any]]:
     ensure_dirs()
     try:
         data = json.loads(NODES_FILE.read_text(encoding="utf-8"))
     except Exception:
         return []
-    return [node for node in data if isinstance(node, dict)]
+    nodes = [node for node in data if isinstance(node, dict)]
+    cleaned, removed = prune_local_hub_node_records(nodes)
+    if removed:
+        try:
+            write_json_atomic(NODES_FILE, cleaned)
+        except OSError:
+            pass
+    return cleaned
 
 
 def save_nodes(nodes: list[dict[str, Any]]) -> None:
@@ -8085,12 +9967,38 @@ def hub_local_node() -> dict[str, Any]:
     settings = load_hub_settings()
     hub_name = str(settings.get("hub_name") or "").strip()
     return {
-        "id": HUB_LOCAL_NODE_ID,
+        "id": LOCAL_HUB_NODE_ID,
         "name": f"{hub_name} 本地" if hub_name else HUB_LOCAL_NODE_NAME,
-        "role": "hub-local",
+        "role": "hub",
         "hub_local": True,
+        "is_local_hub": True,
+        "hub_only": True,
         "enabled": True,
     }
+
+
+def normalize_agent_order(raw_order: Any, nodes: list[dict[str, Any]] | None = None) -> list[str]:
+    known_ids = [
+        str(node.get("id") or "").strip()
+        for node in (load_nodes() if nodes is None else nodes)
+        if isinstance(node, dict) and str(node.get("id") or "").strip()
+    ]
+    known = set(known_ids)
+    result: list[str] = []
+    seen: set[str] = set()
+    if isinstance(raw_order, list):
+        for value in raw_order:
+            node_id = str(value or "").strip()
+            if node_id and node_id in known and node_id not in seen:
+                seen.add(node_id)
+                result.append(node_id)
+    result.extend(node_id for node_id in known_ids if node_id not in seen)
+    return result
+
+
+def load_agent_order(nodes: list[dict[str, Any]] | None = None) -> list[str]:
+    settings = load_hub_settings()
+    return normalize_agent_order(settings.get("agent_order"), nodes)
 
 
 def node_youtube_profile_map() -> dict[str, str]:
@@ -8304,6 +10212,45 @@ def cleanup_verified_duplicates(
     }
 
 
+def local_hub_media_status() -> dict[str, Any]:
+    ensure_dirs()
+    usage = shutil.disk_usage(MEDIA_DIR)
+    return {
+        "ok": True,
+        "source_role": "hub",
+        "hostname": platform.node(),
+        "roles": {
+            "hub": {
+                "enabled": True,
+                "version": local_git_version(),
+                "url": local_tailscale_hub_url() or f"http://127.0.0.1:{PORT}",
+            },
+            "agent": {
+                "enabled": service_active("stream-control-headless-agent.service"),
+            },
+        },
+        "disk": {
+            "total": usage.total,
+            "used": usage.used,
+            "free": usage.free,
+            "percent": round((usage.used / usage.total) * 100, 2) if usage.total else 0,
+        },
+        "videos": list_media(),
+    }
+
+
+def local_hub_node() -> dict[str, Any]:
+    settings = load_hub_settings()
+    return {
+        "id": LOCAL_HUB_NODE_ID,
+        "name": str(settings.get("hub_name") or "当前控制 Hub"),
+        "role": "hub",
+        "enabled": True,
+        "hub_only": True,
+        "is_local_hub": True,
+    }
+
+
 def media_library_payload() -> dict[str, Any]:
     metadata = load_media_metadata()
     cleanup_verified_duplicates(metadata, execute=True)
@@ -8313,18 +10260,31 @@ def media_library_payload() -> dict[str, Any]:
     node_profiles = node_youtube_profile_map()
     default_profile_id = active_youtube_profile_id()
     node_disks: list[dict[str, Any]] = []
+    sources: list[tuple[dict[str, Any], dict[str, Any], str]] = [
+        (local_hub_node(), local_hub_media_status(), "hub"),
+    ]
     for node in load_nodes():
         if not node.get("enabled", True):
             continue
         node_id = str(node.get("id") or "")
         profile_id = safe_youtube_profile_id(node_profiles.get(node_id) or default_profile_id)
+        status = request_node_status(node, timeout=10)
+        source_role = str(status.get("source_role") or "").strip().lower()
+        if source_role not in {"agent", "hub"}:
+            source_role = "hub" if node.get("hub_only") else "agent"
+        sources.append((node, status, source_role))
+
+    for node, status, source_role in sources:
+        node_id = str(node.get("id") or "")
+        profile_id = safe_youtube_profile_id(node_profiles.get(node_id) or default_profile_id)
         profile = profiles.get(profile_id) or {}
         profile_name = str(profile.get("name") or profile_id)
-        status = request_node_json(node, "/api/status", timeout=10)
         disk = status.get("disk") or {}
         node_disks.append({
-            "node_id": str(node.get("id") or ""),
-            "node_name": str(node.get("name") or node.get("id") or "Agent"),
+            "node_id": node_id,
+            "node_name": str(node.get("name") or node_id or ("Hub" if source_role == "hub" else "Agent")),
+            "role": source_role,
+            "is_local_hub": bool(node.get("is_local_hub")),
             "online": bool(status.get("ok")),
             "total": int(disk.get("total") or 0),
             "used": int(disk.get("used") or 0),
@@ -8351,8 +10311,11 @@ def media_library_payload() -> dict[str, Any]:
                 item["modified_label"] = str(video.get("modified_label") or "--")
             item["size"] = max(int(item.get("size") or 0), int(video.get("size") or 0))
             item["copies"].append({
-                "node_id": str(node.get("id") or ""),
-                "node_name": str(node.get("name") or node.get("id") or "Agent"),
+                "node_id": node_id,
+                "node_name": str(node.get("name") or node_id or ("Hub" if source_role == "hub" else "Agent")),
+                "role": source_role,
+                "is_local_hub": bool(node.get("is_local_hub")),
+                "hub_local": bool(node.get("is_local_hub")),
                 "profile_id": profile_id,
                 "profile_name": profile_name,
                 "video_path": str(video.get("video_path") or video.get("path") or name),
@@ -8450,6 +10413,17 @@ def save_node_updates(node_id: str, updates: dict[str, Any]) -> dict[str, Any] |
         nodes[index] = updated
         save_nodes(nodes)
         return updated
+    return None
+
+
+def replace_node_record(node_id: str, updated: dict[str, Any]) -> dict[str, Any] | None:
+    nodes = load_nodes()
+    for index, node in enumerate(nodes):
+        if str(node.get("id") or "") != str(node_id):
+            continue
+        nodes[index] = dict(updated)
+        save_nodes(nodes)
+        return nodes[index]
     return None
 
 
@@ -8557,6 +10531,10 @@ def request_node_json(node: dict[str, Any], path: str, *, timeout: int = 6) -> d
             data = resp.json()
         except ValueError:
             data = {"message": resp.text[:500]}
+        if path == "/api/media" and isinstance(data, list):
+            data = {"ok": resp.ok, "videos": data}
+        if not isinstance(data, dict):
+            data = {"message": "Agent returned an invalid response"}
         data["ok"] = resp.ok and bool(data.get("ok", True))
         data.setdefault("status_code", resp.status_code)
         return data
@@ -8564,20 +10542,109 @@ def request_node_json(node: dict[str, Any], path: str, *, timeout: int = 6) -> d
         return {"ok": False, "message": str(exc)}
 
 
+def request_hub_json(node: dict[str, Any], path: str = "/api/status", *, timeout: int = 6) -> dict[str, Any]:
+    hub_url = node_role_urls(node)["hub"]
+    if not hub_url:
+        return {"ok": False, "message": "missing Hub URL"}
+    try:
+        response = requests.get(f"{hub_url}{path}", timeout=timeout)
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"message": response.text[:500]}
+        if path == "/api/media" and isinstance(data, list):
+            data = {"ok": response.ok, "videos": data}
+        if not isinstance(data, dict):
+            data = {"message": "Hub returned an invalid response"}
+        data["ok"] = response.ok and bool(data.get("ok", True))
+        data.setdefault("status_code", response.status_code)
+        return data
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+def request_node_status(node: dict[str, Any], *, timeout: int = 10) -> dict[str, Any]:
+    """Read status from either role so Hub-only nodes remain usable resource sources."""
+    role_hints = node.get("role_hints") if isinstance(node.get("role_hints"), dict) else {}
+    hub_hint = role_hints.get("hub") if isinstance(role_hints.get("hub"), dict) else {}
+    hub_first = bool(
+        node.get("hub_only")
+        or node.get("hub_url")
+        or node.get("hub_role_url")
+        or hub_hint.get("enabled")
+        or hub_hint.get("prepared")
+        or hub_hint.get("activation_pending")
+    )
+    probes = [
+        ("hub", request_hub_json),
+        ("agent", request_node_json),
+    ] if hub_first else [
+        ("agent", request_node_json),
+        ("hub", request_hub_json),
+    ]
+    errors: list[str] = []
+    for role, probe in probes:
+        result = probe(node, "/api/status", timeout=timeout)
+        if result.get("ok"):
+            result.setdefault("source_role", role)
+            return result
+        message = str(result.get("message") or "").strip()
+        if message:
+            errors.append(f"{role}: {message}")
+        media_result = probe(node, "/api/media", timeout=timeout)
+        if media_result.get("ok"):
+            media_result.setdefault("source_role", role)
+            media_result.setdefault("message", f"{role} status endpoint unavailable; media endpoint used")
+            return media_result
+        media_message = str(media_result.get("message") or "").strip()
+        if media_message:
+            errors.append(f"{role} media: {media_message}")
+    return {"ok": False, "message": "; ".join(errors) or "node status unavailable"}
+
+
 def node_base_url(node: dict[str, Any]) -> str:
-    return str(node.get("base_url") or "").rstrip("/")
+    return node_role_urls(node)["agent"]
 
 
 def node_role_urls(node: dict[str, Any]) -> dict[str, str]:
-    base_url = node_base_url(node)
-    parsed = urlparse(base_url)
-    host = parsed.hostname or ""
+    raw_agent_url = str(node.get("agent_url") or node.get("base_url") or "").strip().rstrip("/")
+    raw_hub_url = str(node.get("hub_role_url") or node.get("hub_url") or "").strip().rstrip("/")
+    agent_parsed = urlparse(raw_agent_url) if raw_agent_url else None
+    hub_parsed = urlparse(raw_hub_url) if raw_hub_url else None
+    host = (
+        (agent_parsed.hostname if agent_parsed else "")
+        or (hub_parsed.hostname if hub_parsed else "")
+        or str(node.get("tailscale_ip") or "").split("%", 1)[0].strip()
+    )
     if not host:
-        return {"agent": base_url, "hub": ""}
+        return {"agent": raw_agent_url, "hub": raw_hub_url}
     host_label = f"[{host}]" if ":" in host else host
+    agent_scheme = (agent_parsed.scheme if agent_parsed and agent_parsed.scheme in {"http", "https"} else "http")
+    hub_scheme = (hub_parsed.scheme if hub_parsed and hub_parsed.scheme in {"http", "https"} else agent_scheme)
+
+    # Older node records sometimes stored only a host, or accidentally stored the
+    # Hub's 8788 URL as base_url. The current Agent endpoint is always 8787.
+    agent_port = agent_parsed.port if agent_parsed else None
+    if agent_port in {None, PORT}:
+        agent_url = f"{agent_scheme}://{host_label}:{AGENT_PORT}"
+    else:
+        agent_url = raw_agent_url
+
+    hub_url = raw_hub_url
+    if not hub_url or (hub_parsed and hub_parsed.port is None):
+        hub_url = f"{hub_scheme}://{host_label}:{PORT}"
+    role_hints = node.get("role_hints") if isinstance(node.get("role_hints"), dict) else {}
+    hub_hint = role_hints.get("hub") if isinstance(role_hints.get("hub"), dict) else {}
+    local_hub_url = str(node.get("hub_role_url") or "").strip()
+    if not local_hub_url and (node.get("hub_only") or hub_hint.get("prepared") or hub_hint.get("activation_pending")):
+        local_hub_url = str(node.get("hub_url") or "").strip()
+    if local_hub_url:
+        local_hub_parsed = urlparse(local_hub_url)
+        if local_hub_parsed.port is None:
+            local_hub_url = f"{hub_scheme}://{host_label}:{PORT}"
     return {
-        "agent": base_url or f"http://{host_label}:8787",
-        "hub": str(node.get("hub_url") or f"http://{host_label}:8788").rstrip("/"),
+        "agent": agent_url.rstrip("/"),
+        "hub": (local_hub_url or hub_url or f"http://{host_label}:{PORT}").rstrip("/"),
     }
 
 
@@ -8681,18 +10748,28 @@ def update_private_env_file(path: Path, updates: dict[str, str]) -> None:
 
 
 def schedule_agent_role_activation(
-    control_hub_url: str,
+    control_hub_url: str = "",
     *,
     agent_name: str = "",
     agent_token: str = "",
+    allow_unbound: bool = False,
 ) -> dict[str, Any]:
+    try:
+        assert_role("hub", ROOT)
+    except RoleConflictError as exc:
+        raise RuntimeError(f"Agent activation requires the current HUB role: {exc}") from exc
+    control_hub_url = str(control_hub_url or "").strip().rstrip("/")
+    if not control_hub_url and not allow_unbound:
+        raise RuntimeError("a control Hub URL is required unless unbound Agent activation is enabled")
     if not shutil.which("systemd-run"):
         raise RuntimeError("systemd-run is required to activate the Agent role")
     unit = f"stream-control-agent-activate-{int(time.time())}"
     root = shlex.quote(str(ROOT))
     control_hub = shlex.quote(control_hub_url)
+    clear_control_hub = bool(allow_unbound and not control_hub_url)
     env_updates = {
         "STREAM_AGENT_CONTROL_HUB": control_hub_url,
+        "STREAM_AGENT_CONTROL_HUB_CLEAR": "1" if clear_control_hub else "0",
         "STREAM_AGENT_NAME": (
             agent_name
             or os.environ.get("STREAM_AGENT_NAME", "")
@@ -8706,6 +10783,8 @@ def schedule_agent_role_activation(
     update_private_env_file(ROOT / ".agent.env", env_updates)
     script = (
         f"set -eu; sleep 2; env INSTALL_DIR={root} STREAM_AGENT_CONTROL_HUB={control_hub} "
+        f"STREAM_AGENT_CONTROL_HUB_CLEAR={'1' if clear_control_hub else '0'} "
+        "ROLE_SWITCH_CONFIRMED=1 "
         f"CHOICE=1 sh {root}/scripts/install-agent.sh"
     )
     result = subprocess.run(
@@ -8716,19 +10795,69 @@ def schedule_agent_role_activation(
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "failed to schedule Agent activation").strip())
-    return {"unit": unit, "role": "agent", "control_hub": control_hub_url}
+    return {
+        "unit": unit,
+        "role": "agent",
+        "control_hub": control_hub_url,
+        "unbound": clear_control_hub,
+    }
 
 
-def schedule_hub_upgrade() -> dict[str, Any]:
+def schedule_hub_upgrade(target_version: str = "") -> dict[str, Any]:
+    try:
+        assert_role("hub", ROOT)
+    except RoleConflictError as exc:
+        raise RuntimeError(str(exc)) from exc
     if not shutil.which("systemd-run") or not (ROOT / ".git").exists():
         raise RuntimeError("Hub must be a Git-managed systemd installation")
     unit = f"stream-control-hub-upgrade-{int(time.time())}"
     root = shlex.quote(str(ROOT))
+    branch = shlex.quote(SOURCE_BRANCH)
+    target_version = normalize_target_version(target_version) or latest_source_version()
+    existing = load_upgrade_status()
+    if str(existing.get("state") or "").lower() in {"pending", "running"}:
+        existing_unit = str(existing.get("unit") or "")
+        recent_pending = (
+            str(existing.get("state") or "").lower() == "pending"
+            and time.time() - float(existing.get("updated_at") or 0) < 90
+        )
+        if upgrade_unit_active(existing_unit) or recent_pending:
+            raise RuntimeError("已有 Hub 升级任务正在执行，请等待当前任务完成后再试。")
+    status_file = shlex.quote(str(DATA_DIR / ".upgrade-status.json"))
     script = (
-        "set -eu; sleep 2; "
-        f"git -C {root} fetch origin main; git -C {root} checkout main; "
-        f"git -C {root} pull --ff-only origin main; env BRANCH=main CHOICE=1 "
-        f"STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 sh {root}/scripts/install-hub.sh"
+        "set -eu; "
+        "sleep 2; "
+        f"status_file={status_file}; "
+        "write_status() { "
+        "tmp=\"$status_file.tmp.$$\"; "
+        "printf 'state=%s\\nunit=%s\\ntarget_version=%s\\nmessage=%s\\nexit_code=%s\\nupdated_at=%s\\n' "
+        f"\"$1\" {shlex.quote(unit)} {shlex.quote(target_version)} \"$2\" \"$3\" \"$(date +%s)\" > \"$tmp\"; "
+        "mv \"$tmp\" \"$status_file\"; "
+        "}; "
+        "cleanup_upgrade_status() { :; }; "
+        "finish_upgrade() { "
+        "code=\"$?\"; "
+        "if [ \"$code\" -eq 0 ]; then write_status succeeded 'Hub upgrade completed' 0; "
+        "elif [ \"$code\" -eq 78 ]; then write_status failed 'Installed Hub version did not match the target version' 78; "
+        "else write_status failed 'Hub upgrade task failed' \"$code\"; fi; "
+        "cleanup_upgrade_status; "
+        "exit \"$code\"; "
+        "}; "
+        "trap finish_upgrade EXIT; "
+        "write_status running 'Hub upgrade is running' 0; "
+        f"test -z \"$(git -C {root} status --porcelain --untracked-files=no)\"; "
+        f"env BRANCH={branch} CHOICE=1 "
+        f"INSTALL_DIR={root} "
+        f"STREAM_HUB_SUPPRESS_TOKEN_OUTPUT=1 sh {root}/scripts/install-hub.sh; "
+        f"actual_version=\"$(git -C {root} rev-parse --short HEAD)\"; "
+        f"if [ -n {shlex.quote(target_version)} ] && [ \"$actual_version\" != {shlex.quote(target_version)} ]; then "
+        f"echo \"HUB upgrade finished at $actual_version, expected {shlex.quote(target_version)}\" >&2; exit 78; fi"
+    )
+    save_upgrade_status(
+        state="pending",
+        unit=unit,
+        target_version=target_version,
+        message="Hub upgrade task scheduled",
     )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
@@ -8737,8 +10866,21 @@ def schedule_hub_upgrade() -> dict[str, Any]:
         timeout=15,
     )
     if result.returncode != 0:
+        save_upgrade_status(
+            state="failed",
+            unit=unit,
+            target_version=target_version,
+            message=(result.stderr or result.stdout or "Hub upgrade task could not be scheduled").strip(),
+            exit_code=result.returncode,
+        )
         raise RuntimeError((result.stderr or result.stdout or "failed to schedule Hub upgrade").strip())
-    return {"unit": unit, "role": "hub", "from_version": local_git_version(), "target_branch": "main"}
+    return {
+        "unit": unit,
+        "role": "hub",
+        "from_version": local_git_version(),
+        "target_branch": SOURCE_BRANCH,
+        "target_version": target_version,
+    }
 
 
 def schedule_hub_deactivation() -> dict[str, Any]:
@@ -8746,7 +10888,10 @@ def schedule_hub_deactivation() -> dict[str, Any]:
         raise RuntimeError("Hub must be a systemd installation to deactivate from the panel")
     unit = f"stream-control-hub-deactivate-{int(time.time())}"
     root = shlex.quote(str(ROOT))
-    script = f"set -eu; sleep 2; ACTION=uninstall REMOVE_DATA=0 sh {root}/scripts/install-hub.sh"
+    script = (
+        f"set -eu; sleep 2; ACTION=uninstall REMOVE_DATA=0 INSTALL_DIR={root} "
+        f"sh {root}/scripts/install-hub.sh"
+    )
     result = subprocess.run(
         ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
         text=True,
@@ -9633,6 +11778,9 @@ def remove_node_record(node_id: str) -> dict[str, Any]:
     if len(remaining) == len(nodes):
         return {"ok": False, "node_id": node_id, "message": "node not found"}
     save_nodes(remaining)
+    settings = load_hub_settings()
+    settings["agent_order"] = normalize_agent_order(settings.get("agent_order"), remaining)
+    save_hub_settings(settings)
     return {"ok": True, "node_id": node_id, "deleted": True, "remaining_count": len(remaining)}
 
 
@@ -10252,9 +12400,7 @@ def ensure_media_disk_space(incoming_size: int) -> None:
 def list_media() -> list[dict[str, Any]]:
     ensure_dirs()
     items = []
-    for path in sorted(MEDIA_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if not path.is_file() or path.suffix.lower() not in ALLOWED_MEDIA_EXTENSIONS:
-            continue
+    for path in sorted(iter_media_files(), key=lambda p: p.stat().st_mtime, reverse=True):
         stat = path.stat()
         items.append({
             "name": path.name,
@@ -10269,21 +12415,43 @@ def list_media() -> list[dict[str, Any]]:
 @APP.get("/api/settings")
 def api_hub_settings():
     settings = load_hub_settings()
-    return jsonify({"ok": True, "hub_name": str(settings.get("hub_name") or "Stream Control Hub")})
+    nodes = load_nodes()
+    agent_order = load_agent_order(nodes)
+    if settings.get("agent_order") != agent_order:
+        settings["agent_order"] = agent_order
+        save_hub_settings(settings)
+    return jsonify({
+        "ok": True,
+        "hub_name": str(settings.get("hub_name") or "Stream Control Hub"),
+        "agent_order": agent_order,
+    })
 
 
 @APP.post("/api/settings")
 def api_save_hub_settings():
     payload = request.get_json(silent=True) or {}
-    hub_name = " ".join(str(payload.get("hub_name") or "").split()).strip()
-    if not hub_name:
-        return jsonify({"ok": False, "message": "Hub name is required"}), 400
-    if len(hub_name) > 80:
-        return jsonify({"ok": False, "message": "Hub name is limited to 80 characters"}), 400
+    has_hub_name = "hub_name" in payload
+    has_agent_order = "agent_order" in payload
+    if not has_hub_name and not has_agent_order:
+        return jsonify({"ok": False, "message": "hub_name or agent_order is required"}), 400
     settings = load_hub_settings()
-    settings["hub_name"] = hub_name
+    response: dict[str, Any] = {"ok": True}
+    if has_hub_name:
+        hub_name = " ".join(str(payload.get("hub_name") or "").split()).strip()
+        if not hub_name:
+            return jsonify({"ok": False, "message": "Hub name is required"}), 400
+        if len(hub_name) > 80:
+            return jsonify({"ok": False, "message": "Hub name is limited to 80 characters"}), 400
+        settings["hub_name"] = hub_name
+        response["hub_name"] = hub_name
+    if has_agent_order:
+        if not isinstance(payload.get("agent_order"), list):
+            return jsonify({"ok": False, "message": "agent_order must be a list"}), 400
+        agent_order = normalize_agent_order(payload.get("agent_order"), load_nodes())
+        settings["agent_order"] = agent_order
+        response["agent_order"] = agent_order
     save_hub_settings(settings)
-    return jsonify({"ok": True, "hub_name": hub_name})
+    return jsonify(response)
 
 
 @APP.get("/api/media-library")
@@ -10357,7 +12525,7 @@ def api_nodes():
             event for event in autotune_history
             if str(event.get("node_id") or "") == str(node.get("id") or "")
         ][:20]
-        node_view["health"] = request_node_json(node, "/api/status") if node.get("enabled", True) else {"ok": False}
+        node_view["health"] = request_node_status(node) if node.get("enabled", True) else {"ok": False}
         lock = dict(stream_locks.get(str(node.get("id") or ""), {}))
         stream_config = node_view["health"].get("stream_config") or {}
         if not lock.get("youtube_stream_id") and stream_config.get("youtube_stream_id"):
@@ -10375,13 +12543,38 @@ def api_nodes():
         prepared_agent = dict(hub_role.pop("_prepared_agent", {}) or {})
         agent_role_status = (agent_health.get("roles") or {}).get("agent") or {}
         prepared_hub = (agent_health.get("roles") or {}).get("hub") or {}
-        agent_enabled = bool(agent_health.get("ok"))
+        agent_enabled = bool(
+            agent_health.get("ok")
+            and (
+                agent_health.get("source_role") != "hub"
+                or bool((agent_health.get("roles") or {}).get("agent", {}).get("enabled"))
+            )
+        )
+        agent_service_enabled = bool(
+            agent_role_status.get("enabled")
+            or prepared_agent.get("enabled")
+            or agent_hint.get("enabled")
+        )
+        agent_present = bool(
+            agent_enabled
+            or agent_service_enabled
+            or agent_role_status.get("prepared")
+            or prepared_agent.get("prepared")
+            or agent_hint.get("prepared")
+            or agent_hint.get("activation_pending")
+            or node.get("base_url")
+            or node.get("agent_url")
+            or node.get("tailscale_ip")
+            or node.get("hub_url")
+            or node.get("hub_only")
+        )
         hub_view = hub_role if hub_role.get("enabled") else {**hub_hint, **prepared_hub, **hub_role}
         if hub_view.get("enabled"):
             hub_view["activation_pending"] = False
         node_view["roles"] = {
             "agent": {
                 "enabled": agent_enabled,
+                "present": agent_present,
                 "prepared": bool(
                     agent_role_status.get("prepared")
                     or prepared_agent.get("prepared")
@@ -10389,6 +12582,7 @@ def api_nodes():
                     or agent_hint.get("activation_pending")
                 ),
                 "version": str(agent_info.get("version") or prepared_agent.get("version") or agent_hint.get("version") or "unrecognized"),
+                "upgrade_status": agent_info.get("upgrade_status") or agent_role_status.get("upgrade_status") or {},
                 "url": str(agent_hint.get("url") or urls["agent"]),
                 "activation_pending": bool(agent_hint.get("activation_pending")) and not agent_enabled,
             },
@@ -10579,7 +12773,7 @@ def api_import_nodes():
         if not isinstance(raw, dict):
             skipped += 1
             continue
-        node = dict(raw)
+        node = clean_node_seed(raw)
         node_id = str(node.get("id") or "").strip()
         if not node_id:
             skipped += 1
@@ -10603,7 +12797,7 @@ def api_transfer_nodes_to_hub():
     result = post_url_json(
         f"{target}/api/nodes/import",
         {
-            "nodes": load_nodes(),
+            "nodes": hub_transfer_nodes(),
             "source_hub": current_hub_source_url(),
             "transfer_mode": "tailnet-push",
         },
@@ -10619,9 +12813,70 @@ def api_transfer_nodes_to_hub():
     return jsonify({"target_hub_url": target, "target_input": target_raw, **result}), status_code
 
 
+def hub_transfer_headers(node: dict[str, Any]) -> list[dict[str, str]]:
+    """Try trusted Tailnet writes first, then credentials already stored for this node."""
+    headers = [{}]
+    for key in ("hub_token", "hub_control_token", "control_token", "token"):
+        value = str(node.get(key) or "").strip()
+        if value:
+            headers.append({"X-Control-Token": value})
+    return headers
+
+
+@APP.post("/api/hubs/transfer")
+def api_transfer_nodes_to_known_hub():
+    """Transfer to a known active Hub without exposing its address or token in the UI."""
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "目标 Hub 节点不存在，请刷新节点列表后重试"}), 404
+
+    hub_status = request_hub_role_status(node)
+    target_raw = str(hub_status.get("url") or node_role_urls(node)["hub"] or "").strip()
+    target, error = normalize_hub_transfer_target(target_raw)
+    if error:
+        return jsonify({"ok": False, "node_id": node_id, "message": "目标 Hub 地址无效，请先重新激活该节点"}), 409
+    if target.rstrip("/") == current_hub_source_url().rstrip("/"):
+        return jsonify({"ok": False, "node_id": node_id, "message": "目标就是当前 Hub，无需重复转移"}), 409
+    if not hub_status.get("ok") or not hub_status.get("enabled"):
+        return jsonify({
+            "ok": False,
+            "node_id": node_id,
+            "target_hub_url": target,
+            "message": "目标 Hub 当前不在线或尚未激活，请先激活目标 Hub 后再转移",
+        }), 409
+
+    result: dict[str, Any] = {"ok": False, "message": "目标 Hub 拒绝导入"}
+    for headers in hub_transfer_headers(node):
+        result = post_url_json(
+            f"{target}/api/nodes/import",
+            {
+                "nodes": hub_transfer_nodes(),
+                "source_hub": current_hub_source_url(),
+                "transfer_mode": "known-tailnet-hub",
+            },
+            timeout=30,
+            headers=headers,
+        )
+        if result.get("ok") or int(result.get("status_code") or 0) not in {401, 403}:
+            break
+    if not result.get("ok") and int(result.get("status_code") or 0) in {401, 403}:
+        result["message"] = "目标 Hub 未开启可信 Tailnet 写入，无法自动完成转移；请先重新激活目标 Hub"
+    status_code = 200 if result.get("ok") else int(result.get("status_code") or 502)
+    return jsonify({
+        "node_id": node_id,
+        "target_node_id": node_id,
+        "node_name": str(node.get("name") or node_id),
+        "target_hub_url": target,
+        "connection_replaced": True,
+        **result,
+    }), status_code
+
+
 @APP.post("/api/hubs/sync")
 def api_sync_all_hubs():
-    current_nodes = load_nodes()
+    current_nodes = hub_transfer_nodes()
     source_hub = request.host_url.rstrip("/")
     results: list[dict[str, Any]] = []
     for node in current_nodes:
@@ -10684,14 +12939,23 @@ def api_hub_switch_target():
 @APP.get("/api/role-status")
 def api_hub_role_status():
     host = (request.host.split(":", 1)[0] or "127.0.0.1").strip("[]")
+    agent_enabled = service_active("stream-control-headless-agent.service")
     return jsonify({
         "ok": True,
+        "role_conflict": agent_enabled,
         "roles": {
-            "hub": {"enabled": True, "version": local_git_version(), "url": f"http://{host}:{PORT}"},
+            "hub": {
+                "enabled": True,
+                "version": local_git_version(),
+                "upgrade_status": load_upgrade_status(),
+                "policy_version": POLICY_VERSION,
+                "url": f"http://{host}:{PORT}",
+            },
             "agent": {
-                "enabled": service_active("stream-control-headless-agent.service"),
+                "enabled": agent_enabled,
                 "prepared": (ROOT / "scripts" / "install-agent.sh").exists(),
                 "version": local_git_version(),
+                "upgrade_status": load_upgrade_status(),
                 "url": f"http://{host}:8787",
             },
         },
@@ -10701,19 +12965,23 @@ def api_hub_role_status():
 @APP.post("/api/roles/agent/activate")
 def api_activate_agent_role():
     payload = request.get_json(silent=True) or {}
-    control_hub_url = str(payload.get("control_hub_url") or request.host_url.rstrip("/")).strip().rstrip("/")
-    parsed = urlparse(control_hub_url)
-    if not parsed.hostname or not is_private_or_loopback_host(parsed.hostname):
-        return jsonify({"ok": False, "message": "control_hub_url must use a private or Tailscale address"}), 400
+    allow_unbound = bool(payload.get("allow_unbound"))
+    raw_control_hub_url = str(payload.get("control_hub_url") or "").strip().rstrip("/")
+    control_hub_url = raw_control_hub_url or ("" if allow_unbound else request.host_url.rstrip("/"))
+    if control_hub_url:
+        parsed = urlparse(control_hub_url)
+        if not parsed.hostname or not is_private_or_loopback_host(parsed.hostname):
+            return jsonify({"ok": False, "message": "control_hub_url must use a private or Tailscale address"}), 400
     try:
         result = schedule_agent_role_activation(
             control_hub_url,
             agent_name=str(payload.get("agent_name") or "").strip(),
             agent_token=str(payload.get("agent_token") or "").strip(),
+            allow_unbound=allow_unbound,
         )
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
-    return jsonify({"ok": True, "accepted": True, "message": "Agent activation scheduled; Hub remains active", "result": result}), 202
+    return jsonify({"ok": True, "accepted": True, "message": "Agent activation scheduled; the HUB role will be stopped automatically", "result": result}), 202
 
 
 @APP.post("/api/roles/hub/deactivate")
@@ -10732,16 +13000,23 @@ def api_deactivate_agent_role_from_hub():
 
 @APP.post("/api/upgrade")
 def api_upgrade_hub():
+    payload = request.get_json(silent=True) or {}
     try:
-        result = schedule_hub_upgrade()
+        result = schedule_hub_upgrade(str(payload.get("target_version") or ""))
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
-    return jsonify({"ok": True, "accepted": True, "message": "Hub upgrade scheduled; Agent remains active", "result": result}), 202
+    return jsonify({"ok": True, "accepted": True, "message": "HUB upgrade scheduled; the HUB service and role conflict state will be reconciled", "result": result}), 202
 
 
 @APP.get("/api/media")
 def api_media():
     return jsonify(list_media())
+
+
+@APP.get("/api/status")
+def api_hub_status():
+    """Expose Hub-local media and disk status to other Hubs."""
+    return jsonify(local_hub_media_status())
 
 
 @APP.post("/api/nodes/upload-target")
@@ -10863,7 +13138,7 @@ def api_push_audit():
 
 @APP.get("/api/tailscale/status")
 def api_tailscale_status():
-    return jsonify(tailscale_status())
+    return jsonify(enrich_tailscale_status(tailscale_status()))
 
 
 @APP.get("/api/install-commands")
@@ -10904,6 +13179,107 @@ def api_tailscale_connect():
     return jsonify(result), 200 if result.get("ok") else 500
 
 
+@APP.post("/api/tailscale/activate-agent")
+def api_tailscale_activate_agent():
+    """Start an Agent role on a discovered Hub so it can later be paired into Agent table."""
+    if not dangerous_local_action_allowed():
+        return reject_forbidden("Tailscale Agent 激活需要 localhost、可信网络或 STREAM_HUB_CONTROL_TOKEN")
+    payload = request.get_json(silent=True) or {}
+    raw_ip = str(payload.get("tailscale_ip") or payload.get("ip") or "").strip()
+    agent_name = str(payload.get("name") or payload.get("agent_name") or "").strip()
+    try:
+        ip = ipaddress.ip_address(raw_ip.split("%", 1)[0])
+    except ValueError:
+        return jsonify({"ok": False, "message": "请输入有效的 Tailscale IP，例如 100.x.x.x"}), 400
+    if ip not in TAILSCALE_CGNAT:
+        return jsonify({"ok": False, "message": "这个地址不是 Tailscale 100.x 地址，请确认后再激活"}), 400
+    peer = online_tailscale_peer_for_ip(str(ip))
+    if not peer:
+        return jsonify({"ok": False, "message": "目标设备不在线或不在当前 Tailnet"}), 400
+
+    hub_url = f"http://{ip}:{PORT}"
+    hub_status = request_hub_status_url(hub_url)
+    hub_roles = hub_status.get("roles") if isinstance(hub_status.get("roles"), dict) else {}
+    hub_role = hub_roles.get("hub") if isinstance(hub_roles.get("hub"), dict) else {}
+    if not hub_status.get("ok") or not hub_role.get("enabled"):
+        return jsonify({
+            "ok": False,
+            "message": "目标设备当前不是在线 Hub，不能从这里激活 Agent",
+            "tailscale_ip": str(ip),
+            "hub_url": hub_url,
+        }), 409
+
+    nodes = load_nodes()
+    base_url = f"http://{ip}:{AGENT_PORT}"
+    target_index = next((
+        index for index, item in enumerate(nodes)
+        if str(item.get("tailscale_ip") or "") == str(ip)
+        or node_role_urls(item)["hub"] == hub_url
+    ), -1)
+    if target_index >= 0:
+        node = dict(nodes[target_index])
+        node_id = str(node.get("id") or "")
+    else:
+        peer_name = str(peer.get("host_name") or peer.get("dns_name") or "").split(".", 1)[0].strip()
+        base_id = secure_filename(agent_name or peer_name or f"agent-{str(ip).replace('.', '-')}")
+        node_id = base_id or f"agent-{str(ip).replace('.', '-')}"
+        existing_ids = {str(item.get("id") or "") for item in nodes}
+        suffix = 2
+        while node_id in existing_ids:
+            node_id = f"{base_id}-{suffix}"
+            suffix += 1
+        node = {"id": node_id, "name": agent_name or peer_name or node_id, "role": "stream-node", "enabled": True}
+
+    agent_token = str(node.get("token") or node.get("control_token") or "").strip() or secrets.token_urlsafe(32)
+    result = post_url_json(
+        f"{hub_url}/api/roles/agent/activate",
+        {
+            "control_hub_url": current_hub_source_url(),
+            "agent_name": agent_name or str(node.get("name") or node_id),
+            "agent_token": agent_token,
+        },
+        timeout=30,
+    )
+    if not result.get("ok"):
+        return jsonify({
+            "ok": False,
+            "tailscale_ip": str(ip),
+            "hub_url": hub_url,
+            **result,
+        }), int(result.get("status_code") or 502)
+
+    node.update({
+        "id": node_id,
+        "name": agent_name or str(node.get("name") or node_id),
+        "enabled": True,
+        "tailscale_ip": str(ip),
+        "token": agent_token,
+        "last_online_at": retention_timestamp_text(),
+    })
+    node = clean_node_role_transition(
+        node,
+        "agent",
+        activation_pending=True,
+        control_hub_url=current_hub_source_url(),
+    )
+    if target_index >= 0:
+        nodes[target_index] = node
+    else:
+        nodes.append(node)
+    save_nodes(nodes)
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "message": "Agent 激活任务已提交；服务上线后可在 Tailscale Agent 列表中点击加入",
+        "tailscale_ip": str(ip),
+        "node_id": node_id,
+        "agent_url": base_url,
+        "hub_url": hub_url,
+        "created": target_index < 0,
+        "result": result,
+    }), 202
+
+
 @APP.post("/api/tailscale/connect-existing-ip")
 def api_tailscale_connect_existing_ip():
     if not dangerous_local_action_allowed():
@@ -10913,7 +13289,8 @@ def api_tailscale_connect_existing_ip():
     agent_name = str(payload.get("name") or payload.get("agent_name") or "").strip()
     manual_token = str(payload.get("token") or "").strip()
     supplied_token = manual_token
-    confirm_rebind = bool(payload.get("confirm_rebind") or payload.get("force_rebind"))
+    replace_connection = bool(payload.get("replace_connection", False))
+    confirm_rebind = bool(payload.get("confirm_rebind") or payload.get("force_rebind") or replace_connection)
     raw_ip = str(payload.get("tailscale_ip") or payload.get("ip") or "").strip()
     try:
         ip = ipaddress.ip_address(raw_ip.split("%", 1)[0])
@@ -10989,11 +13366,16 @@ def api_tailscale_connect_existing_ip():
                     node_id_for_ip = f"{base_id}-{suffix}"
                     suffix += 1
                 node = {"id": node_id_for_ip, "name": agent_name or peer_name or node_id_for_ip, "role": "stream-node", "enabled": True}
+            if replace_connection:
+                reset_node_connection_metadata(node)
+                node.pop("token", None)
             node["base_url"] = base_url
             node["hub_url"] = hub_url
+            node["control_hub_url"] = hub_url
             node["tailscale_ip"] = str(ip)
             node["hub_only"] = True
             node["hub_connected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            node["last_online_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             if target_index >= 0:
                 nodes[target_index] = node
             else:
@@ -11041,6 +13423,8 @@ def api_tailscale_connect_existing_ip():
     creating = target_index < 0
     if target_index >= 0:
         node = dict(nodes[target_index])
+        if replace_connection:
+            reset_node_connection_metadata(node)
         node["token"] = supplied_token
     else:
         base_id = secure_filename(agent_name).strip("-_") or f"agent-{str(ip).replace('.', '-')}"
@@ -11074,14 +13458,17 @@ def api_tailscale_connect_existing_ip():
             "status_code": status_code,
         }), status_code
 
-    if previous_base_url and previous_base_url != base_url and not node.get("public_base_url"):
+    if previous_base_url and previous_base_url != base_url and not replace_connection and not node.get("public_base_url"):
         node["public_base_url"] = previous_base_url
     node["base_url"] = base_url
+    node.pop("hub_url", None)
+    node["control_hub_url"] = hub_url
     agent = status.get("agent") if isinstance(status.get("agent"), dict) else {}
     if creating:
         node["name"] = str(agent.get("name") or status.get("hostname") or node_id)
     node["tailscale_ip"] = str(ip)
     node["tailscale_connected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    node["last_online_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if target_index >= 0:
         nodes[target_index] = node
     else:
@@ -11099,6 +13486,8 @@ def api_tailscale_connect_existing_ip():
         "paired_via": str(pairing.get("paired_via") or ("supplied-token" if manual_token else "tailscale")),
         "pairing_warning": pairing_warning,
         "token_rotated": bool(pairing.get("token_rotated")),
+        "connection_replaced": replace_connection,
+        "hub_url": hub_url,
     })
 
 
@@ -11303,6 +13692,57 @@ def api_media_upload():
     return jsonify({"ok": True, "media": target.name, "size": target.stat().st_size})
 
 
+@APP.post("/api/hubs/media/upload")
+def api_remote_hub_media_upload():
+    """Proxy a browser upload to a known remote Hub's temporary media store."""
+    node_id = str(request.form.get("node_id") or "").strip()
+    node = node_by_id(node_id)
+    upload = request.files.get("file")
+    if not node:
+        return jsonify({"ok": False, "message": "Hub node not found"}), 404
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "message": "missing file"}), 400
+    if not media_allowed(upload.filename):
+        return jsonify({"ok": False, "message": "unsupported media extension"}), 400
+    hub_status = request_hub_role_status(node)
+    hub_url = str(hub_status.get("url") or node_role_urls(node)["hub"] or "").rstrip("/")
+    if not hub_url or not hub_status.get("enabled"):
+        return jsonify({"ok": False, "message": "目标 Hub 当前不在线或尚未激活"}), 409
+
+    result: dict[str, Any] = {"ok": False, "message": "remote Hub upload failed"}
+    for headers in hub_transfer_headers(node):
+        with suppress(Exception):
+            upload.stream.seek(0)
+        try:
+            response = requests.post(
+                f"{hub_url}/api/media/upload",
+                files={"file": (upload.filename, upload.stream, upload.mimetype or "application/octet-stream")},
+                headers=headers,
+                timeout=(15, 3600),
+            )
+            try:
+                result = response.json()
+            except ValueError:
+                result = {"ok": False, "message": response.text[:500]}
+            result["ok"] = response.ok and bool(result.get("ok", False))
+            result.setdefault("status_code", response.status_code)
+        except Exception as exc:
+            result = {"ok": False, "message": str(exc)}
+        if result.get("ok"):
+            break
+        if int(result.get("status_code") or 0) not in {401, 403}:
+            break
+    status_code = 200 if result.get("ok") else int(result.get("status_code") or 502)
+    return jsonify({
+        "ok": bool(result.get("ok")),
+        "node_id": node_id,
+        "hub_url": hub_url,
+        "media": result.get("media"),
+        "size": result.get("size"),
+        "message": result.get("message") or ("remote Hub upload complete" if result.get("ok") else "remote Hub upload failed"),
+    }), status_code
+
+
 @APP.post("/api/media/push")
 def api_media_push():
     payload = request.get_json(silent=True) or {}
@@ -11311,10 +13751,13 @@ def api_media_push():
         media_name = safe_media_filename(str(payload.get("media_name") or ""))
     except ValueError as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
-    media_path = MEDIA_DIR / media_name
+    media_path = next(
+        (path for path in iter_media_files() if path.name.casefold() == media_name.casefold()),
+        None,
+    )
     if not node_ids:
         return jsonify({"ok": False, "message": "no nodes selected"}), 400
-    if not media_path.exists():
+    if media_path is None or not media_path.exists():
         return jsonify({"ok": False, "message": "media not found"}), 404
     if not media_path.is_file() or not media_allowed(media_path.name):
         return jsonify({"ok": False, "message": "unsupported media file"}), 400
@@ -11547,6 +13990,7 @@ def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
         "fps": int(payload.get("fps") or 30),
         "resolution": str(payload.get("resolution") or "1280x720").strip() or "1280x720",
         "keyframe_seconds": int(payload.get("keyframe_seconds") or 2),
+        "motion_level": str(payload.get("motion_level") or "").strip().lower(),
     }
 
 
@@ -11622,6 +14066,9 @@ def api_nodes_stream_recommend():
         return jsonify({"ok": False, "message": "node disabled"}), 409
     node_payload = stream_payload_for_node(payload)
     node_payload["stream_key"] = ""
+    if node_payload.get("motion_level") not in {"static", "medium", "dynamic"}:
+        cached = cached_motion_profile(node_id, node_payload.get("video_path") or "")
+        node_payload["motion_level"] = str((cached or {}).get("level") or "medium")
     youtube_client = youtube_client_for_id(str(node_payload.get("youtube_profile_id") or ""))
     result = post_node_json(node, "/api/stream/recommend", node_payload, timeout=45)
     if (
@@ -11676,7 +14123,10 @@ def api_nodes_stream_start():
         try:
             node_payload["youtube_ingestion_url"] = youtube_client_for_id(str(node_payload.get("youtube_profile_id") or "")).ingestion_target(node_payload["youtube_stream_id"])
         except Exception as exc:
-            return youtube_error_response(exc)
+            if not youtube_api_error_is_transient(exc):
+                return youtube_error_response(exc)
+    node_payload = issue_policy(node_payload, reason="hub-stream-start")
+    motion_analysis: dict[str, Any] = {"scheduled": False, "cached": False}
     result = post_node_json(node, "/api/start-stream", node_payload, timeout=60)
     if result.get("ok"):
         with suppress(Exception):
@@ -11689,10 +14139,13 @@ def api_nodes_stream_start():
                 "media_local": node_payload.get("media_local"),
                 "source_node_id": node_payload.get("source_node_id"),
             })
+        if node_payload.get("adaptive_mode") != "off":
+            motion_analysis = schedule_motion_analysis(node, node_payload.get("video_path") or "")
     status_code = 200 if result.get("ok") else 502
     return jsonify({
         "node_id": node_id,
         "media_ensure": ensured,
+        "motion_analysis": motion_analysis,
         **redacted_stream_result(result),
     }), status_code
 
@@ -11862,6 +14315,9 @@ def api_youtube_profile_save():
         "auto_tune_enabled": bool(payload.get("auto_tune_enabled")),
         "auto_tune_interval_seconds": max(60, min(3600, int(payload.get("auto_tune_interval_seconds") or 300))),
         "auto_tune_cooldown_seconds": max(60, min(7200, int(payload.get("auto_tune_cooldown_seconds") or 900))),
+        "auto_tune_recovery_stable_seconds": max(
+            1200, min(86400, int(payload.get("auto_tune_recovery_stable_seconds") or YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS))
+        ),
         "auto_tune_min_bitrate": max(300, min(20000, int(payload.get("auto_tune_min_bitrate") or 800))),
         "auto_tune_max_bitrate": max(800, min(40000, int(payload.get("auto_tune_max_bitrate") or 40000))),
     }
@@ -12222,9 +14678,10 @@ def api_nodes_upgrade():
     upgrade_api = str(node.get("upgrade_api") or "/api/upgrade").strip() or "/api/upgrade"
     if not upgrade_api.startswith("/"):
         upgrade_api = f"/{upgrade_api}"
-    result = post_node_json(node, upgrade_api, {}, timeout=30)
+    target_version = latest_source_version() or local_git_version()
+    result = post_node_json(node, upgrade_api, {"target_version": target_version}, timeout=30)
     status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
-    return jsonify({"node_id": node_id, **result}), status_code
+    return jsonify({"node_id": node_id, "target_version": target_version, **result}), status_code
 
 
 @APP.post("/api/nodes/roles/<role>/activate")
@@ -12238,29 +14695,48 @@ def api_activate_node_role(role: str):
         return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
     if role == "hub":
         hub_url = node_role_urls(node)["hub"]
+        existing_hub = request_hub_role_status(node)
+        if existing_hub.get("ok") and existing_hub.get("enabled"):
+            role_url = str(existing_hub.get("url") or hub_url).rstrip("/")
+            updated = clean_node_role_transition(
+                node,
+                "hub",
+                role_url=role_url,
+                activation_pending=False,
+            )
+            updated["last_online_at"] = retention_timestamp_text()
+            replace_node_record(node_id, updated)
+            return jsonify({
+                "ok": True,
+                "accepted": False,
+                "already_active": True,
+                "node_id": node_id,
+                "role": role,
+                "message": "Hub 已经激活，无需重复创建激活任务",
+                "result": {"already_active": True, "url": role_url},
+            }), 200
         result = post_node_json(
             node,
             "/api/roles/hub/activate",
-            {"nodes": load_nodes(), "source_hub": current_hub_source_url()},
+            {"nodes": clean_node_seeds(load_nodes()), "source_hub": current_hub_source_url()},
             timeout=30,
         )
         if result.get("ok"):
             scheduled = result.get("result") if isinstance(result.get("result"), dict) else {}
             role_url = str(scheduled.get("url") or hub_url).rstrip("/")
-            save_node_updates(node_id, {"hub_url": role_url})
-            save_node_role_hint(node_id, "hub", {
-                "activation_pending": True,
-                "prepared": True,
-                "enabled": False,
-                "url": role_url,
-                "message": result.get("message") or "Hub activation scheduled",
-            })
+            updated = clean_node_role_transition(
+                node,
+                "hub",
+                role_url=role_url,
+                activation_pending=not bool(scheduled.get("already_active")),
+            )
+            updated["last_online_at"] = retention_timestamp_text()
+            replace_node_record(node_id, updated)
     else:
         hub_url = node_role_urls(node)["hub"]
         if not hub_url:
             return jsonify({"ok": False, "node_id": node_id, "message": "Hub role is unavailable; SSH bootstrap is required"}), 409
         agent_token = str(node.get("token") or node.get("control_token") or "").strip() or secrets.token_urlsafe(32)
-        agent_url = node_role_urls(node)["agent"]
         result = post_url_json(
             f"{hub_url}/api/roles/agent/activate",
             {
@@ -12271,15 +14747,16 @@ def api_activate_node_role(role: str):
             timeout=30,
         )
         if result.get("ok"):
-            save_node_updates(node_id, {"token": agent_token, "base_url": agent_url})
-            save_node_role_hint(node_id, "agent", {
-                "activation_pending": True,
-                "prepared": True,
-                "enabled": False,
-                "url": agent_url,
-                "message": result.get("message") or "Agent activation scheduled",
-            })
-    status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
+            updated = clean_node_role_transition(
+                node,
+                "agent",
+                activation_pending=True,
+                control_hub_url=current_hub_source_url(),
+            )
+            updated["token"] = agent_token
+            replace_node_record(node_id, updated)
+    scheduled_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+    status_code = 200 if result.get("ok") and scheduled_result.get("already_active") else 202 if result.get("ok") else int(result.get("status_code") or 502)
     return jsonify({"node_id": node_id, "role": role, **result}), status_code
 
 
@@ -12290,15 +14767,16 @@ def api_upgrade_node_role(role: str):
     node = node_by_id(node_id)
     if not node:
         return jsonify({"ok": False, "node_id": node_id, "message": "node not found"}), 404
+    target_version = latest_source_version() or local_git_version()
     if role == "agent":
-        result = post_node_json(node, "/api/upgrade", {}, timeout=30)
+        result = post_node_json(node, "/api/upgrade", {"target_version": target_version}, timeout=30)
     elif role == "hub":
         hub_url = node_role_urls(node)["hub"]
-        result = post_url_json(f"{hub_url}/api/upgrade", {}, timeout=30)
+        result = post_url_json(f"{hub_url}/api/upgrade", {"target_version": target_version}, timeout=30)
     else:
         return jsonify({"ok": False, "message": "unsupported role"}), 404
     status_code = 202 if result.get("ok") else int(result.get("status_code") or 502)
-    return jsonify({"node_id": node_id, "role": role, **result}), status_code
+    return jsonify({"node_id": node_id, "role": role, "target_version": target_version, **result}), status_code
 
 
 @APP.post("/api/nodes/roles/<role>/deactivate")
@@ -12322,6 +14800,7 @@ def api_deactivate_node_role(role: str):
 
 
 def main() -> None:
+    assert_role("hub", ROOT)
     ensure_dirs()
     threading.Thread(target=youtube_autotune_loop, name="youtube-autotune", daemon=True).start()
     threading.Thread(target=offline_node_retention_loop, name="offline-node-retention", daemon=True).start()

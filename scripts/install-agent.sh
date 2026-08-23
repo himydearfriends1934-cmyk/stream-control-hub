@@ -8,9 +8,11 @@ STREAM_AGENT_HOST="${STREAM_AGENT_HOST:-}"
 STREAM_AGENT_PORT="${STREAM_AGENT_PORT:-}"
 STREAM_AGENT_NAME="${STREAM_AGENT_NAME:-}"
 STREAM_AGENT_CONTROL_HUB="${STREAM_AGENT_CONTROL_HUB:-}"
+STREAM_AGENT_CONTROL_HUB_CLEAR="${STREAM_AGENT_CONTROL_HUB_CLEAR:-}"
 STREAM_AGENT_PUBLIC_ORIGIN="${STREAM_AGENT_PUBLIC_ORIGIN:-}"
 STREAM_AUTO_RESTART_ENABLED="${STREAM_AUTO_RESTART_ENABLED:-}"
 STREAM_AGENT_TRUSTED_REMOTE_WRITES="${STREAM_AGENT_TRUSTED_REMOTE_WRITES:-}"
+STREAM_MEDIA_DIR="${STREAM_MEDIA_DIR:-}"
 YOUTUBE_CLIENT_ID="${YOUTUBE_CLIENT_ID:-}"
 YOUTUBE_CLIENT_SECRET="${YOUTUBE_CLIENT_SECRET:-}"
 TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
@@ -21,6 +23,105 @@ REMOVE_DATA="${REMOVE_DATA:-${STREAM_AGENT_REMOVE_DATA:-0}}"
 CHOICE="${CHOICE:-${STREAM_AGENT_CHOICE:-}}"
 CONFIRM_REMOVE_CONFLICTS="${CONFIRM_REMOVE_CONFLICTS:-0}"
 ENV_FILE="$INSTALL_DIR/.agent.env"
+ROLE_SWITCH_CONFIRMED="${ROLE_SWITCH_CONFIRMED:-${STREAM_ROLE_SWITCH_CONFIRMED:-0}}"
+STREAM_NODE_ROLE_FILE="${STREAM_NODE_ROLE_FILE:-/etc/stream-control/role}"
+UPGRADE_LOCK_FILE="${STREAM_NODE_UPGRADE_LOCK_FILE:-$INSTALL_DIR/agent_data/.upgrade.lock}"
+
+acquire_upgrade_lock() {
+  mkdir -p "$(dirname "$UPGRADE_LOCK_FILE")"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$UPGRADE_LOCK_FILE"
+    flock -n 9 || {
+      echo "Another Stream Control upgrade or install is already running." >&2
+      exit 75
+    }
+  else
+    lock_dir="${UPGRADE_LOCK_FILE}.d"
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+      echo "Another Stream Control upgrade or install is already running." >&2
+      exit 75
+    fi
+    trap 'rmdir "$lock_dir" >/dev/null 2>&1 || true' EXIT
+  fi
+}
+
+assert_single_role() {
+  current_role=""
+  if [ -f "$STREAM_NODE_ROLE_FILE" ]; then
+    current_role="$(head -n 1 "$STREAM_NODE_ROLE_FILE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+    if [ -n "$current_role" ] && [ "$current_role" != "agent" ] && [ "$ROLE_SWITCH_CONFIRMED" != "1" ]; then
+      echo "This machine is declared as $current_role. Deactivate that role before installing Agent." >&2
+      exit 6
+    fi
+  fi
+  if command -v systemctl >/dev/null 2>&1 \
+    && (systemctl is-active --quiet stream-control-hub.service \
+      || systemctl is-enabled --quiet stream-control-hub.service) \
+    && ! systemctl is-active --quiet stream-control-headless-agent.service \
+    && [ "$current_role" != "agent" ] \
+    && [ "$ROLE_SWITCH_CONFIRMED" != "1" ]; then
+    echo "HUB service is active. Deactivate HUB before installing Agent." >&2
+    exit 6
+  fi
+}
+
+reconcile_agent_role() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  if systemctl is-active --quiet stream-control-hub.service \
+    || systemctl is-enabled --quiet stream-control-hub.service; then
+    current_role=""
+    if [ -f "$STREAM_NODE_ROLE_FILE" ]; then
+      current_role="$(head -n 1 "$STREAM_NODE_ROLE_FILE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+    fi
+    if [ "$ROLE_SWITCH_CONFIRMED" != "1" ] \
+      && ! systemctl is-active --quiet stream-control-headless-agent.service \
+      && [ "$current_role" != "agent" ]; then
+      echo "HUB service is active or enabled. Deactivate HUB before installing Agent." >&2
+      return 6
+    fi
+    echo "Disabling the conflicting HUB service for the Agent role."
+    systemctl disable --now stream-control-hub.service
+  fi
+}
+
+write_agent_service_unit() {
+  cat > /etc/systemd/system/stream-control-headless-agent.service <<EOF
+[Unit]
+Description=Stream Control Hub Headless Agent
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+Conflicts=stream-control-hub.service
+Before=stream-control-hub.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=-$INSTALL_DIR/.agent.env
+Environment=STREAM_NODE_ROLE=agent
+Environment=STREAM_NODE_ROLE_FILE=$STREAM_NODE_ROLE_FILE
+ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub.headless_agent
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+}
+
+write_role_marker() {
+  mkdir -p "$(dirname "$STREAM_NODE_ROLE_FILE")"
+  temporary="${STREAM_NODE_ROLE_FILE}.tmp.$$"
+  printf 'agent\n' > "$temporary"
+  chmod 600 "$temporary" 2>/dev/null || true
+  mv -f "$temporary" "$STREAM_NODE_ROLE_FILE"
+}
 
 existing_env_value() {
   key="$1"
@@ -70,11 +171,16 @@ PY
 [ -n "$STREAM_AGENT_PORT" ] || STREAM_AGENT_PORT="8787"
 [ -n "$STREAM_AGENT_NAME" ] || STREAM_AGENT_NAME="$(existing_env_value STREAM_AGENT_NAME)"
 [ -n "$STREAM_AGENT_NAME" ] || STREAM_AGENT_NAME="$(hostname)"
-[ -n "$STREAM_AGENT_CONTROL_HUB" ] || STREAM_AGENT_CONTROL_HUB="$(existing_env_value STREAM_AGENT_CONTROL_HUB)"
+[ -n "$STREAM_AGENT_CONTROL_HUB_CLEAR" ] || STREAM_AGENT_CONTROL_HUB_CLEAR="$(existing_env_value STREAM_AGENT_CONTROL_HUB_CLEAR)"
+[ "$STREAM_AGENT_CONTROL_HUB_CLEAR" = "1" ] || STREAM_AGENT_CONTROL_HUB_CLEAR="0"
+if [ "$STREAM_AGENT_CONTROL_HUB_CLEAR" != "1" ]; then
+  [ -n "$STREAM_AGENT_CONTROL_HUB" ] || STREAM_AGENT_CONTROL_HUB="$(existing_env_value STREAM_AGENT_CONTROL_HUB)"
+fi
 [ -n "$STREAM_AUTO_RESTART_ENABLED" ] || STREAM_AUTO_RESTART_ENABLED="$(existing_env_value STREAM_AUTO_RESTART_ENABLED)"
 [ -n "$STREAM_AUTO_RESTART_ENABLED" ] || STREAM_AUTO_RESTART_ENABLED="1"
 [ -n "$STREAM_AGENT_TRUSTED_REMOTE_WRITES" ] || STREAM_AGENT_TRUSTED_REMOTE_WRITES="$(existing_env_value STREAM_AGENT_TRUSTED_REMOTE_WRITES)"
 [ -n "$STREAM_AGENT_TRUSTED_REMOTE_WRITES" ] || STREAM_AGENT_TRUSTED_REMOTE_WRITES="0"
+[ -n "$STREAM_MEDIA_DIR" ] || STREAM_MEDIA_DIR="$INSTALL_DIR/media"
 [ -n "$TAILSCALE_HOSTNAME" ] || TAILSCALE_HOSTNAME="$STREAM_AGENT_NAME"
 case "$(printf '%s' "$STREAM_AUTO_RESTART_ENABLED" | tr '[:upper:]' '[:lower:]')" in
   1|true|yes) STREAM_AUTO_RESTART_ENABLED="1" ;;
@@ -99,6 +205,128 @@ need_cmd() {
     echo "$1 is required but missing." >&2
     exit 1
   }
+}
+
+migrate_shared_media() {
+  STREAM_MEDIA_TARGET="$STREAM_MEDIA_DIR" STREAM_INSTALL_DIR="$INSTALL_DIR" python3 - <<'PY'
+import filecmp
+import os
+from pathlib import Path
+
+target = Path(os.environ["STREAM_MEDIA_TARGET"]).expanduser()
+install_dir = Path(os.environ["STREAM_INSTALL_DIR"]).expanduser()
+target.mkdir(parents=True, exist_ok=True)
+for source in (install_dir / "agent_data" / "media", install_dir / "data" / "media"):
+    source = source.resolve()
+    if source == target.resolve() or not source.is_dir():
+        continue
+    for item in list(source.iterdir()):
+        if not item.is_file():
+            continue
+        destination = target / item.name
+        if destination.exists():
+            if filecmp.cmp(item, destination, shallow=False):
+                item.unlink()
+                continue
+            counter = 1
+            while True:
+                candidate = target / f"{item.stem}-legacy-{counter}{item.suffix}"
+                if not candidate.exists():
+                    destination = candidate
+                    break
+                counter += 1
+        item.replace(destination)
+    try:
+        source.rmdir()
+    except OSError:
+        pass
+PY
+}
+
+health_check_agent() {
+  case "$STREAM_AGENT_HOST" in
+    0.0.0.0) probe_host="127.0.0.1" ;;
+    ::) probe_host="[::1]" ;;
+    *) probe_host="$STREAM_AGENT_HOST" ;;
+  esac
+  token="$(existing_env_value STREAM_AGENT_CONTROL_TOKEN)"
+  expected_version="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+  probe_url="http://$probe_host:$STREAM_AGENT_PORT/api/status"
+  for _ in $(seq 1 20); do
+    status="$(curl -fsS --max-time 3 -H "X-Control-Token: $token" "$probe_url" 2>/dev/null || true)"
+    if systemctl is-active --quiet stream-control-headless-agent.service \
+      && ! systemctl is-active --quiet stream-control-hub.service \
+      && printf '%s' "$status" | grep -q "\"version\":\"$expected_version\""; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+transactional_refresh_agent() {
+  [ -d "$INSTALL_DIR/.git" ] || return 0
+  git -C "$INSTALL_DIR" fetch origin "$BRANCH"
+  if [ -n "$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=all)" ]; then
+    echo "Refusing upgrade: the Agent checkout has local changes." >&2
+    return 6
+  fi
+  old_commit="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
+  old_branch="$(git -C "$INSTALL_DIR" branch --show-current)"
+  candidate="$INSTALL_DIR/.upgrade-candidate.$$"
+  backup="$INSTALL_DIR/agent_data/upgrade-backups/$(date +%Y%m%d%H%M%S)-$old_commit"
+  mkdir -p "$INSTALL_DIR/agent_data/upgrade-backups" "$backup"
+  git -C "$INSTALL_DIR" worktree add --detach "$candidate" "origin/$BRANCH"
+  cleanup_candidate() {
+    git -C "$INSTALL_DIR" worktree remove --force "$candidate" >/dev/null 2>&1 || rm -rf "$candidate"
+  }
+  if ! python3 -m venv "$candidate/.venv" \
+    || ! "$candidate/.venv/bin/python" -m pip install -q --upgrade pip \
+    || ! "$candidate/.venv/bin/python" -m pip install -q -r "$candidate/requirements.txt" \
+    || ! "$candidate/.venv/bin/python" -m compileall -q "$candidate/stream_control_hub"; then
+    cleanup_candidate
+    rm -rf "$backup"
+    echo "Candidate Agent failed pre-activation validation; current version was kept." >&2
+    return 6
+  fi
+
+  code_items="stream_control_hub scripts config requirements.txt README.md"
+  for item in $code_items; do
+    [ -e "$INSTALL_DIR/$item" ] && mv "$INSTALL_DIR/$item" "$backup/$item"
+  done
+  [ -e "$INSTALL_DIR/.venv" ] && mv "$INSTALL_DIR/.venv" "$backup/.venv"
+  for item in $code_items; do
+    [ -e "$candidate/$item" ] && cp -a "$candidate/$item" "$INSTALL_DIR/$item"
+  done
+  mv "$candidate/.venv" "$INSTALL_DIR/.venv"
+  # The candidate files are already in the main worktree. Reset the index and
+  # commit pointer to that exact candidate instead of asking checkout to
+  # overwrite the files it just received from the candidate worktree.
+  git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
+  systemctl restart stream-control-headless-agent.service
+  if health_check_agent; then
+    cleanup_candidate
+    echo "Agent upgrade activated; rollback snapshot retained at $backup"
+    return 0
+  fi
+
+  echo "New Agent failed authenticated health check; rolling back." >&2
+  systemctl stop stream-control-headless-agent.service >/dev/null 2>&1 || true
+  for item in $code_items; do
+    rm -rf "$INSTALL_DIR/$item"
+    [ -e "$backup/$item" ] && mv "$backup/$item" "$INSTALL_DIR/$item"
+  done
+  rm -rf "$INSTALL_DIR/.venv"
+  [ -e "$backup/.venv" ] && mv "$backup/.venv" "$INSTALL_DIR/.venv"
+  if [ -n "$old_branch" ]; then
+    git -C "$INSTALL_DIR" checkout -B "$old_branch" "$old_commit"
+  else
+    git -C "$INSTALL_DIR" checkout --detach "$old_commit"
+  fi
+  cleanup_candidate
+  systemctl restart stream-control-headless-agent.service >/dev/null 2>&1 || true
+  rm -rf "$backup"
+  return 6
 }
 
 install_packages() {
@@ -310,6 +538,7 @@ uninstall_agent() {
   systemctl disable stream-control-headless-agent.service >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/stream-control-headless-agent.service
   systemctl daemon-reload >/dev/null 2>&1 || true
+  rm -f "$STREAM_NODE_ROLE_FILE"
   pkill -f "$INSTALL_DIR/.venv/bin/python -m stream_control_hub.headless_agent" >/dev/null 2>&1 || true
   if [ ! -e "$INSTALL_DIR" ]; then
     echo "Stream Control Headless Agent is not installed at: $INSTALL_DIR"
@@ -335,22 +564,32 @@ uninstall_agent() {
 resolve_action
 
 if [ "$ACTION" = "uninstall" ]; then
+  acquire_upgrade_lock
   uninstall_agent
   exit 0
 fi
 
 need_root
+acquire_upgrade_lock
+assert_single_role
 install_packages
 configure_agent_firewall
 need_cmd git
 need_cmd python3
 need_cmd systemctl
+migrate_shared_media
+git config --global --add safe.directory "$INSTALL_DIR" >/dev/null 2>&1 || true
+reconcile_agent_role
+write_agent_service_unit
 remove_legacy_conflicts
+# The transactional refresh starts the Agent for its health check. During an
+# explicit Hub-to-Agent switch, the role marker must already match that unit.
+if [ "$ROLE_SWITCH_CONFIRMED" = "1" ]; then
+  write_role_marker
+fi
 
 if [ -d "$INSTALL_DIR/.git" ]; then
-  git -C "$INSTALL_DIR" fetch origin "$BRANCH"
-  git -C "$INSTALL_DIR" checkout "$BRANCH"
-  git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"
+  transactional_refresh_agent
 elif [ -e "$INSTALL_DIR" ]; then
   echo "Adopting existing Agent data directory without deleting local media or env: $INSTALL_DIR"
   git -C "$INSTALL_DIR" init
@@ -403,12 +642,16 @@ fi
 
 cat > "$ENV_FILE" <<EOF
 STREAM_AGENT_CONTROL_TOKEN=$TOKEN
+STREAM_NODE_ROLE=agent
+STREAM_NODE_ROLE_FILE=$STREAM_NODE_ROLE_FILE
 STREAM_AGENT_HOST=$STREAM_AGENT_HOST
 STREAM_AGENT_PORT=$STREAM_AGENT_PORT
 STREAM_AGENT_NAME=$STREAM_AGENT_NAME
 STREAM_AGENT_CONTROL_HUB=$STREAM_AGENT_CONTROL_HUB
+STREAM_AGENT_CONTROL_HUB_CLEAR=0
 STREAM_AGENT_PUBLIC_ORIGIN=$STREAM_AGENT_PUBLIC_ORIGIN
 STREAM_AGENT_DATA_DIR=$INSTALL_DIR/agent_data
+STREAM_MEDIA_DIR=$STREAM_MEDIA_DIR
 STREAM_AUTO_RESTART_ENABLED=$STREAM_AUTO_RESTART_ENABLED
 STREAM_AGENT_TRUSTED_REMOTE_WRITES=$STREAM_AGENT_TRUSTED_REMOTE_WRITES
 YOUTUBE_CLIENT_ID=$YOUTUBE_CLIENT_ID
@@ -416,6 +659,7 @@ YOUTUBE_CLIENT_SECRET=$YOUTUBE_CLIENT_SECRET
 YOUTUBE_CREDENTIAL_FILE=$INSTALL_DIR/agent_data/youtube_credentials.json
 EOF
 chmod 600 "$ENV_FILE"
+write_role_marker
 
 if [ -n "$TAILSCALE_AUTH_KEY" ]; then
   TAILSCALE_HOSTNAME="$TAILSCALE_HOSTNAME" \
@@ -424,29 +668,7 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
   sh "$INSTALL_DIR/scripts/tailscale-install.sh" connect
 fi
 
-cat > /etc/systemd/system/stream-control-headless-agent.service <<EOF
-[Unit]
-Description=Stream Control Hub Headless Agent
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=10
-
-[Service]
-WorkingDirectory=$INSTALL_DIR
-EnvironmentFile=$INSTALL_DIR/.agent.env
-ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub.headless_agent
-Restart=always
-RestartSec=3
-TimeoutStopSec=20
-KillMode=control-group
-UMask=0077
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
+write_agent_service_unit
 systemctl enable stream-control-headless-agent.service
 systemctl reset-failed stream-control-headless-agent.service >/dev/null 2>&1 || true
 systemctl restart stream-control-headless-agent.service
@@ -487,10 +709,6 @@ if [ "$HEALTHY" != "1" ]; then
   systemctl status stream-control-headless-agent.service --no-pager -l >&2 || true
   journalctl -u stream-control-headless-agent.service -n 40 --no-pager >&2 || true
   exit 6
-fi
-
-if systemctl is-active --quiet stream-control-hub.service; then
-  systemctl restart stream-control-hub.service
 fi
 
 NODE_IP="$(tailscale_ip)"

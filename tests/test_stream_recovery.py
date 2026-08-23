@@ -94,6 +94,31 @@ class StreamRecoveryTests(unittest.TestCase):
         launch.assert_called_once()
         self.assertEqual(launch.call_args.kwargs["reason"], "auto-recovery")
 
+    def test_watchdog_recovers_when_runtime_state_is_missing_but_payload_survives(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self.recovery_paths(headless_agent, tmp)
+            with patches[0], patches[1], patches[2], patches[3], patch.object(
+                headless_agent, "STREAM_AUTO_RESTART_ENABLED", True
+            ), patch.object(headless_agent, "stream_process_owned", return_value=False), patch.object(
+                headless_agent,
+                "launch_stream_process",
+                return_value={"pid": 4301, "log_path": "ffmpeg.log", "video_path": "video.mp4"},
+            ) as launch, patch.object(
+                headless_agent, "verify_launched_stream", return_value={"ok": True}
+            ):
+                headless_agent.write_private_json(
+                    headless_agent.STREAM_RESTART_FILE,
+                    {"video_path": "video.mp4", "stream_key": "private-stream-key"},
+                )
+                result = headless_agent.stream_watchdog_tick()
+                state = headless_agent.load_state()
+
+        self.assertTrue(result["restarted"])
+        self.assertTrue(state["stream_desired"])
+        launch.assert_called_once()
+
     def test_watchdog_restarts_owned_process_when_progress_stalls(self):
         from stream_control_hub import headless_agent
 

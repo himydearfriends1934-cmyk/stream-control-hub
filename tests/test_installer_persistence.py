@@ -19,7 +19,7 @@ class InstallerPersistenceTests(unittest.TestCase):
             "STREAM_HUB_TRUSTED_REMOTE_WRITES=$STREAM_HUB_TRUSTED_REMOTE_WRITES",
             script,
         )
-        self.assertIn("EnvironmentFile=$ENV_FILE", script)
+        self.assertIn("EnvironmentFile=-$ENV_FILE", script)
         self.assertIn("existingTrustedRemoteWrites", powershell)
         self.assertIn(
             '"STREAM_HUB_TRUSTED_REMOTE_WRITES=$TrustedRemoteWrites"',
@@ -28,6 +28,17 @@ class InstallerPersistenceTests(unittest.TestCase):
         self.assertIn("existingHost", powershell)
         self.assertIn("existingPort", powershell)
         self.assertIn("STREAM_HUB_SUPPRESS_TOKEN_OUTPUT", script)
+
+    def test_hub_defaults_trusted_remote_writes_for_tailscale_host(self):
+        script = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn('case "$STREAM_HUB_HOST" in', script)
+        self.assertIn(
+            "100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*)",
+            script,
+        )
+        self.assertIn('STREAM_HUB_TRUSTED_REMOTE_WRITES="1"', script)
+        self.assertIn('STREAM_HUB_TRUSTED_REMOTE_WRITES="0"', script)
 
     def test_hub_preserves_youtube_environment_during_update(self):
         script = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
@@ -108,6 +119,95 @@ class InstallerPersistenceTests(unittest.TestCase):
         ):
             self.assertIn(directive, hub)
             self.assertIn(directive, agent)
+
+    def test_agent_service_starts_after_network_and_tailscale_for_recovery(self):
+        agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
+
+        self.assertIn("After=network-online.target tailscaled.service", agent)
+        self.assertIn("Wants=network-online.target tailscaled.service", agent)
+        self.assertIn("ExecStart=$INSTALL_DIR/.venv/bin/python -m stream_control_hub.headless_agent", agent)
+        self.assertIn("systemctl enable stream-control-headless-agent.service", agent)
+
+    def test_role_installers_reconcile_existing_conflicting_services(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+        agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
+
+        self.assertIn("Conflicts=stream-control-headless-agent.service", hub)
+        self.assertIn("Conflicts=stream-control-hub.service", agent)
+        self.assertIn("EnvironmentFile=-$ENV_FILE", hub)
+        self.assertIn("EnvironmentFile=-$INSTALL_DIR/.agent.env", agent)
+        self.assertIn("systemctl disable --now stream-control-headless-agent.service", hub)
+        self.assertIn("systemctl disable --now stream-control-hub.service", agent)
+        self.assertIn("systemctl is-enabled --quiet stream-control-headless-agent.service", hub)
+        self.assertIn("systemctl is-enabled --quiet stream-control-hub.service", agent)
+        self.assertIn("pgrep -x ffmpeg", hub)
+        self.assertIn("confirm the role switch explicitly", hub)
+        self.assertIn("write_hub_service_unit", hub)
+        self.assertIn("write_agent_service_unit", agent)
+
+        hub_install = hub.index("reconcile_hub_role\nwrite_hub_service_unit", hub.index("need_cmd curl"))
+        hub_refresh = hub.rindex("transactional_refresh_hub")
+        agent_install = agent.index("reconcile_agent_role\nwrite_agent_service_unit", agent.index("need_cmd systemctl"))
+        agent_refresh = agent.rindex("transactional_refresh_agent")
+        hub_switch_marker = hub.index('if [ "$ROLE_SWITCH_CONFIRMED" = "1" ]; then')
+        self.assertLess(hub_switch_marker, hub_refresh)
+        self.assertLess(hub_install, hub_refresh)
+        self.assertLess(agent_install, agent_refresh)
+        agent_switch_marker = agent.index('if [ "$ROLE_SWITCH_CONFIRMED" = "1" ]; then')
+        self.assertLess(agent_switch_marker, agent_refresh)
+
+    def test_hub_update_restarts_the_declared_systemd_service_strictly(self):
+        script = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn("systemctl show -p WorkingDirectory", script)
+        self.assertIn("sed -n 's/^WorkingDirectory=//p'", script)
+        self.assertIn("$SYSTEMCTL daemon-reload", script)
+        self.assertIn("$SYSTEMCTL enable stream-control-hub.service", script)
+        self.assertIn("$SYSTEMCTL reset-failed stream-control-hub.service", script)
+        self.assertIn("$SYSTEMCTL restart stream-control-hub.service", script)
+        self.assertNotIn("$SYSTEMCTL enable --now stream-control-hub.service", script)
+        self.assertNotIn("if ! $SYSTEMCTL enable --now stream-control-hub.service", script)
+
+    def test_managed_updates_stage_a_candidate_and_keep_a_rollback_snapshot(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+        agent = (ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
+
+        for script in (hub, agent):
+            self.assertIn("worktree add --detach", script)
+            self.assertIn("compileall -q", script)
+            self.assertIn("upgrade-backups", script)
+            self.assertIn("rolling back", script)
+            self.assertNotIn('git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"', script)
+
+    def test_managed_activation_resets_git_metadata_after_candidate_copy(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn('git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"', hub)
+        self.assertIn("cleanup_candidate\n  if [ ! -f \"$ENV_FILE\" ]", hub)
+        self.assertNotIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"', hub)
+
+    def test_hub_upgrade_ignores_runtime_media_and_data_paths(self):
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn("media/", gitignore)
+        self.assertIn(":(exclude)data", hub)
+        self.assertIn(":(exclude)agent_data", hub)
+        self.assertIn(":(exclude)media", hub)
+        self.assertIn("local code changes", hub)
+
+    def test_hub_role_activation_defers_restart_until_env_exists(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        guard = 'if [ ! -f "$ENV_FILE" ]; then'
+        self.assertIn(guard, hub)
+        self.assertIn('echo "HUB code refreshed; environment file will be initialized before service start."', hub)
+        self.assertLess(hub.index(guard), hub.index('hub_systemctl restart stream-control-hub.service'))
+
+    def test_hub_installer_allows_root_to_manage_existing_non_root_checkout(self):
+        hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")
+
+        self.assertIn('git config --global --add safe.directory "$INSTALL_DIR"', hub)
 
     def test_installers_default_without_interactive_tty(self):
         hub = (ROOT / "scripts" / "install-hub.sh").read_text(encoding="utf-8")

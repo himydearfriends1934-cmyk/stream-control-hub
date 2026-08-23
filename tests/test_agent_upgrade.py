@@ -1,5 +1,6 @@
 import json
 import inspect
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,11 +18,32 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("stream-control-agent-activate-*.service) continue", script)
         self.assertIn('git -C "$INSTALL_DIR" init', script)
         self.assertIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" FETCH_HEAD', script)
-        self.assertIn("systemctl restart stream-control-hub.service", script)
+        self.assertIn("transactional_refresh_agent", script)
+        self.assertNotIn("systemctl restart stream-control-hub.service", script)
         self.assertIn('git -C "$INSTALL_DIR" init', hub_script)
-        self.assertIn("systemctl restart stream-control-headless-agent.service", hub_script)
+        self.assertIn("transactional_refresh_hub", hub_script)
+        self.assertIn("STREAM_MEDIA_DIR", script)
+        self.assertIn("STREAM_MEDIA_DIR", hub_script)
+        self.assertIn("migrate_shared_media", script)
+        self.assertIn("migrate_shared_media", hub_script)
+        self.assertNotIn("systemctl restart stream-control-headless-agent.service", hub_script)
         self.assertNotIn('INSTALL_DIR exists but is not a git checkout', script)
         self.assertNotIn('INSTALL_DIR exists but is not a git checkout', hub_script)
+
+    def test_agent_activation_resets_git_metadata_after_candidate_copy(self):
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "install-agent.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"', script)
+        self.assertNotIn('git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"', script)
+
+    def test_agent_installer_allows_root_to_manage_existing_non_root_checkout(self):
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "install-agent.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('git config --global --add safe.directory "$INSTALL_DIR"', script)
 
     def test_hub_activates_agent_from_shared_checkout_without_exposing_token(self):
         from stream_control_hub import app
@@ -33,6 +55,8 @@ class AgentUpgradeTests(unittest.TestCase):
             (root / "scripts" / "install-agent.sh").write_text("#!/bin/sh\n", encoding="utf-8")
             with patch.object(app, "ROOT", root), patch.object(
                 app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(
+                app, "service_active", return_value=False
             ), patch.object(app.subprocess, "run", return_value=completed) as run:
                 result = app.schedule_agent_role_activation(
                     "http://100.64.0.1:8788",
@@ -50,6 +74,50 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("STREAM_AGENT_NAME=node-a", saved_env)
         self.assertIn("STREAM_AGENT_CONTROL_TOKEN=private-token", saved_env)
 
+    def test_hub_role_marker_allows_agent_conversion_schedule(self):
+        from stream_control_hub import app
+
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "install-agent.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            marker = root / "role"
+            marker.write_text("hub\n", encoding="utf-8")
+            with patch.dict(os.environ, {"STREAM_NODE_ROLE_FILE": str(marker)}, clear=False), patch.object(
+                app, "ROOT", root
+            ), patch.object(
+                app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(
+                app, "subprocess", wraps=app.subprocess
+            ) as subprocess_module:
+                with patch.object(subprocess_module, "run", return_value=completed) as run:
+                    result = app.schedule_agent_role_activation("http://100.64.0.1:8788")
+
+        self.assertEqual(result["role"], "agent")
+        self.assertIn("ROLE_SWITCH_CONFIRMED=1", run.call_args.args[0][-1])
+
+    def test_hub_can_schedule_an_unbound_agent_conversion(self):
+        from stream_control_hub import app
+
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "install-agent.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            with patch.object(app, "ROOT", root), patch.object(
+                app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(app.subprocess, "run", return_value=completed) as run:
+                result = app.schedule_agent_role_activation("", allow_unbound=True)
+
+            saved_env = (root / ".agent.env").read_text(encoding="utf-8")
+
+        command = run.call_args.args[0][-1]
+        self.assertTrue(result["unbound"])
+        self.assertIn("STREAM_AGENT_CONTROL_HUB=\n", saved_env)
+        self.assertIn("STREAM_AGENT_CONTROL_HUB_CLEAR=1\n", saved_env)
+        self.assertIn("STREAM_AGENT_CONTROL_HUB='' STREAM_AGENT_CONTROL_HUB_CLEAR=1", command)
+
     def test_agent_activates_hub_from_shared_checkout(self):
         from stream_control_hub import headless_agent
 
@@ -62,15 +130,156 @@ class AgentUpgradeTests(unittest.TestCase):
             ), patch.object(
                 headless_agent, "tailscale_status", return_value={"self": {"tailscale_ips": ["100.64.0.2"]}}
             ), patch.object(
+                headless_agent, "systemd_service_active", return_value=False
+            ), patch.object(
                 headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
             ), patch.object(headless_agent.subprocess, "run", return_value=completed) as run:
                 result = headless_agent.schedule_hub_activation()
+            seed_contents = (data_dir / "hub-seed-nodes.json").read_text(encoding="utf-8").strip()
 
         command = run.call_args.args[0][-1]
         self.assertEqual(result["role"], "hub")
+        self.assertEqual(seed_contents, "[]")
         self.assertIn(str(root), command)
         self.assertIn("INSTALL_DIR=", command)
+        self.assertIn("STREAM_HUB_SERVICE_MODE=system", command)
+        self.assertIn("STREAM_HUB_NODES_FILE=", command)
+        self.assertIn("cp ", command)
         self.assertNotIn("INSTALL_DIR=/opt/stream-control-hub ", command)
+
+    def test_agent_hub_activation_stops_active_agent_during_role_switch(self):
+        from stream_control_hub import headless_agent
+
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "agent_data"
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", data_dir
+            ), patch.object(
+                headless_agent,
+                "tailscale_status",
+                return_value={"self": {"tailscale_ips": ["100.64.0.2"]}},
+            ), patch.object(
+                headless_agent,
+                "systemd_service_active",
+                side_effect=lambda name: name == "stream-control-headless-agent.service",
+            ), patch.object(headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"), patch.object(
+                headless_agent.subprocess, "run", return_value=completed
+            ) as run:
+                result = headless_agent.schedule_hub_activation([{
+                    "id": "node-a",
+                    "hub_url": "http://old-hub:8788",
+                    "role_hints": {"hub": {"activation_pending": True}},
+                }])
+
+        command = run.call_args.args[0][-1]
+        self.assertEqual(result["role"], "hub")
+        self.assertIn("ROLE_SWITCH_CONFIRMED=1", command)
+        self.assertIn("install-hub.sh", command)
+        self.assertFalse((data_dir / "hub-seed-nodes.json").exists())
+
+    def test_hub_upgrade_passes_shared_install_directory(self):
+        from stream_control_hub import app
+
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            (root / ".git").mkdir()
+            with patch.object(app, "ROOT", root), patch.object(
+                app, "DATA_DIR", data_dir
+            ), patch.object(
+                app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(app, "local_git_version", return_value="abc1234"), patch.object(
+                app.subprocess, "run", return_value=completed
+            ) as run:
+                app.schedule_hub_upgrade()
+
+        command = run.call_args.args[0][-1]
+        self.assertIn("INSTALL_DIR=", command)
+        self.assertIn(str(root), command)
+        self.assertNotIn("flock -n 9", command)
+
+    def test_agent_upgrade_passes_shared_install_directory(self):
+        from stream_control_hub import headless_agent
+
+        version = {
+            "version": "abc1234",
+            "managed_install": True,
+            "upgrade_supported": True,
+        }
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "agent_data"
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", data_dir
+            ), patch.object(
+                headless_agent, "agent_version_status", return_value=version
+            ), patch.object(
+                headless_agent,
+                "current_systemd_service",
+                return_value="stream-control-headless-agent.service",
+            ), patch.object(
+                headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(
+                headless_agent.subprocess, "run", return_value=completed
+            ) as run:
+                headless_agent.schedule_agent_upgrade("def5678")
+
+        command = run.call_args.args[0][-1]
+        self.assertIn("INSTALL_DIR=", command)
+        self.assertIn(str(root), command)
+        self.assertIn('actual_version="$(git -C', command)
+        self.assertIn('expected def5678', command)
+        self.assertIn(".upgrade-status.json", command)
+        self.assertIn(".upgrade-task.lock", command)
+        self.assertNotIn("exec 9=", command)
+        self.assertIn("Another Agent upgrade is already running", command)
+
+    def test_agent_upgrade_writes_pending_status_and_rejects_duplicate(self):
+        from stream_control_hub import headless_agent
+
+        version = {
+            "version": "abc1234",
+            "managed_install": True,
+            "upgrade_supported": True,
+        }
+        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "agent_data"
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", data_dir
+            ), patch.object(
+                headless_agent, "agent_version_status", return_value=version
+            ), patch.object(
+                headless_agent,
+                "current_systemd_service",
+                return_value="stream-control-headless-agent.service",
+            ), patch.object(
+                headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(
+                headless_agent.subprocess, "run", return_value=completed
+            ):
+                headless_agent.schedule_agent_upgrade("def5678")
+
+                status = headless_agent.load_upgrade_status()
+                self.assertEqual(status["state"], "pending")
+                self.assertEqual(status["target_version"], "def5678")
+
+                with patch.object(
+                    headless_agent, "upgrade_unit_active", return_value=True
+                ), patch.object(
+                    headless_agent,
+                    "current_systemd_service",
+                    return_value="stream-control-headless-agent.service",
+                ), patch.object(
+                    headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "已有 Agent 升级任务正在执行"):
+                        headless_agent.schedule_agent_upgrade("def5678")
 
     def test_role_status_reports_inactive_counterpart_as_prepared(self):
         from stream_control_hub import app, headless_agent
@@ -97,9 +306,11 @@ class AgentUpgradeTests(unittest.TestCase):
 
         self.assertTrue(hub_data["roles"]["agent"]["prepared"])
         self.assertFalse(hub_data["roles"]["agent"]["enabled"])
+        self.assertFalse(hub_data["role_conflict"])
         self.assertEqual(hub_data["roles"]["agent"]["version"], "abc1234")
         self.assertTrue(agent_data["roles"]["hub"]["prepared"])
         self.assertFalse(agent_data["roles"]["hub"]["enabled"])
+        self.assertFalse(agent_data["role_conflict"])
         self.assertEqual(agent_data["roles"]["hub"]["version"], "abc1234")
 
     def test_agent_reports_git_revision(self):
@@ -129,12 +340,14 @@ class AgentUpgradeTests(unittest.TestCase):
             headless_agent, "schedule_agent_upgrade", return_value=scheduled
         ) as schedule:
             response = headless_agent.APP.test_client().post(
-                "/api/upgrade", environ_base={"REMOTE_ADDR": "127.0.0.1"}
+                "/api/upgrade",
+                json={"target_version": "def5678"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
             )
 
         self.assertEqual(response.status_code, 202)
         self.assertTrue(response.get_json()["accepted"])
-        schedule.assert_called_once_with()
+        schedule.assert_called_once_with("def5678")
 
     def test_agent_hub_activation_accepts_seed_nodes(self):
         from stream_control_hub import headless_agent
@@ -152,7 +365,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         schedule.assert_called_once_with(seed)
 
-    def test_unmanaged_agent_can_bootstrap_in_place(self):
+    def test_unmanaged_agent_upgrade_is_refused_without_rollback_support(self):
         from stream_control_hub import headless_agent
 
         version = {
@@ -160,19 +373,11 @@ class AgentUpgradeTests(unittest.TestCase):
             "managed_install": False,
             "upgrade_supported": True,
         }
-        completed = SimpleNamespace(returncode=0, stdout="scheduled", stderr="")
         with patch.object(headless_agent, "agent_version_status", return_value=version), patch.object(
             headless_agent, "current_systemd_service", return_value="stream-control-headless-agent-local.service"
-        ), patch.object(headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"), patch.object(
-            headless_agent.subprocess, "run", return_value=completed
-        ) as run:
-            result = headless_agent.schedule_agent_upgrade()
-
-        self.assertEqual(result["install_mode"], "in-place-bootstrap")
-        command = run.call_args.args[0]
-        self.assertEqual(command[0], "systemd-run")
-        self.assertIn("git clone", command[-1])
-        self.assertIn("stream-control-headless-agent-local.service", command[-1])
+        ), patch.object(headless_agent.shutil, "which", return_value="/usr/bin/systemd-run"):
+            with self.assertRaisesRegex(RuntimeError, "managed stream-control-headless-agent.service"):
+                headless_agent.schedule_agent_upgrade()
 
     def test_hub_upgrades_only_requested_agent(self):
         from stream_control_hub import app
@@ -188,13 +393,15 @@ class AgentUpgradeTests(unittest.TestCase):
                 app,
                 "post_node_json",
                 return_value={"ok": True, "accepted": True, "message": "scheduled"},
-            ) as post:
+            ) as post, patch.object(app, "latest_source_version", return_value="def5678"):
                 response = app.APP.test_client().post(
                     "/api/nodes/upgrade", json={"node_id": "node-b"}
                 )
 
         self.assertEqual(response.status_code, 202)
-        post.assert_called_once_with(nodes[1], "/api/upgrade", {}, timeout=30)
+        post.assert_called_once_with(
+            nodes[1], "/api/upgrade", {"target_version": "def5678"}, timeout=30
+        )
 
     def test_ui_remembers_last_agent_and_keeps_role_actions_in_settings(self):
         from stream_control_hub import app
@@ -203,14 +410,29 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("box-shadow: inset 5px 0 0 #ff3b4f", app.HTML)
         self.assertIn(".node-row.selected .node-name strong", app.HTML)
         self.assertIn(".node-row.control-hub", app.HTML)
+        self.assertIn(".role-row.menu-open", app.HTML)
+        self.assertIn(".hub-function-menu[open] { z-index: 60; }", app.HTML)
         self.assertIn("function switchHubWithFallback", app.HTML)
         self.assertIn("/api/hubs/switch-target", app.HTML)
         self.assertIn('id="roleSettingsModal"', app.HTML)
+        self.assertIn('id="operationProgressModal"', app.HTML)
+        self.assertIn('id="operationProgressFill"', app.HTML)
+        self.assertIn("function beginOperationProgress", app.HTML)
+        self.assertIn("function pollOperationProgress", app.HTML)
+        self.assertIn("function operationProgressSteps", app.HTML)
+        self.assertIn("function latestOperationSourceVersion", app.HTML)
+        self.assertIn("startOperationProgressPolling", app.HTML)
+        self.assertIn("upgradeStatus.state", app.HTML)
+        self.assertIn("后台升级任务失败", app.HTML)
         self.assertIn("data-role-settings", app.HTML)
         self.assertIn('data-settings-role="${role}"', app.HTML)
+        self.assertIn('data-role-action="${enabled ? "upgrade-role" : "activate-role"}"', app.HTML)
+        self.assertNotIn('data-role-action="activate-role" data-role="hub"', app.HTML)
         self.assertIn("const agentRows = nodes.filter", app.HTML)
-        self.assertIn("const shouldShowAgentRow", app.HTML)
-        self.assertIn("agentEnabled || nodeHasResources(nodeId)", app.HTML)
+        self.assertIn("function shouldShowAgentNode(node)", app.HTML)
+        self.assertIn("function isHubOnlyNode(node)", app.HTML)
+        self.assertIn("!isHubOnlyNode(node)", app.HTML)
+        self.assertIn("!sameOriginUrl(role.url || \"\")", app.HTML)
         self.assertIn("/api/nodes/delete", app.HTML)
         self.assertIn('id="roleSettingsDeleteNodeBtn"', app.HTML)
         self.assertIn("deleteNodeRecord(roleSettingsNodeId)", app.HTML)
@@ -275,6 +497,9 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn('same_node: true', app.HTML)
         self.assertIn("复制完成后会自动启动推流", app.HTML)
         self.assertIn("Smart Start 失败：", app.HTML)
+        self.assertIn('if (payload.adaptive_mode !== "off")', app.HTML)
+        self.assertIn("let tuneForStart = null", app.HTML)
+        self.assertIn("Object.assign(startPayload, tuneForStart.recommendation)", app.HTML)
         self.assertIn('data-media-local="${localCopy ? "1" : "0"}"', app.HTML)
         self.assertIn('request_node_json(target_node, "/api/public-upload", timeout=10)', inspect.getsource(app.run_share_task))
         self.assertIn("discovered_public_url", inspect.getsource(app.run_share_task))
@@ -430,7 +655,7 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertNotIn('class="card node-space-card"', app.HTML)
         self.assertNotIn('class="upload-stack"', app.HTML)
         self.assertIn("function renderNodeSpaceRings", app.HTML)
-        self.assertIn("const diskByNodeId = new Map", app.HTML)
+        self.assertIn("const merged = [...(nodeDisks || [])]", app.HTML)
         self.assertIn("conic-gradient", app.HTML)
         self.assertIn("max-height: 248px", app.HTML)
         self.assertIn("grid-template-columns: repeat(auto-fit, minmax(128px, 1fr))", app.HTML)
@@ -517,7 +742,37 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("调参判断：", app.HTML)
         self.assertIn("更改 Agent：", app.HTML)
         self.assertIn("更改后：", app.HTML)
+        self.assertIn('<details class="agent-discovery" id="agentDiscoveryPanel" open>', app.HTML)
+        self.assertIn("AGENT_DISCOVERY_DISCLOSURE_STORAGE_KEY", app.HTML)
+        self.assertIn("initializeAgentDiscoveryDisclosure", app.HTML)
+        self.assertIn('class="agent-discovery-toolbar"', app.HTML)
+        self.assertIn('id="agentDiscoveryList"', app.HTML)
+        self.assertIn("data-discovery-agent-ip", app.HTML)
+        self.assertIn("TAILSCALE_DISCOVERY_REFRESH_MS", app.HTML)
+        self.assertIn("connectExistingTailscaleIp(tailscale_ip, true)", app.HTML)
+        self.assertNotIn('data-role-action="activate-role" data-role="hub"', app.HTML)
         self.assertNotIn("upgradeSelectedNodes", app.HTML)
+        self.assertIn('id="tailscalePeerList"', app.HTML)
+        self.assertIn('id="refreshTailscalePeersBtn"', app.HTML)
+        self.assertIn("function tailscaleNodeJoinedAgent", app.HTML)
+        self.assertIn('data-tailscale-activate-agent-ip', app.HTML)
+        self.assertIn('data-local-role-settings', app.HTML)
+        self.assertIn('data-local-role-action="activate-agent"', app.HTML)
+        self.assertIn('data-local-role-action="upgrade-hub"', app.HTML)
+        self.assertIn("激活 Agent（关闭 Hub）", app.HTML)
+        self.assertIn('data-role-action="switch-hub"', app.HTML)
+        self.assertIn("data-hub-function-menu", app.HTML)
+        self.assertIn('data-hub-action="view-resources"', app.HTML)
+        self.assertIn('refs.hubNodeList.addEventListener("toggle"', app.HTML)
+        self.assertNotIn("const current = enabled && role.url && sameOriginUrl(role.url);", app.HTML)
+        self.assertIn('<div class="node-row role-row" data-hub-row', app.HTML)
+        self.assertNotIn('<button class="tiny" data-role-action="switch-hub"', app.HTML)
+        self.assertIn("openNodeResources(row.dataset.nodeId)", app.HTML)
+        self.assertIn('String(openResourceNodeId || "")', app.HTML)
+        self.assertIn('id="transferHubNodeSelect"', app.HTML)
+        self.assertIn('postJson("/api/hubs/transfer"', app.HTML)
+        self.assertNotIn('id="tailscaleExistingTokenInput"', app.HTML)
+        self.assertNotIn('id="transferHubTokenInput"', app.HTML)
 
     def test_media_library_keeps_profile_per_agent_copy(self):
         from stream_control_hub import app
@@ -653,6 +908,49 @@ class AgentUpgradeTests(unittest.TestCase):
                 self.assertEqual(args[1]["source_hub"], "http://100.64.0.1:8788")
                 self.assertEqual(kwargs["headers"], {"X-Control-Token": "hub-token"})
 
+    def test_hub_transfers_to_known_hub_without_ui_credentials(self):
+        from stream_control_hub import app
+
+        nodes = [{
+            "id": "new-hub",
+            "name": "New Hub",
+            "base_url": "http://100.64.0.9:8787",
+            "hub_url": "http://100.64.0.1:8788",
+            "control_hub_url": "http://100.64.0.1:8788",
+            "role_hints": {"agent": {"activation_pending": True}},
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app, "online_tailscale_peer_for_ip", return_value={"online": True}
+            ), patch.object(
+                app,
+                "request_hub_role_status",
+                return_value={"ok": True, "enabled": True, "url": "http://100.64.0.9:8788"},
+            ), patch.object(
+                app, "current_hub_source_url", return_value="http://100.64.0.1:8788"
+            ), patch.object(
+                app, "post_url_json", return_value={"ok": True, "imported_count": 1}
+            ) as post:
+                response = app.APP.test_client().post(
+                    "/api/hubs/transfer",
+                    json={"node_id": "new-hub"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data["connection_replaced"])
+        self.assertEqual(data["target_node_id"], "new-hub")
+        args, kwargs = post.call_args
+        self.assertEqual(args[0], "http://100.64.0.9:8788/api/nodes/import")
+        self.assertEqual(kwargs["headers"], {})
+        imported = args[1]["nodes"][0]
+        self.assertNotIn("hub_url", imported)
+        self.assertNotIn("control_hub_url", imported)
+        self.assertNotIn("role_hints", imported)
+
     def test_hub_syncs_nodes_to_all_active_hubs(self):
         from stream_control_hub import app
 
@@ -741,6 +1039,46 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(saved[0]["hub_url"], "http://100.64.0.10:8788")
         self.assertTrue(saved[0]["role_hints"]["hub"]["activation_pending"])
 
+    def test_hub_activation_cleans_stale_agent_role_metadata(self):
+        from stream_control_hub import app
+
+        nodes = [{
+            "id": "node-a",
+            "name": "Node A",
+            "base_url": "http://100.64.0.10:8787",
+            "agent_url": "http://100.64.0.10:8787",
+            "public_base_url": "http://old.example",
+            "upload_base_url": "http://old.example",
+            "hub_url": "http://100.64.0.10:8788",
+            "control_hub_url": "http://old-hub:8788",
+            "hub_only": False,
+            "role_hints": {
+                "agent": {"enabled": True, "prepared": True, "url": "http://100.64.0.10:8787"},
+            },
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app,
+                "post_node_json",
+                return_value={"ok": True, "accepted": True, "result": {"url": "http://100.64.0.10:8788"}},
+            ):
+                response = app.APP.test_client().post(
+                    "/api/nodes/roles/hub/activate",
+                    json={"node_id": "node-a"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+            saved = json.loads(nodes_file.read_text(encoding="utf-8"))[0]
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(saved["hub_only"])
+        self.assertEqual(saved["hub_role_url"], "http://100.64.0.10:8788")
+        for key in ("base_url", "agent_url", "public_base_url", "upload_base_url", "control_hub_url"):
+            self.assertNotIn(key, saved)
+        self.assertNotIn("agent", saved["role_hints"])
+        self.assertTrue(saved["role_hints"]["hub"]["activation_pending"])
+
     def test_agent_activation_generates_token_and_records_pending_hint(self):
         from stream_control_hub import app
 
@@ -766,6 +1104,74 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(post.call_args.args[1]["agent_token"], "generated-agent-token")
         self.assertEqual(saved[0]["token"], "generated-agent-token")
         self.assertTrue(saved[0]["role_hints"]["agent"]["activation_pending"])
+        self.assertFalse(saved[0].get("hub_only", False))
+        self.assertNotIn("hub_url", saved[0])
+        self.assertNotIn("hub_role_url", saved[0])
+        self.assertEqual(saved[0]["agent_url"], "http://100.64.0.10:8787")
+
+    def test_hub_status_falls_back_to_legacy_media_endpoint(self):
+        from stream_control_hub import app
+
+        node = {
+            "id": "racknerd",
+            "base_url": "http://100.64.0.10:8787",
+            "hub_url": "http://100.64.0.10:8788",
+        }
+        with patch.object(
+            app,
+            "request_hub_json",
+            side_effect=[
+                {"ok": False, "status_code": 404, "message": "not found"},
+                {"ok": True, "videos": [{"name": "loop.mp4", "size": 42}]},
+            ],
+        ) as hub_probe, patch.object(app, "request_node_json") as agent_probe:
+            status = app.request_node_status(node, timeout=1)
+
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["source_role"], "hub")
+        self.assertEqual(status["videos"][0]["name"], "loop.mp4")
+        self.assertEqual(hub_probe.call_count, 2)
+        agent_probe.assert_not_called()
+
+    def test_agent_media_listing_keeps_legacy_role_directory_visible(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "media"
+            legacy = root / "agent_data" / "media"
+            legacy.mkdir(parents=True)
+            (legacy / "kept.mp4").write_bytes(b"video")
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", root / "agent_data"
+            ), patch.object(headless_agent, "MEDIA_DIR", shared), patch.object(
+                headless_agent, "STATE_FILE", root / "state.json"
+            ):
+                videos = headless_agent.list_media()
+
+        self.assertEqual([item["name"] for item in videos], ["kept.mp4"])
+        video_path = Path(videos[0]["video_path"])
+        self.assertEqual(video_path.name, "kept.mp4")
+        self.assertEqual(video_path.parent.name, "media")
+        self.assertEqual(video_path.parent.parent.name, "agent_data")
+
+    def test_agent_resolves_stale_absolute_media_path_from_shared_root(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "media"
+            legacy = root / "agent_data" / "media"
+            shared.mkdir(parents=True)
+            legacy.mkdir(parents=True)
+            video = shared / "kept.mp4"
+            video.write_bytes(b"video")
+            with patch.object(headless_agent, "ROOT", root), patch.object(
+                headless_agent, "DATA_DIR", root / "agent_data"
+            ), patch.object(headless_agent, "MEDIA_DIR", shared):
+                resolved = headless_agent.resolve_media_path(str(legacy / video.name))
+
+        self.assertEqual(resolved, video.resolve())
 
     def test_nodes_api_reports_pending_role_hints_until_services_are_online(self):
         from stream_control_hub import app
@@ -789,11 +1195,47 @@ class AgentUpgradeTests(unittest.TestCase):
             ):
                 response = app.APP.test_client().get("/api/nodes", environ_base={"REMOTE_ADDR": "127.0.0.1"})
 
-        roles = response.get_json()[0]["roles"]
+            roles = response.get_json()[0]["roles"]
         self.assertTrue(roles["agent"]["activation_pending"])
         self.assertTrue(roles["agent"]["prepared"])
+        self.assertTrue(roles["agent"]["present"])
         self.assertTrue(roles["hub"]["activation_pending"])
         self.assertEqual(roles["hub"]["url"], "http://100.64.0.10:8788")
+
+    def test_load_nodes_prunes_current_hub_self_record(self):
+        from stream_control_hub import app
+
+        nodes = [
+            {
+                "id": "racknerd-0d8a401",
+                "name": "racknerd-0d8a401",
+                "base_url": "http://100.64.0.2:8787",
+                "tailscale_ip": "100.64.0.2",
+            },
+            {
+                "id": "other-node",
+                "name": "Other",
+                "base_url": "http://100.64.0.3:8787",
+                "tailscale_ip": "100.64.0.3",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app,
+                "tailscale_status",
+                return_value={"ok": True, "self": {"tailscale_ips": ["100.64.0.2"]}},
+            ), patch.object(
+                app,
+                "_LOCAL_TAILSCALE_IP_CACHE",
+                {"expires_at": 0.0, "ips": set()},
+            ):
+                loaded = app.load_nodes()
+                saved = json.loads(nodes_file.read_text(encoding="utf-8"))
+
+        self.assertEqual([item["id"] for item in loaded], ["other-node"])
+        self.assertEqual([item["id"] for item in saved], ["other-node"])
 
     def test_hub_deletes_node_record_only_from_config(self):
         from stream_control_hub import app
