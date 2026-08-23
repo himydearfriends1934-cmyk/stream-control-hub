@@ -77,6 +77,15 @@ NODE_UPLOAD_PROBE_TIMEOUT_SECONDS = int(os.environ.get("STREAM_HUB_NODE_UPLOAD_P
 MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND = int(os.environ.get("STREAM_HUB_MIN_PUBLIC_UPLOAD_BYTES_PER_SECOND", str(32 * 1024)))
 MIN_FREE_AFTER_UPLOAD_BYTES = int(os.environ.get("STREAM_HUB_MIN_FREE_AFTER_UPLOAD_BYTES", str(2 * 1024 ** 3)))
 UPLOAD_POLICY_NAME = os.environ.get("STREAM_HUB_UPLOAD_POLICY_NAME", "safe-stable-fast-v1")
+HUB_LOCAL_NODE_ID = os.environ.get("STREAM_HUB_LOCAL_NODE_ID", "hub-local").strip() or "hub-local"
+HUB_LOCAL_NODE_NAME = os.environ.get("STREAM_HUB_LOCAL_NODE_NAME", "Hub 本地").strip() or "Hub 本地"
+HUB_UPLOAD_CHUNK_BYTES = int(os.environ.get("STREAM_HUB_UPLOAD_CHUNK_BYTES", str(8 * 1024 ** 2)))
+HUB_UPLOAD_MAX_CHUNK_BYTES = int(
+    os.environ.get("STREAM_HUB_UPLOAD_MAX_CHUNK_BYTES", str(64 * 1024 ** 2))
+)
+HUB_UPLOAD_TICKET_TTL_SECONDS = int(
+    os.environ.get("STREAM_HUB_UPLOAD_TICKET_TTL_SECONDS", "3600")
+)
 PUSH_AUDIT_LOG = DATA_DIR / "push_audit.jsonl"
 HUB_SETTINGS_FILE = DATA_DIR / "hub-settings.json"
 MEDIA_METADATA_FILE = DATA_DIR / "media-library-meta.json"
@@ -99,6 +108,10 @@ YOUTUBE_PROFILE_LOCK = threading.RLock()
 YOUTUBE_AUTOTUNE_STOP = threading.Event()
 YOUTUBE_AUTOTUNE_LOCK = threading.Lock()
 YOUTUBE_CLIENT_CACHE: dict[str, YouTubeAPIClient] = {}
+HUB_UPLOAD_TICKETS: dict[str, dict[str, Any]] = {}
+HUB_UPLOAD_TICKETS_LOCK = threading.Lock()
+HUB_UPLOAD_LOCKS: dict[str, threading.Lock] = {}
+HUB_UPLOAD_LOCKS_LOCK = threading.Lock()
 OFFLINE_NODE_RETENTION_SECONDS = max(
     3600,
     int(os.environ.get("STREAM_HUB_OFFLINE_NODE_RETENTION_SECONDS", str(24 * 60 * 60))),
@@ -2402,7 +2415,7 @@ HTML = r"""
     <section class="hero">
       <div>
         <h1 class="editable-title" id="editableHubTitle" contenteditable="true" spellcheck="false" title="点击编辑标题">Stream Control Hub</h1>
-        <p>本地总控台：集中监控 VPS 推流节点，视频从浏览器直传 Agent，也可以在 Agent 之间共享。升级面板时不触碰正在运行的 FFmpeg 推流。</p>
+        <p>本地总控台：集中监控 VPS 推流节点，视频可以上传到 Hub 本地或直传 Agent，也可以在 Hub 与 Agent 之间共享。升级面板时不触碰正在运行的 FFmpeg 推流。</p>
       </div>
       <div>
         <div class="appearance-controls">
@@ -2647,6 +2660,7 @@ HTML = r"""
             <input id="mediaInput" type="file" accept=".mp4,.mov,.mkv,.m4v,.webm">
             <div class="actions" style="margin-top: 8px;">
               <button class="primary" id="uploadBtn">上传到当前 Agent</button>
+              <button id="uploadHubBtn">上传到 Hub 本地</button>
               <button class="danger" id="cancelUploadBtn" disabled>取消上传</button>
             </div>
           </div>
@@ -2962,6 +2976,7 @@ HTML = r"""
       copyAgentInstallBtn: document.getElementById("copyAgentInstallBtn"),
       mediaInput: document.getElementById("mediaInput"),
       uploadBtn: document.getElementById("uploadBtn"),
+      uploadHubBtn: document.getElementById("uploadHubBtn"),
       pushSelectedBtn: document.getElementById("pushSelectedBtn"),
       streamNodeInput: document.getElementById("streamNodeInput"),
       streamNodeHint: document.getElementById("streamNodeHint"),
@@ -3063,6 +3078,7 @@ HTML = r"""
       refs.dashboardGrid.classList.add("fixed-layout-ready");
     }
     const LAST_NODE_STORAGE_KEY = "streamHubLastSelectedNodeId";
+    let HUB_LOCAL_NODE_ID = "hub-local";
     let selectedNodeId = localStorage.getItem(LAST_NODE_STORAGE_KEY) || "";
     function rememberSelectedNode(nodeId) {
       selectedNodeId = String(nodeId || "");
@@ -3145,9 +3161,11 @@ HTML = r"""
       const smartReady = state.nodeReady && state.hasVideo && state.hasTarget;
       const previewReady = state.nodeReady && state.hasVideo;
       const uploadReady = state.nodeReady && state.hasUploadFile && !activeUpload;
+      const hubUploadReady = state.hasUploadFile && !activeUpload;
       setButtonReady(refs.previewTuneBtn, previewReady, previewReady ? "" : "先选择推流服务器和视频");
       setButtonReady(refs.smartStartBtn, smartReady, smartReady ? "" : `还缺少：${missing.filter(Boolean).join("、")}`);
       setButtonReady(refs.uploadBtn, uploadReady, uploadReady ? "" : state.nodeReady ? "先选择一个视频文件" : "先选择推流服务器");
+      setButtonReady(refs.uploadHubBtn, hubUploadReady, hubUploadReady ? "" : "先选择一个视频文件");
       if (!nodes.length) {
         uiMessage("还没有推流服务器。点击“接入节点”，输入 Tailscale 100.x 地址即可接入。");
       } else if (!state.nodeReady) {
@@ -3554,6 +3572,14 @@ HTML = r"""
 
     function nodeProfileId(node) {
       return String(node?.youtube_profile_id || activeYouTubeProfileId || "default");
+    }
+
+    function mediaNodeLabel(nodeId) {
+      if (String(nodeId || "") === HUB_LOCAL_NODE_ID) {
+        return mediaLibrary.nodes?.find((item) => String(item.node_id || "") === HUB_LOCAL_NODE_ID)?.node_name || "Hub 本地";
+      }
+      const node = nodes.find((item) => String(item.id || "") === String(nodeId || ""));
+      return node?.name || node?.id || nodeId || "--";
     }
 
     function nodeStreamLock(node) {
@@ -3986,6 +4012,10 @@ HTML = r"""
           percent: 0,
         };
       });
+      const knownNodeIds = new Set(nodes.map((node) => String(node.id || "")));
+      (nodeDisks || []).filter((item) => !knownNodeIds.has(String(item.node_id || ""))).forEach((item) => {
+        merged.push(item);
+      });
       if (!merged.length) {
         refs.nodeSpaceRings.innerHTML = `<div class="muted">暂无节点数据。</div>`;
         return;
@@ -4026,7 +4056,7 @@ HTML = r"""
     }
 
     function resourceEntriesForScope(resources) {
-      const scopeNodeId = resourceAllMode ? "" : String(selectedNodeId || "");
+      const scopeNodeId = resourceAllMode ? "" : String(openResourceNodeId || selectedNodeId || "");
       return resources.flatMap((item) => {
         const copies = (item.copies || []).filter((copy) => !scopeNodeId || String(copy.node_id || "") === scopeNodeId);
         return copies.map((copy) => ({ item, copy }));
@@ -4071,8 +4101,13 @@ HTML = r"""
       const selectedProfileOptions = profileFilterOptions(resourceTableFilters.profile);
       const selectedOwnerNodeOptions = nodeOptions.replace('value="' + escapeHtml(resourceTableFilters.ownerNode) + '"', 'value="' + escapeHtml(resourceTableFilters.ownerNode) + '" selected');
       const resourceNameOptions = allResources.map((item) => `<option value="${escapeHtml(item.name || "")}"></option>`).join("");
-      const scopeNode = resourceAllMode ? null : selectedNode();
-      const scopeLabel = scopeNode ? `${scopeNode.name || scopeNode.id} 的资源` : "全部 Agent 资源";
+      const scopeNode = resourceAllMode
+        ? null
+        : (nodes.find((node) => String(node.id) === String(openResourceNodeId || selectedNodeId))
+          || (mediaLibrary.nodes || []).find((node) => String(node.node_id) === String(openResourceNodeId || selectedNodeId)));
+      const scopeLabel = scopeNode
+        ? `${scopeNode.name || scopeNode.node_name || scopeNode.id || scopeNode.node_id} 的资源`
+        : "全部资源";
       refs.mediaList.innerHTML = `
         <div class="media-toolbar">
           <strong>${scopeLabel}${resourceTableFilters.profile ? ` · ${profileName(resourceTableFilters.profile)}` : ""}</strong>
@@ -5070,6 +5105,10 @@ HTML = r"""
         if (!libraryResp.ok) throw new Error(libraryResp.statusText || "媒体库读取失败");
         nodes = await nodeResp.json();
         mediaLibrary = await libraryResp.json();
+        const hubLocalNode = (mediaLibrary.nodes || []).find((item) => item && item.hub_local);
+        if (hubLocalNode && hubLocalNode.node_id) {
+          HUB_LOCAL_NODE_ID = String(hubLocalNode.node_id);
+        }
         renderNodes();
         renderMedia();
         renderStreamControls();
@@ -5297,6 +5336,168 @@ HTML = r"""
         });
       } finally {
         delete refs.uploadBtn.dataset.busy;
+        refs.uploadBtn.disabled = false;
+        refs.cancelUploadBtn.disabled = true;
+        if (activeUpload === uploadState) activeUpload = null;
+        updatePrimaryActionStates();
+      }
+    }
+
+    async function uploadHubMedia() {
+      const file = refs.mediaInput.files[0];
+      if (!file) {
+        renderTransfer({ status: "failed", badge: "失败", title: "上传未开始", message: "请先选择一个视频文件。" });
+        return;
+      }
+      refs.uploadHubBtn.dataset.busy = "1";
+      refs.uploadHubBtn.disabled = true;
+      refs.uploadBtn.disabled = true;
+      refs.cancelUploadBtn.disabled = false;
+      const uploadId = `hub_browser_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const uploadState = {
+        uploadId,
+        target: null,
+        route: null,
+        xhr: null,
+        canceled: false,
+        cancelSent: false,
+        targetLabel: "Hub 本地",
+        doneBytes: 0,
+        totalBytes: file.size,
+        percent: 0,
+      };
+      activeUpload = uploadState;
+      try {
+        const ticketResp = await fetch("/api/hub/upload-ticket", {
+          method: "POST",
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ upload_id: uploadId, filename: file.name, total_size: file.size }),
+        });
+        const target = await ticketResp.json().catch(() => ({ ok: false, message: ticketResp.statusText }));
+        uploadState.target = target;
+        if (!ticketResp.ok || !target.ok) {
+          throw new Error(target.message || "Hub 未返回本地上传票据");
+        }
+        if (uploadState.canceled) throw new Error("上传已取消");
+        const uploadRoute = {
+          label: "Hub 本地",
+          url: CURRENT_ORIGIN,
+          upload_url: target.upload_url || "/api/hub/upload-chunk",
+          cancel_url: target.cancel_url || "/api/hub/upload-chunk/cancel",
+          headers: authHeaders({
+            "X-Upload-Ticket": String(target.ticket || ""),
+            "X-Upload-Route": "hub-local",
+          }),
+        };
+        uploadState.route = uploadRoute;
+        const uploadFilename = target.filename || file.name;
+        const savedNameNote = uploadFilename !== file.name ? `，保存名：${uploadFilename}` : "";
+        const chunkSize = Number(target.chunk_bytes || 8 * 1024 * 1024);
+        const totalChunks = Math.ceil(file.size / chunkSize);
+        const startedAt = performance.now();
+        let lastPaintAt = 0;
+        renderTransfer({
+          status: "running",
+          badge: "上传中",
+          title: "上传到 Hub 本地",
+          target: "Hub 本地",
+          totalBytes: file.size,
+          message: `准备写入 Hub media 目录：${file.name}${savedNameNote}`,
+        });
+        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+          if (uploadState.canceled) throw new Error("上传已取消");
+          const offset = chunkIndex * chunkSize;
+          const blob = file.slice(offset, Math.min(file.size, offset + chunkSize));
+          const form = new FormData();
+          form.append("upload_id", uploadId);
+          form.append("filename", uploadFilename);
+          form.append("chunk_index", String(chunkIndex));
+          form.append("total_chunks", String(totalChunks));
+          form.append("offset", String(offset));
+          form.append("total_size", String(file.size));
+          form.append("chunk_size", String(chunkSize));
+          form.append("chunk", blob, uploadFilename);
+          const chunkStartedAt = performance.now();
+          await sendUploadChunkWithRetry({
+            route: uploadRoute,
+            target,
+            form,
+            uploadState,
+            chunkIndex,
+            totalChunks,
+            onProgress: (loaded) => {
+              const now = performance.now();
+              if (now - lastPaintAt < 250 && loaded < blob.size) return;
+              lastPaintAt = now;
+              const uploaded = Math.min(file.size, offset + loaded);
+              const elapsed = Math.max(0.001, (now - startedAt) / 1000);
+              const chunkElapsed = Math.max(0.001, (now - chunkStartedAt) / 1000);
+              const averageBps = uploaded / elapsed;
+              uploadState.doneBytes = uploaded;
+              uploadState.percent = file.size ? (uploaded / file.size) * 100 : 0;
+              renderTransfer({
+                status: "running",
+                badge: "上传中",
+                title: "上传到 Hub 本地",
+                target: "Hub 本地",
+                percent: uploadState.percent,
+                doneBytes: uploaded,
+                totalBytes: file.size,
+                currentBps: loaded / chunkElapsed,
+                averageBps,
+                etaSeconds: averageBps > 0 ? (file.size - uploaded) / averageBps : 0,
+                message: `正在写入 Hub 本地，${chunkIndex + 1}/${totalChunks} 块。`,
+              });
+            },
+          });
+          const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
+          const chunkElapsed = Math.max(0.001, (performance.now() - chunkStartedAt) / 1000);
+          const uploaded = Math.min(file.size, offset + blob.size);
+          const averageBps = uploaded / elapsed;
+          uploadState.doneBytes = uploaded;
+          uploadState.percent = file.size ? (uploaded / file.size) * 100 : 0;
+          renderTransfer({
+            status: "running",
+            badge: "上传中",
+            title: "上传到 Hub 本地",
+            target: "Hub 本地",
+            percent: uploadState.percent,
+            doneBytes: uploaded,
+            totalBytes: file.size,
+            currentBps: blob.size / chunkElapsed,
+            averageBps,
+            etaSeconds: averageBps > 0 ? (file.size - uploaded) / averageBps : 0,
+            message: `正在写入 Hub 本地，${chunkIndex + 1}/${totalChunks} 块。`,
+          });
+        }
+        const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
+        renderTransfer({
+          status: "done",
+          badge: "完成",
+          title: "Hub 本地上传完成",
+          target: "Hub 本地",
+          percent: 100,
+          doneBytes: file.size,
+          totalBytes: file.size,
+          averageBps: file.size / elapsed,
+          message: `${file.name} 已保存到 Hub 本地${savedNameNote}。`,
+        });
+        await refreshAll();
+      } catch (error) {
+        await cancelUploadState(uploadState);
+        renderTransfer({
+          status: "failed",
+          badge: uploadState.canceled ? "已取消" : "失败",
+          title: uploadState.canceled ? "Hub 本地上传已取消" : "Hub 本地上传失败",
+          target: "Hub 本地",
+          percent: uploadState.percent || 0,
+          doneBytes: uploadState.doneBytes || 0,
+          totalBytes: file.size,
+          message: uploadState.canceled ? "临时分片已经清理。" : friendlyError(error, "Hub 本地上传失败"),
+        });
+      } finally {
+        delete refs.uploadHubBtn.dataset.busy;
+        refs.uploadHubBtn.disabled = false;
         refs.uploadBtn.disabled = false;
         refs.cancelUploadBtn.disabled = true;
         if (activeUpload === uploadState) activeUpload = null;
@@ -5824,7 +6025,10 @@ HTML = r"""
     }
 
     async function pushSelectedMedia(explicitTargetNodeIds = null) {
-      const sourceNode = nodes.find((item) => String(item.id) === String(selectedMediaNodeId())) || selectedNode();
+      const sourceId = String(selectedMediaNodeId() || "");
+      const sourceNode = sourceId === HUB_LOCAL_NODE_ID
+        ? { id: HUB_LOCAL_NODE_ID, name: mediaNodeLabel(HUB_LOCAL_NODE_ID), hub_local: true }
+        : nodes.find((item) => String(item.id) === sourceId) || selectedNode();
       const requestedTargets = Array.isArray(explicitTargetNodeIds) ? explicitTargetNodeIds : selectedNodeIds();
       const target_node_ids = requestedTargets.filter((id) => String(id) !== String(sourceNode?.id || ""));
       const media = selectedMediaPath() || selectedMediaName();
@@ -5837,7 +6041,7 @@ HTML = r"""
           status: "failed",
           badge: "失败",
           title: "共享未开始",
-          message: "请选择源 Agent 的一个服务器视频，并勾选至少一个其他 Agent。",
+          message: "请选择一个 Hub 或 Agent 文件，并勾选至少一个目标 Agent。",
         });
         return;
       }
@@ -5848,7 +6052,7 @@ HTML = r"""
         title: `检查 ${sourceLabel} → ${targetLabel}`,
         source: sourceLabel,
         target: targetLabel,
-        message: `正在检查源/目标 Agent、目标公网地址、TCP 8787、临时票据、上传探针和磁盘空间：${media}`,
+        message: `正在检查 ${sourceNode.hub_local ? "Hub 本地文件" : "源 Agent"}、目标公网地址、TCP 8787、临时票据、上传探针和磁盘空间：${media}`,
       });
       try {
         const resp = await fetch("/api/media/share", {
@@ -5981,7 +6185,7 @@ HTML = r"""
       if (!payload.library_media_name || payload.media_local) return { ok: true, copied: false };
       if (String(payload.source_node_id || "") === String(payload.node_id || "")) return { ok: true, copied: false, same_node: true };
       if (!payload.source_node_id) throw new Error(`媒体库没有可用源副本：${payload.library_media_name}`);
-      const copySourceLabel = nodes.find((item) => String(item.id) === String(payload.source_node_id))?.name || payload.source_node_id;
+      const copySourceLabel = mediaNodeLabel(payload.source_node_id);
       const copyTargetLabel = selectedNode()?.name || payload.node_id;
       const confirmed = window.confirm([
         `目标 Agent「${copyTargetLabel}」没有视频：${payload.library_media_name}`,
@@ -6209,7 +6413,7 @@ HTML = r"""
       const mediaName = row.dataset.mediaName || "";
       const videoPath = row.dataset.videoPath || mediaName;
       const node = nodes.find((item) => String(item.id) === String(nodeId));
-      const nodeLabel = node?.name || nodeId;
+      const nodeLabel = mediaNodeLabel(nodeId);
       if (action === "property") {
         showMediaProperties(row);
         return;
@@ -7112,7 +7316,8 @@ HTML = r"""
       openNodeResources(card.dataset.resourceNodeId);
     });
     function openNodeResources(nodeId) {
-      rememberSelectedNode(nodeId);
+      if (String(nodeId || "") !== HUB_LOCAL_NODE_ID) rememberSelectedNode(nodeId);
+      openResourceNodeId = String(nodeId || "");
       renderNodes();
       selectResourceNodeScope(nodeId);
       document.querySelector(".resource-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -7237,7 +7442,7 @@ HTML = r"""
         selectMediaRow(row);
         pushSelectedMedia([targetNodeId]);
       } else if (action === "move-node") {
-        const sourceLabel = nodes.find((node) => String(node.id) === String(row.dataset.nodeId))?.name || row.dataset.nodeId;
+        const sourceLabel = mediaNodeLabel(row.dataset.nodeId);
         const targetLabel = nodes.find((node) => String(node.id) === String(targetNodeId))?.name || targetNodeId;
         if (!confirm(`确认把 ${row.dataset.mediaName} 从 ${sourceLabel} 移动到 ${targetLabel}？\n\n系统会先完整传输并确认成功，然后才删除源文件。`)) return;
         selectMediaRow(row);
@@ -7355,6 +7560,7 @@ HTML = r"""
     });
     refs.mediaCleanupBtn.addEventListener("click", cleanupDuplicateMedia);
     refs.uploadBtn.addEventListener("click", uploadMedia);
+    refs.uploadHubBtn.addEventListener("click", uploadHubMedia);
     refs.mediaInput.addEventListener("change", updatePrimaryActionStates);
     refs.cancelUploadBtn.addEventListener("click", cancelActiveUpload);
     refs.checkUpdatesBtn.addEventListener("click", checkUpdatesAndPrompt);
@@ -7875,6 +8081,18 @@ def save_hub_settings(settings: dict[str, Any]) -> None:
     write_json_atomic(HUB_SETTINGS_FILE, settings)
 
 
+def hub_local_node() -> dict[str, Any]:
+    settings = load_hub_settings()
+    hub_name = str(settings.get("hub_name") or "").strip()
+    return {
+        "id": HUB_LOCAL_NODE_ID,
+        "name": f"{hub_name} 本地" if hub_name else HUB_LOCAL_NODE_NAME,
+        "role": "hub-local",
+        "hub_local": True,
+        "enabled": True,
+    }
+
+
 def node_youtube_profile_map() -> dict[str, str]:
     settings = load_hub_settings()
     mapping = settings.get("node_youtube_profiles")
@@ -8146,6 +8364,54 @@ def media_library_payload() -> dict[str, Any]:
                 "last_used_label": str(video.get("last_used_label") or "从未开播"),
             })
             item["last_used_at"] = max(float(item.get("last_used_at") or 0), float(video.get("last_used_at") or 0))
+    local_node = hub_local_node()
+    local_usage = shutil.disk_usage(MEDIA_DIR)
+    local_used = max(0, int(local_usage.total - local_usage.free))
+    node_disks.append({
+        "node_id": HUB_LOCAL_NODE_ID,
+        "node_name": local_node["name"],
+        "online": True,
+        "total": int(local_usage.total),
+        "used": local_used,
+        "free": int(local_usage.free),
+        "percent": round((local_used / local_usage.total) * 100, 2) if local_usage.total else 0,
+        "hub_local": True,
+    })
+    for video in list_media():
+        name = str(video.get("name") or "").strip()
+        if not name:
+            continue
+        profile_id = assigned_media_profile_id(metadata, name) or default_profile_id
+        profile_name = str(profiles.get(profile_id, {}).get("name") or profile_id)
+        item = resources.setdefault(name, {
+            "name": name,
+            "size": int(video.get("size") or 0),
+            "modified": float(video.get("modified") or 0),
+            "modified_label": str(video.get("modified_label") or "--"),
+            "created_at": float(video.get("modified") or 0),
+            "last_used_at": 0,
+            "profile_id": profile_id,
+            "profile_name": profile_name,
+            "copies": [],
+        })
+        if float(video.get("modified") or 0) > float(item.get("modified") or 0):
+            item["modified"] = float(video.get("modified") or 0)
+            item["modified_label"] = str(video.get("modified_label") or "--")
+        item["size"] = max(int(item.get("size") or 0), int(video.get("size") or 0))
+        item["copies"].append({
+            "node_id": HUB_LOCAL_NODE_ID,
+            "node_name": local_node["name"],
+            "profile_id": profile_id,
+            "profile_name": profile_name,
+            "video_path": name,
+            "size": int(video.get("size") or 0),
+            "modified": float(video.get("modified") or 0),
+            "modified_label": str(video.get("modified_label") or "--"),
+            "created_at": float(video.get("modified") or 0),
+            "last_used_at": 0,
+            "last_used_label": "从未开播",
+            "hub_local": True,
+        })
     for item in resources.values():
         profile_ids = sorted({
             str(copy.get("profile_id") or "")
@@ -8537,6 +8803,83 @@ def safe_media_filename(value: str) -> str:
     return name
 
 
+def hub_upload_ticket_value() -> str:
+    return request.headers.get("X-Upload-Ticket", "").strip() or request.args.get("ticket", "").strip()
+
+
+def cleanup_hub_upload_tickets() -> None:
+    now = time.time()
+    with HUB_UPLOAD_TICKETS_LOCK:
+        expired = [
+            ticket
+            for ticket, record in HUB_UPLOAD_TICKETS.items()
+            if float(record.get("expires_at") or 0) < now
+        ]
+        for ticket in expired:
+            HUB_UPLOAD_TICKETS.pop(ticket, None)
+
+
+def hub_upload_ticket_record() -> dict[str, Any] | None:
+    ticket = hub_upload_ticket_value()
+    if not ticket:
+        return None
+    cleanup_hub_upload_tickets()
+    with HUB_UPLOAD_TICKETS_LOCK:
+        record = HUB_UPLOAD_TICKETS.get(ticket)
+        return dict(record) if record else None
+
+
+def expire_hub_upload_ticket(ticket: str) -> None:
+    if not ticket:
+        return
+    with HUB_UPLOAD_TICKETS_LOCK:
+        HUB_UPLOAD_TICKETS.pop(ticket, None)
+
+
+def complete_hub_upload_ticket(ticket: str, media_path: Path) -> None:
+    if not ticket:
+        return
+    with HUB_UPLOAD_TICKETS_LOCK:
+        record = HUB_UPLOAD_TICKETS.get(ticket)
+        if record is not None:
+            record["completed"] = True
+            record["completed_at"] = time.time()
+            record["video_path"] = str(media_path)
+
+
+def validate_hub_upload_ticket(
+    record: dict[str, Any] | None,
+    upload_id: str,
+    filename: str,
+    total_size: int,
+) -> str:
+    if not record:
+        return "Hub upload ticket required"
+    if str(record.get("upload_id") or "") != upload_id:
+        return "Hub upload ticket does not match upload id"
+    if str(record.get("filename") or "") != filename:
+        return "Hub upload ticket does not match filename"
+    if int(record.get("total_size") or 0) != total_size:
+        return "Hub upload ticket does not match file size"
+    return ""
+
+
+def hub_upload_lock(upload_id: str) -> threading.Lock:
+    with HUB_UPLOAD_LOCKS_LOCK:
+        lock = HUB_UPLOAD_LOCKS.get(upload_id)
+        if lock is None:
+            lock = threading.Lock()
+            HUB_UPLOAD_LOCKS[upload_id] = lock
+        return lock
+
+
+def release_hub_upload_lock(upload_id: str) -> None:
+    if not upload_id:
+        return
+    with HUB_UPLOAD_LOCKS_LOCK:
+        HUB_UPLOAD_LOCKS.pop(upload_id, None)
+
+
 def upload_route_label(url: str, base_url: str) -> str:
     try:
         host = urlparse(url).hostname or ""
@@ -8800,6 +9143,206 @@ def share_transfer_preflight(
     }
 
 
+def hub_local_media_info(media: str) -> dict[str, Any]:
+    try:
+        filename = safe_media_filename(media)
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc)}
+    path = MEDIA_DIR / filename
+    if not path.exists() or not path.is_file():
+        return {"ok": False, "message": "Hub 本地媒体不存在"}
+    stat = path.stat()
+    return {
+        "ok": True,
+        "name": filename,
+        "video_path": filename,
+        "size": stat.st_size,
+        "modified": stat.st_mtime,
+        "modified_label": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+    }
+
+
+def hub_media_push_preflight(target_nodes: list[dict[str, Any]], media: str) -> dict[str, Any]:
+    source = hub_local_node()
+    media_info = hub_local_media_info(media)
+    repair_steps: list[str] = []
+    if not media_info.get("ok"):
+        return {
+            "ok": False,
+            "message": media_info.get("message") or "Hub 本地文件不可用",
+            "media": str(media or ""),
+            "checks": [{"name": "Hub 本地文件", "ok": False, "message": media_info.get("message") or "不可用"}],
+            "targets": [],
+            "repair_steps": ["刷新媒体库，确认 Hub 本地文件仍然存在。"],
+            "policy": "public-only; no Tailscale fallback",
+        }
+
+    filename = str(media_info["name"])
+    total_size = int(media_info.get("size") or 0)
+    checks = [{
+        "name": "Hub 本地文件",
+        "ok": total_size > 0,
+        "message": f"{source['name']} / {filename} / {file_size_label(total_size)}",
+    }]
+    if total_size <= 0:
+        return {
+            "ok": False,
+            "message": "Hub 本地文件为空",
+            "media": filename,
+            "size": total_size,
+            "size_label": file_size_label(total_size),
+            "checks": checks,
+            "targets": [],
+            "repair_steps": ["检查 Hub media 目录中的文件是否完整。"],
+            "policy": "public-only; no Tailscale fallback",
+        }
+
+    target_results: list[dict[str, Any]] = []
+    for target_node in target_nodes:
+        target_id = str(target_node.get("id") or "")
+        target_name = str(target_node.get("name") or target_id)
+        result: dict[str, Any] = {
+            "node_id": target_id,
+            "node_name": target_name,
+            "ok": False,
+            "checks": [],
+            "public_urls": [],
+        }
+        if target_node.get("hub_only") or target_node.get("role") == "hub-only":
+            message = "目标记录只有 Hub 角色，没有可接收文件的 Agent"
+            result["checks"].append({"name": "Agent 角色", "ok": False, "message": message})
+            result["message"] = message
+            repair_steps.append(f"在目标 VPS「{target_name}」激活或安装 Agent 角色后再发送文件。")
+            target_results.append(result)
+            continue
+
+        status = request_node_json(target_node, "/api/status", timeout=10)
+        if not status.get("ok"):
+            message = status.get("message") or "Hub 无法连接目标 Agent"
+            result["checks"].append({"name": "Agent 控制连接", "ok": False, "message": message})
+            result["message"] = message
+            repair_steps.append(f"确认目标 Agent「{target_name}」在线，并且 8787 控制端口可达。")
+            target_results.append(result)
+            continue
+        result["checks"].append({"name": "Agent 控制连接", "ok": True, "message": "控制接口正常"})
+
+        existing = next(
+            (
+                item for item in status.get("videos") or []
+                if str(item.get("name") or Path(str(item.get("video_path") or "")).name) == filename
+            ),
+            None,
+        )
+        if existing:
+            message = f"目标 Agent 已有同名文件 {filename}，未开始复制"
+            result["checks"].append({"name": "目标文件冲突", "ok": False, "message": message})
+            result["message"] = message
+            repair_steps.append(f"目标 Agent「{target_name}」已有同名视频，请先改名或直接使用现有副本。")
+            target_results.append(result)
+            continue
+        result["checks"].append({"name": "目标文件冲突", "ok": True, "message": "没有同名文件"})
+
+        free_bytes = int((status.get("disk") or {}).get("free") or 0)
+        if free_bytes and free_bytes - total_size < MIN_FREE_AFTER_UPLOAD_BYTES:
+            message = (
+                f"可用空间 {file_size_label(free_bytes)} 不足；传输后必须至少保留 "
+                f"{file_size_label(MIN_FREE_AFTER_UPLOAD_BYTES)}"
+            )
+            result["checks"].append({"name": "磁盘空间", "ok": False, "message": message})
+            result["message"] = message
+            repair_steps.append(f"清理目标 Agent「{target_name}」磁盘后再发送。")
+            target_results.append(result)
+            continue
+        result["checks"].append({
+            "name": "磁盘空间",
+            "ok": True,
+            "message": file_size_label(free_bytes) if free_bytes else "Agent 未报告空间，继续检查线路",
+        })
+
+        public_status = request_node_json(target_node, "/api/public-upload", timeout=10)
+        discovered_public_url = (
+            str(public_status.get("public_origin") or "").strip().rstrip("/")
+            if public_status.get("ok") and public_status.get("supported")
+            else ""
+        )
+        public_urls: list[str] = []
+        for public_url in [discovered_public_url, *node_upload_base_urls(target_node)]:
+            if public_url and is_public_upload_url(public_url) and public_url not in public_urls:
+                public_urls.append(public_url)
+        result["public_urls"] = public_urls
+        if not public_urls:
+            message = "目标 Agent 没有可用的公网 IPv4 上传地址"
+            result["checks"].append({"name": "公网地址", "ok": False, "message": message})
+            result["message"] = message
+            repair_steps.append(f"给目标 Agent「{target_name}」配置公网 IPv4 和上传地址。")
+            target_results.append(result)
+            continue
+        result["checks"].append({"name": "公网地址", "ok": True, "message": " / ".join(public_urls)})
+
+        preflight_upload_id = f"hub_preflight_{uuid.uuid4().hex}"
+        ticket = request_node_upload_ticket(
+            target_node,
+            upload_id=preflight_upload_id,
+            filename=filename,
+            total_size=total_size,
+        )
+        ticket_value = str(ticket.get("ticket") or "")
+        if not ticket.get("ok") or not ticket_value:
+            message = ticket.get("message") or "目标 Agent 无法签发临时上传票据"
+            result["checks"].append({"name": "临时上传票据", "ok": False, "message": message})
+            result["message"] = message
+            repair_steps.append(f"升级目标 Agent「{target_name}」，并确认 Hub 保存的 Agent 凭据有效。")
+            target_results.append(result)
+            continue
+        result["checks"].append({"name": "临时上传票据", "ok": True, "message": "签发成功"})
+
+        route = {
+            "upload_base_url": public_urls[0],
+            "headers": {"X-Upload-Ticket": ticket_value},
+        }
+        probe = probe_upload_route(route)
+        with suppress(Exception):
+            post_url_json(
+                f"{public_urls[0]}/api/upload-chunk/cancel",
+                {"upload_id": preflight_upload_id},
+                timeout=10,
+                headers={"X-Upload-Ticket": ticket_value},
+            )
+        if not probe.get("ok"):
+            message = probe.get("message") or "Hub 无法连接目标 Agent 公网 8787 上传端口"
+            result["checks"].append({"name": "Hub 到目标公网线路", "ok": False, "message": message})
+            result["probe"] = probe
+            result["message"] = message
+            repair_steps.append(f"在目标 VPS「{target_name}」的云安全组和本机防火墙放行 TCP 8787。")
+            target_results.append(result)
+            continue
+        result["checks"].append({
+            "name": "Hub 到目标公网线路",
+            "ok": True,
+            "message": f"{public_urls[0]} / {probe.get('rate_label') or '可达'}",
+        })
+        result["route"] = public_urls[0]
+        result["probe"] = probe
+        result["message"] = "Hub 公网发送预检通过"
+        result["ok"] = True
+        target_results.append(result)
+
+    ok = bool(target_results) and all(item.get("ok") for item in target_results)
+    if not ok and not repair_steps:
+        repair_steps.append("根据失败项目检查目标 Agent、公网地址、云安全组 TCP 8787 和磁盘空间。")
+    return {
+        "ok": ok,
+        "message": "所有目标公网线路预检通过" if ok else "Hub 公网发送预检未通过",
+        "media": filename,
+        "size": total_size,
+        "size_label": file_size_label(total_size),
+        "checks": checks,
+        "targets": target_results,
+        "repair_steps": list(dict.fromkeys(repair_steps)),
+        "policy": "public-only; no Tailscale fallback",
+    }
+
+
 def share_task_snapshot(task_id: str) -> dict[str, Any] | None:
     with SHARE_TASKS_LOCK:
         task = SHARE_TASKS.get(task_id)
@@ -9010,6 +9553,75 @@ def run_share_task(
             task_id,
             status="failed",
             message="共享失败",
+            error=str(exc),
+            results=results,
+        )
+
+
+def run_hub_media_push_task(
+    task_id: str,
+    target_nodes: list[dict[str, Any]],
+    media: str,
+) -> None:
+    started_at = time.time()
+    results: list[dict[str, Any]] = []
+    try:
+        media_info = hub_local_media_info(media)
+        if not media_info.get("ok"):
+            raise RuntimeError(media_info.get("message") or "Hub 本地媒体不存在")
+        media_path = MEDIA_DIR / str(media_info["name"])
+        total_size = int(media_info.get("size") or 0)
+        aggregate_total = total_size * len(target_nodes)
+        update_share_task(
+            task_id,
+            status="running",
+            total_bytes=aggregate_total,
+            message=f"正在从 Hub 本地发送 {media_info['name']}",
+            route_label="公网直连（禁止内网回退）",
+        )
+        for target_index, target_node in enumerate(target_nodes):
+            target_id = str(target_node.get("id") or "")
+            update_share_task(
+                task_id,
+                status="running",
+                message=f"正在发送到 {target_node.get('name') or target_id}",
+                transfer_route=str(target_node.get("public_base_url") or target_node.get("upload_base_url") or ""),
+                done_bytes=total_size * target_index,
+                total_bytes=aggregate_total,
+            )
+            result = push_media_to_node(target_node, media_path)
+            result["node_id"] = target_id
+            results.append(result)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("message") or f"{target_id} 发送失败")
+            done_bytes = total_size * (target_index + 1)
+            elapsed = max(0.001, time.time() - started_at)
+            update_share_task(
+                task_id,
+                status="running",
+                done_bytes=done_bytes,
+                total_bytes=aggregate_total,
+                current_bps=int(total_size / max(0.001, time.time() - started_at)),
+                average_bps=int(done_bytes / elapsed),
+                message=f"已发送到 {target_node.get('name') or target_id}",
+                results=results,
+            )
+        elapsed = max(0.001, time.time() - started_at)
+        update_share_task(
+            task_id,
+            status="done",
+            done_bytes=aggregate_total,
+            total_bytes=aggregate_total,
+            current_bps=0,
+            average_bps=int(aggregate_total / elapsed),
+            message="Hub 本地文件发送完成",
+            results=results,
+        )
+    except Exception as exc:
+        update_share_task(
+            task_id,
+            status="failed",
+            message="Hub 本地文件发送失败",
             error=str(exc),
             results=results,
         )
@@ -10148,6 +10760,8 @@ def api_node_upload_target():
         return jsonify({"ok": False, "message": "node not found"}), 404
     if not node.get("enabled", True):
         return jsonify({"ok": False, "message": "node disabled"}), 400
+    if node.get("hub_only") or node.get("role") == "hub-only":
+        return jsonify({"ok": False, "message": "该节点只有 Hub 角色，没有 Agent 上传服务"}), 409
     base_url = node_base_url(node)
     if not base_url:
         return jsonify({"ok": False, "message": "missing node base_url"}), 400
@@ -10488,6 +11102,180 @@ def api_tailscale_connect_existing_ip():
     })
 
 
+@APP.post("/api/hub/upload-ticket")
+def api_hub_upload_ticket():
+    ensure_dirs()
+    payload = request.get_json(silent=True) or {}
+    try:
+        upload_id = secure_filename(str(payload.get("upload_id") or ""))
+        filename = safe_media_filename(str(payload.get("filename") or ""))
+        total_size = int(payload.get("total_size") or 0)
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    if not upload_id:
+        return jsonify({"ok": False, "message": "upload_id is required"}), 400
+    if total_size <= 0:
+        return jsonify({"ok": False, "message": "total_size is required"}), 400
+    if total_size > int(APP.config["MAX_CONTENT_LENGTH"]):
+        return jsonify({"ok": False, "message": "file is larger than Hub upload limit"}), 413
+    try:
+        ensure_media_disk_space(total_size)
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 507
+    ticket = secrets.token_urlsafe(32)
+    expires_at = time.time() + HUB_UPLOAD_TICKET_TTL_SECONDS
+    cleanup_hub_upload_tickets()
+    with HUB_UPLOAD_TICKETS_LOCK:
+        HUB_UPLOAD_TICKETS[ticket] = {
+            "upload_id": upload_id,
+            "filename": filename,
+            "total_size": total_size,
+            "created_at": time.time(),
+            "expires_at": expires_at,
+        }
+    return jsonify({
+        "ok": True,
+        "ticket": ticket,
+        "expires_at": expires_at,
+        "expires_in": HUB_UPLOAD_TICKET_TTL_SECONDS,
+        "upload_id": upload_id,
+        "filename": filename,
+        "upload_url": "/api/hub/upload-chunk",
+        "cancel_url": "/api/hub/upload-chunk/cancel",
+        "chunk_bytes": HUB_UPLOAD_CHUNK_BYTES,
+    })
+
+
+@APP.post("/api/hub/upload-chunk")
+def api_hub_upload_chunk():
+    ensure_dirs()
+    started_at = time.time()
+    ticket_value = hub_upload_ticket_value()
+    ticket_record = hub_upload_ticket_record()
+    try:
+        upload_id = secure_filename(str(request.form.get("upload_id") or ""))
+        filename = safe_media_filename(str(request.form.get("filename") or ""))
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    try:
+        chunk_index = int(request.form.get("chunk_index") or 0)
+        total_chunks = int(request.form.get("total_chunks") or 1)
+        offset = int(request.form.get("offset") or 0)
+        total_size = int(request.form.get("total_size") or 0)
+        chunk_size = int(request.form.get("chunk_size") or 0)
+    except ValueError:
+        return jsonify({"ok": False, "message": "invalid chunk metadata"}), 400
+    ticket_error = validate_hub_upload_ticket(ticket_record, upload_id, filename, total_size)
+    if ticket_value and ticket_error:
+        return jsonify({"ok": False, "message": ticket_error}), 403
+    if not ticket_value or not ticket_record:
+        return jsonify({"ok": False, "message": "Hub upload ticket required"}), 403
+    if not upload_id:
+        return jsonify({"ok": False, "message": "invalid upload metadata"}), 400
+    chunk = request.files.get("chunk")
+    if not chunk:
+        return jsonify({"ok": False, "message": "missing chunk"}), 400
+    if total_size <= 0 or total_chunks <= 0 or chunk_index < 0 or chunk_index >= total_chunks:
+        return jsonify({"ok": False, "message": "invalid chunk metadata"}), 400
+    if chunk_size <= 0 or chunk_size > HUB_UPLOAD_MAX_CHUNK_BYTES:
+        return jsonify({"ok": False, "message": "invalid chunk size"}), 400
+    expected_total_chunks = (total_size + chunk_size - 1) // chunk_size
+    expected_offset = chunk_index * chunk_size
+    if total_chunks != expected_total_chunks or offset != expected_offset or offset >= total_size:
+        return jsonify({"ok": False, "message": "chunk offset or count does not match upload metadata"}), 409
+    if ticket_record.get("completed"):
+        return jsonify({
+            "ok": True,
+            "complete": True,
+            "received_size": total_size,
+            "chunk_bytes": min(chunk_size, total_size - offset),
+            "video_path": str(ticket_record.get("video_path") or ""),
+            "idempotent": True,
+        })
+
+    temp_path = MEDIA_DIR / f".hub.{upload_id}.{filename}.part"
+    final_path = MEDIA_DIR / filename
+    with hub_upload_lock(upload_id):
+        current_size = temp_path.stat().st_size if temp_path.exists() else 0
+        if offset > current_size:
+            return jsonify({"ok": False, "message": "previous Hub upload chunk is missing"}), 409
+        chunk_payload = chunk.stream.read()
+        expected_chunk_bytes = min(chunk_size, total_size - offset)
+        if len(chunk_payload) != expected_chunk_bytes:
+            return jsonify({"ok": False, "message": "chunk size does not match upload metadata"}), 400
+        if offset + expected_chunk_bytes <= current_size:
+            with temp_path.open("rb") as existing:
+                existing.seek(offset)
+                existing_bytes = existing.read(expected_chunk_bytes)
+            if existing_bytes == chunk_payload:
+                elapsed = max(0.001, time.time() - started_at)
+                return jsonify({
+                    "ok": True,
+                    "complete": current_size == total_size,
+                    "received_size": current_size,
+                    "chunk_bytes": expected_chunk_bytes,
+                    "bytes_per_second": int(expected_chunk_bytes / elapsed),
+                    "rate_label": f"{file_size_label(int(expected_chunk_bytes / elapsed))}/s",
+                    "video_path": str(final_path if current_size == total_size and final_path.exists() else temp_path),
+                    "idempotent": True,
+                })
+            return jsonify({"ok": False, "message": "replayed chunk does not match existing upload data"}), 409
+        additional_bytes = max(0, offset + expected_chunk_bytes - current_size)
+        free_bytes = shutil.disk_usage(MEDIA_DIR).free
+        if free_bytes - additional_bytes < MIN_FREE_AFTER_UPLOAD_BYTES:
+            return jsonify({
+                "ok": False,
+                "message": "not enough free disk space for Hub upload",
+                "free_bytes": free_bytes,
+                "required_free_after_upload_bytes": MIN_FREE_AFTER_UPLOAD_BYTES,
+            }), 507
+        with temp_path.open("r+b" if temp_path.exists() else "wb") as target:
+            target.seek(offset)
+            target.write(chunk_payload)
+            target.truncate(offset + expected_chunk_bytes)
+
+        received_size = temp_path.stat().st_size
+        complete = chunk_index + 1 >= total_chunks and received_size == total_size
+        if complete:
+            counter = 1
+            while final_path.exists():
+                final_path = MEDIA_DIR / f"{Path(filename).stem}-{counter}{Path(filename).suffix}"
+                counter += 1
+            temp_path.replace(final_path)
+            complete_hub_upload_ticket(ticket_value, final_path)
+            release_hub_upload_lock(upload_id)
+    elapsed = max(0.001, time.time() - started_at)
+    return jsonify({
+        "ok": True,
+        "complete": complete,
+        "received_size": received_size,
+        "chunk_bytes": expected_chunk_bytes,
+        "bytes_per_second": int(expected_chunk_bytes / elapsed),
+        "rate_label": f"{file_size_label(int(expected_chunk_bytes / elapsed))}/s",
+        "video_path": str(final_path if complete else temp_path),
+        "filename": final_path.name if complete else filename,
+    })
+
+
+@APP.post("/api/hub/upload-chunk/cancel")
+def api_hub_upload_cancel():
+    ensure_dirs()
+    upload_id = secure_filename(str((request.get_json(silent=True) or {}).get("upload_id") or ""))
+    ticket_value = hub_upload_ticket_value()
+    ticket_record = hub_upload_ticket_record()
+    if not ticket_value or not ticket_record or str(ticket_record.get("upload_id") or "") != upload_id:
+        return jsonify({"ok": False, "message": "Hub upload ticket does not match upload id"}), 403
+    removed = 0
+    if upload_id:
+        with hub_upload_lock(upload_id):
+            for path in MEDIA_DIR.glob(f".hub.{upload_id}.*.part"):
+                path.unlink(missing_ok=True)
+                removed += 1
+        release_hub_upload_lock(upload_id)
+    expire_hub_upload_ticket(ticket_value)
+    return jsonify({"ok": True, "removed": removed})
+
+
 @APP.post("/api/media/upload")
 def api_media_upload():
     ensure_dirs()
@@ -10554,7 +11342,7 @@ def api_media_share():
     source_node_id = str(payload.get("source_node_id") or "").strip()
     target_node_ids = [str(item) for item in payload.get("target_node_ids") or []]
     media = str(payload.get("media") or payload.get("video_path") or "").strip()
-    source_node = node_by_id(source_node_id)
+    source_node = hub_local_node() if source_node_id == HUB_LOCAL_NODE_ID else node_by_id(source_node_id)
     if not source_node:
         return jsonify({"ok": False, "message": "source node not found"}), 404
     if not source_node.get("enabled", True):
@@ -10573,11 +11361,20 @@ def api_media_share():
             return jsonify({"ok": False, "message": f"target node not found: {target_node_id}"}), 404
         if not target_node.get("enabled", True):
             return jsonify({"ok": False, "message": f"target node disabled: {target_node_id}"}), 400
+        if target_node.get("hub_only") or target_node.get("role") == "hub-only":
+            return jsonify({
+                "ok": False,
+                "message": f"target node has no Agent role: {target_node_id}",
+            }), 409
         target_nodes.append(target_node)
     if not target_nodes:
         return jsonify({"ok": False, "message": "no target agents selected"}), 400
 
-    preflight = share_transfer_preflight(source_node, target_nodes, media)
+    if source_node_id == HUB_LOCAL_NODE_ID:
+        preflight = hub_media_push_preflight(target_nodes, media)
+        media = str(preflight.get("media") or media)
+    else:
+        preflight = share_transfer_preflight(source_node, target_nodes, media)
     if not preflight.get("ok"):
         return jsonify({
             "ok": False,
@@ -10607,8 +11404,12 @@ def api_media_share():
             "updated_at": time.time(),
         }
     worker = threading.Thread(
-        target=run_share_task,
-        args=(task_id, source_node, target_nodes, media, progress_url),
+        target=run_hub_media_push_task if source_node_id == HUB_LOCAL_NODE_ID else run_share_task,
+        args=(
+            (task_id, target_nodes, media)
+            if source_node_id == HUB_LOCAL_NODE_ID
+            else (task_id, source_node, target_nodes, media, progress_url)
+        ),
         daemon=True,
     )
     worker.start()
@@ -10659,9 +11460,31 @@ def api_node_media_rename():
         return jsonify({"ok": False, "message": str(exc)}), 400
     node = node_by_id(node_id)
     if not node:
-        return jsonify({"ok": False, "message": "node not found"}), 404
+        if node_id != HUB_LOCAL_NODE_ID:
+            return jsonify({"ok": False, "message": "node not found"}), 404
     if not media or not new_name:
         return jsonify({"ok": False, "message": "media and new_name are required"}), 400
+    if node_id == HUB_LOCAL_NODE_ID:
+        try:
+            old_name = safe_media_filename(media)
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        source = MEDIA_DIR / old_name
+        target = MEDIA_DIR / new_name
+        if not source.exists() or not source.is_file():
+            return jsonify({"ok": False, "message": "Hub 本地媒体不存在"}), 404
+        if target.exists():
+            return jsonify({"ok": False, "message": "target filename already exists"}), 409
+        source.rename(target)
+        with suppress(Exception):
+            copy_media_profile_assignment(old_name, new_name)
+        return jsonify({
+            "ok": True,
+            "node_id": node_id,
+            "name": new_name,
+            "video_path": new_name,
+            "message": "Hub 本地媒体已重命名",
+        })
     result = post_node_json(node, "/api/media/rename", {"media": media, "new_name": new_name}, timeout=30)
     if result.get("ok"):
         with suppress(Exception):
@@ -10676,9 +11499,25 @@ def api_node_media_delete():
     media = str(payload.get("media") or payload.get("video_path") or "").strip()
     node = node_by_id(node_id)
     if not node:
-        return jsonify({"ok": False, "message": "node not found"}), 404
+        if node_id != HUB_LOCAL_NODE_ID:
+            return jsonify({"ok": False, "message": "node not found"}), 404
     if not media:
         return jsonify({"ok": False, "message": "media is required"}), 400
+    if node_id == HUB_LOCAL_NODE_ID:
+        try:
+            filename = safe_media_filename(media)
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        path = MEDIA_DIR / filename
+        if not path.exists() or not path.is_file():
+            return jsonify({"ok": False, "message": "Hub 本地媒体不存在"}), 404
+        path.unlink()
+        return jsonify({
+            "ok": True,
+            "node_id": node_id,
+            "name": filename,
+            "message": "Hub 本地媒体已删除",
+        })
     result = post_node_json(node, "/api/media/delete", {"media": media}, timeout=30)
     return jsonify({"node_id": node_id, **result}), 200 if result.get("ok") else int(result.get("status_code") or 502)
 

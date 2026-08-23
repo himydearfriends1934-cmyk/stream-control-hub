@@ -234,6 +234,99 @@ class HubPublicUploadRouteTests(unittest.TestCase):
         self.assertNotIn("X-Control-Token", captured_route["headers"])
 
 
+class HubLocalMediaTests(unittest.TestCase):
+    def test_hub_local_upload_is_chunked_and_visible_in_media_library(self):
+        from stream_control_hub import app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media_dir = root / "media"
+            media_dir.mkdir()
+            nodes_file = root / "nodes.json"
+            nodes_file.write_text("[]", encoding="utf-8")
+            settings_file = root / "hub-settings.json"
+            metadata_file = root / "media-library-meta.json"
+            with patch.object(app, "MEDIA_DIR", media_dir), patch.object(
+                app, "NODES_FILE", nodes_file
+            ), patch.object(app, "HUB_SETTINGS_FILE", settings_file), patch.object(
+                app, "MEDIA_METADATA_FILE", metadata_file
+            ), patch.object(app, "MIN_FREE_AFTER_UPLOAD_BYTES", 0), patch.object(
+                app, "HUB_UPLOAD_CHUNK_BYTES", 4
+            ), patch.object(
+                app,
+                "load_youtube_profiles_config",
+                return_value={"profiles": [{"id": "default", "name": "Default"}]},
+            ), patch.object(app, "active_youtube_profile_id", return_value="default"):
+                client = app.APP.test_client()
+                ticket_response = client.post(
+                    "/api/hub/upload-ticket",
+                    json={"upload_id": "hub-test-upload", "filename": "clip.mp4", "total_size": 4},
+                )
+                self.assertEqual(ticket_response.status_code, 200)
+                ticket = ticket_response.get_json()["ticket"]
+                chunk_response = client.post(
+                    "/api/hub/upload-chunk",
+                    headers={"X-Upload-Ticket": ticket},
+                    data={
+                        "upload_id": "hub-test-upload",
+                        "filename": "clip.mp4",
+                        "chunk_index": "0",
+                        "total_chunks": "1",
+                        "offset": "0",
+                        "total_size": "4",
+                        "chunk_size": "4",
+                        "chunk": (BytesIO(b"test"), "clip.mp4"),
+                    },
+                    content_type="multipart/form-data",
+                )
+                library_response = client.get("/api/media-library")
+                saved_bytes = (media_dir / "clip.mp4").read_bytes()
+                library_payload = library_response.get_json()
+
+        self.assertEqual(chunk_response.status_code, 200)
+        self.assertTrue(chunk_response.get_json()["complete"])
+        self.assertEqual(saved_bytes, b"test")
+        self.assertEqual(library_response.status_code, 200)
+        resources = library_payload["resources"]
+        copy = resources[0]["copies"][0]
+        self.assertEqual(copy["node_id"], app.HUB_LOCAL_NODE_ID)
+        self.assertTrue(copy["hub_local"])
+
+    def test_hub_local_source_creates_background_send_task(self):
+        from stream_control_hub import app
+
+        target = {"id": "target", "name": "Target Agent", "enabled": True}
+        preflight = {
+            "ok": True,
+            "media": "clip.mp4",
+            "size": 4,
+            "size_label": "4 B",
+            "targets": [{"node_id": "target", "ok": True}],
+        }
+        worker = type("Worker", (), {"start": lambda self: None})()
+        app.SHARE_TASKS.clear()
+        try:
+            with patch.object(app, "node_by_id", return_value=target), patch.object(
+                app, "hub_media_push_preflight", return_value=preflight
+            ), patch.object(app.threading, "Thread", return_value=worker) as thread_factory:
+                response = app.APP.test_client().post(
+                    "/api/media/share",
+                    json={
+                        "source_node_id": app.HUB_LOCAL_NODE_ID,
+                        "target_node_ids": ["target"],
+                        "media": "clip.mp4",
+                    },
+                )
+        finally:
+            app.SHARE_TASKS.clear()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["source_node_id"], app.HUB_LOCAL_NODE_ID)
+        self.assertEqual(payload["media"], "clip.mp4")
+        self.assertEqual(thread_factory.call_args.kwargs["target"], app.run_hub_media_push_task)
+
+
 class AgentUploadIntegrityTests(unittest.TestCase):
     def test_agent_preflight_probes_public_upload_with_ticket(self):
         from stream_control_hub import headless_agent
