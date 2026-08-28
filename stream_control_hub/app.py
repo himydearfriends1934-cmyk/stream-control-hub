@@ -3775,9 +3775,9 @@ HTML = r"""
     const YOUTUBE_PROFILE_VISIBLE_SLOTS = 6;
     const YOUTUBE_STREAM_CACHE_TTL_MS = 2 * 60 * 1000;
     const YOUTUBE_PROFILE_REFRESH_MS = 5 * 60 * 1000;
-    const AGENT_STREAM_REFRESH_MS = 5 * 60 * 1000;
+    const AGENT_STREAM_REFRESH_MS = 8 * 1000;
     const TAILSCALE_DISCOVERY_REFRESH_MS = 30 * 1000;
-    let agentStreamRefreshInFlight = false;
+    let dashboardRefreshInFlight = false;
     let tailscaleRefreshInFlight = null;
     let editingYouTubeProfileId = "";
     let youtubeProfileClickTimer = null;
@@ -5868,6 +5868,8 @@ HTML = r"""
     }
 
     async function refreshAll() {
+      if (dashboardRefreshInFlight) return;
+      dashboardRefreshInFlight = true;
       refs.refreshBtn.disabled = true;
       uiMessage("正在刷新 Hub、Agent 和资源状态...");
       showDiagnostics("正在刷新状态，请稍候...", { scroll: false });
@@ -5906,6 +5908,7 @@ HTML = r"""
         log(message);
       } finally {
         refs.refreshBtn.disabled = false;
+        dashboardRefreshInFlight = false;
       }
     }
 
@@ -6136,25 +6139,37 @@ HTML = r"""
     }
 
     async function refreshRunningAgentParameters() {
-      if (agentStreamRefreshInFlight || !nodes.length) return;
-      agentStreamRefreshInFlight = true;
+      if (dashboardRefreshInFlight || document.visibilityState === "hidden") return;
+      dashboardRefreshInFlight = true;
       try {
-        const hadStreamingAgents = hasStreamingAgentRows();
-        const nodeResp = await fetch("/api/nodes");
-        if (!nodeResp.ok) throw new Error(nodeResp.statusText || "Agent 参数刷新失败");
-        nodes = await nodeResp.json();
+        const now = Date.now();
+        const [nodeResp, libraryResp] = await Promise.all([
+          fetch(`/api/nodes?_=${now}`, { cache: "no-store" }),
+          fetch(`/api/media-library?_=${now}`, { cache: "no-store" }),
+        ]);
+        if (!nodeResp.ok) throw new Error(nodeResp.statusText || "Agent 状态刷新失败");
+        if (!libraryResp.ok) throw new Error(libraryResp.statusText || "资源状态刷新失败");
+        const nextNodes = await nodeResp.json();
+        const nextMediaLibrary = await libraryResp.json();
+        const nodesChanged = JSON.stringify(nodes) !== JSON.stringify(nextNodes);
+        const mediaChanged = JSON.stringify(mediaLibrary) !== JSON.stringify(nextMediaLibrary);
+        nodes = nextNodes;
+        mediaLibrary = nextMediaLibrary;
+        const hubLocalNode = (mediaLibrary.nodes || []).find((item) => item && (item.hub_local || item.is_local_hub));
+        if (hubLocalNode && hubLocalNode.node_id) {
+          HUB_LOCAL_NODE_ID = String(hubLocalNode.node_id);
+        }
         if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
-        if (!hadStreamingAgents && !hasStreamingAgentRows()) return;
-        renderNodes();
-        renderStreamControls();
-        renderYouTubeAgentList();
-        renderTailscaleNodeOptions();
-        preloadNodeYouTubeStreams();
-        log("运行中的 Agent 参数已自动刷新");
+        if (nodesChanged || mediaChanged) {
+          renderNodes();
+          renderMedia();
+          renderStreamControls();
+          renderYouTubeAgentList();
+        }
       } catch (error) {
-        log(friendlyError(error, "运行中的 Agent 参数刷新失败"));
+        log(friendlyError(error, "Agent 和资源状态自动刷新失败"));
       } finally {
-        agentStreamRefreshInFlight = false;
+        dashboardRefreshInFlight = false;
       }
     }
 
@@ -9216,6 +9231,9 @@ HTML = r"""
     loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
     checkDailyGithubUpdates();
     window.setInterval(refreshRunningAgentParameters, AGENT_STREAM_REFRESH_MS);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") refreshRunningAgentParameters();
+    });
     window.setInterval(() => refreshTailscalePeers({ silent: true }), TAILSCALE_DISCOVERY_REFRESH_MS);
     window.setInterval(() => {
       loadYouTubeProfiles()
