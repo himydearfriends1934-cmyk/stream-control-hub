@@ -12,6 +12,7 @@ The hub is designed to run on a local server. VPS nodes stay lightweight: they k
 - Check GitHub updates centrally and deploy them to nodes.
 - Keep FFmpeg streaming processes independent from panel upgrades.
 - Never store server secrets in the repository.
+- Keep a private Agent status cache so the dashboard can open immediately and refresh nodes in the background.
 
 ## Quick Start
 
@@ -164,6 +165,16 @@ therefore brings the Agent back and resumes the stream from the saved payload.
 A manual stop disables recovery and immediately removes the recovery payload.
 Stream keys are never returned by the API or written to the general runtime
 state file.
+
+The Hub stores the latest Agent health snapshot in `data/agent-status-cache.json`
+with mode `600`. `/api/nodes` serves that snapshot immediately, then a background
+worker probes all configured nodes concurrently and updates the cache about every
+30 seconds. A slow or unreachable node is isolated by its own request timeout and
+does not block the dashboard. Override the defaults with
+`STREAM_HUB_AGENT_STATUS_REFRESH_INTERVAL_SECONDS`,
+`STREAM_HUB_AGENT_STATUS_REFRESH_TIMEOUT_SECONDS`, and
+`STREAM_HUB_AGENT_STATUS_REFRESH_MAX_WORKERS`. The cache excludes tokens,
+passwords, stream keys, OAuth credentials, and ingestion URLs.
 
 Smart Tune probes the selected media with `ffprobe`, preserves its aspect ratio, and chooses a guarded H.264/AAC starting point from the current [YouTube Live encoder recommendations](https://support.google.com/youtube/answer/2853702): 4 Mbps for 720p30, 6 Mbps for 720p60, 10 Mbps for 1080p30, 12 Mbps for 1080p60, 15/24 Mbps for 1440p30/60, and 30/35 Mbps for 2160p30/60. CPU, available memory, and the median TCP delivery rate previously observed on the Agent-owned FFmpeg socket can lower that starting point; 20% network headroom is retained. Set `STREAM_AGENT_EGRESS_CAPACITY_KBPS` to a trusted upload speed-test result when no prior socket estimate exists.
 

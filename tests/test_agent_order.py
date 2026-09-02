@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -99,10 +100,30 @@ class AgentOrderTests(unittest.TestCase):
                     "cloudnium4": {"youtube_stream_id": "stream-4", "video_path": "/media/shared.mp4"},
                 },
             }), encoding="utf-8")
+            cache_file = root / "agent-status-cache.json"
+            cache_file.write_text(json.dumps({
+                "version": 1,
+                "updated_at": "2026-09-02T00:00:00+00:00",
+                "updated_at_epoch": time.time(),
+                "nodes": {
+                    node["id"]: {
+                        "node_id": node["id"],
+                        "checked_at": "2026-09-02T00:00:00+00:00",
+                        "checked_at_epoch": time.time(),
+                        "ok": True,
+                        "health": status,
+                        "hub_role": {"ok": False, "enabled": False},
+                        "error": "",
+                    }
+                    for node, status in zip(nodes, statuses)
+                },
+            }), encoding="utf-8")
             with patch.object(app, "NODES_FILE", nodes_file), patch.object(
                 app, "HUB_SETTINGS_FILE", settings_file
-            ), patch.object(app, "request_node_json", side_effect=statuses), patch.object(
-                app, "request_hub_role_status", return_value={"enabled": False}
+            ), patch.object(app, "AGENT_STATUS_CACHE_FILE", cache_file), patch.object(
+                app, "request_node_json", side_effect=AssertionError("cached /api/nodes must not probe Agent")
+            ), patch.object(
+                app, "request_hub_role_status", side_effect=AssertionError("cached /api/nodes must not probe Hub")
             ):
                 response = app.APP.test_client().get("/api/nodes")
 

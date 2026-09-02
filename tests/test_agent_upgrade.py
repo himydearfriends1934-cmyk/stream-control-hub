@@ -2,6 +2,7 @@ import json
 import inspect
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -861,13 +862,30 @@ class AgentUpgradeTests(unittest.TestCase):
         health = {"ok": True, "agent": {"version": "abc1234"}}
         with tempfile.TemporaryDirectory() as tmp:
             nodes_file = Path(tmp) / "nodes.json"
+            cache_file = Path(tmp) / "agent-status-cache.json"
             nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            cache_file.write_text(json.dumps({
+                "version": 1,
+                "updated_at": "2026-09-02T00:00:00+00:00",
+                "updated_at_epoch": time.time(),
+                "nodes": {
+                    "node-a": {
+                        "node_id": "node-a",
+                        "checked_at": "2026-09-02T00:00:00+00:00",
+                        "checked_at_epoch": time.time(),
+                        "ok": True,
+                        "health": health,
+                        "hub_role": {"ok": True, "enabled": True, "version": "def5678", "url": "http://100.64.0.10:8788"},
+                        "error": "",
+                    },
+                },
+            }), encoding="utf-8")
             with patch.object(app, "NODES_FILE", nodes_file), patch.object(
-                app, "request_node_json", return_value=health
+                app, "AGENT_STATUS_CACHE_FILE", cache_file
             ), patch.object(
-                app,
-                "request_hub_role_status",
-                return_value={"ok": True, "enabled": True, "version": "def5678", "url": "http://100.64.0.10:8788"},
+                app, "request_node_status", side_effect=AssertionError("cached /api/nodes must not probe Agent")
+            ), patch.object(
+                app, "request_hub_role_status", side_effect=AssertionError("cached /api/nodes must not probe Hub")
             ):
                 response = app.APP.test_client().get("/api/nodes")
 
@@ -1189,11 +1207,30 @@ class AgentUpgradeTests(unittest.TestCase):
         }]
         with tempfile.TemporaryDirectory() as tmp:
             nodes_file = Path(tmp) / "nodes.json"
+            cache_file = Path(tmp) / "agent-status-cache.json"
             nodes_file.write_text(json.dumps(nodes), encoding="utf-8")
+            cache_file.write_text(json.dumps({
+                "version": 1,
+                "updated_at": "2026-09-02T00:00:00+00:00",
+                "updated_at_epoch": time.time(),
+                "nodes": {
+                    "node-a": {
+                        "node_id": "node-a",
+                        "checked_at": "2026-09-02T00:00:00+00:00",
+                        "checked_at_epoch": time.time(),
+                        "ok": False,
+                        "health": {"ok": False, "message": "starting"},
+                        "hub_role": {"ok": False, "enabled": False, "url": "http://100.64.0.10:8788"},
+                        "error": "starting",
+                    },
+                },
+            }), encoding="utf-8")
             with patch.object(app, "NODES_FILE", nodes_file), patch.object(
-                app, "request_node_json", return_value={"ok": False, "message": "starting"}
+                app, "AGENT_STATUS_CACHE_FILE", cache_file
             ), patch.object(
-                app, "request_hub_role_status", return_value={"ok": False, "enabled": False, "url": "http://100.64.0.10:8788"}
+                app, "request_node_status", side_effect=AssertionError("cached /api/nodes must not probe Agent")
+            ), patch.object(
+                app, "request_hub_role_status", side_effect=AssertionError("cached /api/nodes must not probe Hub")
             ):
                 response = app.APP.test_client().get("/api/nodes", environ_base={"REMOTE_ADDR": "127.0.0.1"})
 

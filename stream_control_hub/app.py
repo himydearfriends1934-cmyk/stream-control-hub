@@ -15,7 +15,7 @@ import platform
 import re
 import threading
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -220,6 +220,28 @@ HUB_UPLOAD_TICKETS: dict[str, dict[str, Any]] = {}
 HUB_UPLOAD_TICKETS_LOCK = threading.Lock()
 HUB_UPLOAD_LOCKS: dict[str, threading.Lock] = {}
 HUB_UPLOAD_LOCKS_LOCK = threading.Lock()
+AGENT_STATUS_CACHE_FILE = DATA_DIR / "agent-status-cache.json"
+AGENT_STATUS_CACHE_VERSION = 1
+AGENT_STATUS_REFRESH_INTERVAL_SECONDS = max(
+    5,
+    int(os.environ.get("STREAM_HUB_AGENT_STATUS_REFRESH_INTERVAL_SECONDS", "30")),
+)
+AGENT_STATUS_REFRESH_TIMEOUT_SECONDS = max(
+    1,
+    min(60, int(os.environ.get("STREAM_HUB_AGENT_STATUS_REFRESH_TIMEOUT_SECONDS", "8"))),
+)
+AGENT_STATUS_REFRESH_MAX_WORKERS = max(
+    1,
+    min(32, int(os.environ.get("STREAM_HUB_AGENT_STATUS_REFRESH_MAX_WORKERS", "8"))),
+)
+AGENT_STATUS_REFRESH_LOCK = threading.Lock()
+AGENT_STATUS_REFRESH_STATE: dict[str, Any] = {
+    "running": False,
+    "started_at": 0.0,
+    "finished_at": 0.0,
+    "last_error": "",
+}
+AGENT_STATUS_REFRESH_STOP = threading.Event()
 OFFLINE_NODE_RETENTION_SECONDS = max(
     3600,
     int(os.environ.get("STREAM_HUB_OFFLINE_NODE_RETENTION_SECONDS", str(24 * 60 * 60))),
@@ -2050,6 +2072,12 @@ HTML = r"""
     }
     .monitor-hero h3 { margin: 0; font-size: 21px; letter-spacing: 0; }
     .monitor-hero small { color: var(--muted); display: block; margin-top: 3px; }
+    .monitor-status-meta {
+      margin: -3px 0 8px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
     .machine-compact {
       display: flex;
       flex-wrap: wrap;
@@ -3778,6 +3806,12 @@ HTML = r"""
     const AGENT_STREAM_REFRESH_MS = 8 * 1000;
     const TAILSCALE_DISCOVERY_REFRESH_MS = 30 * 1000;
     let dashboardRefreshInFlight = false;
+    let agentStatusViewMeta = {
+      source: "pending",
+      cachedAt: "",
+      refreshing: false,
+      refreshInterval: 30,
+    };
     let tailscaleRefreshInFlight = null;
     let editingYouTubeProfileId = "";
     let youtubeProfileClickTimer = null;
@@ -3906,9 +3940,15 @@ HTML = r"""
       const resources = mediaLibrary.resources || [];
       const copies = resources.reduce((total, item) => total + ((item.copies || []).length || 0), 0);
       const selected = selectedNode();
+      const statusSource = agentStatusViewMeta.source === "pending" ? "首次读取中" : "缓存";
+      const statusTime = agentStatusViewMeta.cachedAt ? shortDateTime(agentStatusViewMeta.cachedAt) : "--";
+      const refreshState = agentStatusViewMeta.refreshing
+        ? `后台实时刷新中（约每 ${agentStatusViewMeta.refreshInterval} 秒）`
+        : "后台实时刷新已就绪";
       return [
         "状态已刷新",
         "",
+        `Agent 状态：${statusSource} · ${statusTime} · ${refreshState}`,
         `Agent：${onlineAgents}/${agentRows.length} 在线，${streamingAgents} 个正在推流`,
         `视频资源：${resources.length} 个文件，${copies} 个节点副本`,
         `当前选择：${selected ? `${selected.name || selected.id} (${selected.id})` : "未选择 Agent"}`,
@@ -3919,8 +3959,29 @@ HTML = r"""
 
     function nodeStatusPill(node) {
       if (node.enabled === false) return `<span class="pill warn">disabled</span>`;
+      if (node.status_meta?.source === "pending") return `<span class="pill warn">读取中</span>`;
       if (!node.health?.ok) return `<span class="pill bad">offline</span>`;
       return `<span class="pill">online</span>`;
+    }
+
+    function nodeStatusFreshnessLabel(node) {
+      const meta = node?.status_meta || {};
+      if (meta.source === "pending") return "状态读取中";
+      if (!meta.checked_at) return "暂无检查时间";
+      const checkedAt = Date.parse(meta.checked_at);
+      const age = Number.isNaN(checkedAt) ? NaN : Math.max(0, (Date.now() - checkedAt) / 1000);
+      const ageLabel = Number.isFinite(age) ? (age < 60 ? `${Math.round(age)}秒前` : `${Math.round(age / 60)}分钟前`) : "缓存";
+      return meta.refreshing ? `状态 ${ageLabel} · 后台刷新中` : `状态 ${ageLabel}`;
+    }
+
+    function captureAgentStatusMeta(response) {
+      if (!response?.headers) return;
+      agentStatusViewMeta = {
+        source: response.headers.get("X-Node-Status-Source") || "cache",
+        cachedAt: response.headers.get("X-Node-Status-Cached-At") || "",
+        refreshing: response.headers.get("X-Node-Status-Refresh-Running") === "1",
+        refreshInterval: Number(response.headers.get("X-Node-Status-Refresh-Interval") || 30),
+      };
     }
 
     function escapeHtml(value) {
@@ -4531,6 +4592,7 @@ HTML = r"""
           <h3>${escapeHtml(node.name || node.id)}</h3>
           ${nodeStatusPill(node)}
         </div>
+        <div class="monitor-status-meta">${escapeHtml(nodeStatusFreshnessLabel(node))}</div>
 
         <div class="health-strip">
           ${donut("CPU", `${Number(h.cpu_percent || 0).toFixed(1)}%`, h.cpu_percent)}
@@ -4579,7 +4641,7 @@ HTML = r"""
           <span class="node-name">
             <span class="node-agent-line">
               <strong class="node-name-edit" data-node-name-edit data-node-id="${escapeHtml(node.id)}" title="双击修改 Agent 名称">${escapeHtml(node.name || node.id)}</strong>
-              <small>${escapeHtml(h.hostname || node.id)}</small>
+              <small>${escapeHtml(h.hostname || node.id)} · ${escapeHtml(nodeStatusFreshnessLabel(node))}</small>
             </span>
           </span>
           <span class="node-state">${stateDot(online, node.enabled === false)}${online ? "在线" : node.enabled === false ? "禁用" : "离线"}</span>
@@ -5874,24 +5936,28 @@ HTML = r"""
       uiMessage("正在刷新 Hub、Agent 和资源状态...");
       showDiagnostics("正在刷新状态，请稍候...", { scroll: false });
       try {
-        const [nodeResp, libraryResp, settingsResp, roleResp] = await Promise.all([
-          fetch("/api/nodes"),
+        const nodeResp = await fetch(`/api/nodes?refresh=1&_=${Date.now()}`, { cache: "no-store" });
+        if (!nodeResp.ok) throw new Error(nodeResp.statusText || "节点状态读取失败");
+        captureAgentStatusMeta(nodeResp);
+        nodes = await nodeResp.json();
+        if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
+        renderNodes();
+        showDiagnostics(statusSummaryText(), { scroll: false });
+
+        const [libraryResp, settingsResp, roleResp] = await Promise.all([
           fetch("/api/media-library"),
           fetch("/api/settings").catch(() => null),
           fetch("/api/role-status").catch(() => null),
           loadYouTubeProfiles().catch(() => null),
         ]);
-        if (!nodeResp.ok) throw new Error(nodeResp.statusText || "节点状态读取失败");
         if (!libraryResp.ok) throw new Error(libraryResp.statusText || "媒体库读取失败");
         if (settingsResp?.ok) applyHubSettings(await settingsResp.json());
         localRoleStatus = roleResp?.ok ? await roleResp.json() : null;
-        nodes = await nodeResp.json();
         mediaLibrary = await libraryResp.json();
         const hubLocalNode = (mediaLibrary.nodes || []).find((item) => item && (item.hub_local || item.is_local_hub));
         if (hubLocalNode && hubLocalNode.node_id) {
           HUB_LOCAL_NODE_ID = String(hubLocalNode.node_id);
         }
-        if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
         renderNodes();
         renderMedia();
         renderStreamControls();
@@ -6043,6 +6109,7 @@ HTML = r"""
     async function refreshOperationNodes() {
       const resp = await fetch(`/api/nodes?_=${Date.now()}`, { cache: "no-store" });
       if (!resp.ok) throw new Error(resp.statusText || "节点状态读取失败");
+      captureAgentStatusMeta(resp);
       nodes = await resp.json();
       if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
       renderNodes();
@@ -6149,6 +6216,7 @@ HTML = r"""
         ]);
         if (!nodeResp.ok) throw new Error(nodeResp.statusText || "Agent 状态刷新失败");
         if (!libraryResp.ok) throw new Error(libraryResp.statusText || "资源状态刷新失败");
+        captureAgentStatusMeta(nodeResp);
         const nextNodes = await nodeResp.json();
         const nextMediaLibrary = await libraryResp.json();
         const nodesChanged = JSON.stringify(nodes) !== JSON.stringify(nextNodes);
@@ -10666,12 +10734,12 @@ def node_role_urls(node: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def request_hub_role_status(node: dict[str, Any]) -> dict[str, Any]:
+def request_hub_role_status(node: dict[str, Any], *, timeout: int = 3) -> dict[str, Any]:
     hub_url = node_role_urls(node)["hub"]
     if not hub_url:
         return {"ok": False, "enabled": False, "message": "missing Hub URL"}
     try:
-        response = requests.get(f"{hub_url}/api/role-status", timeout=3)
+        response = requests.get(f"{hub_url}/api/role-status", timeout=timeout)
         data = response.json()
         roles = data.get("roles") or {}
         hub = roles.get("hub") or {}
@@ -10684,6 +10752,288 @@ def request_hub_role_status(node: dict[str, Any]) -> dict[str, Any]:
         }
     except Exception as exc:
         return {"ok": False, "enabled": False, "url": hub_url, "message": str(exc)}
+
+
+_CACHE_SENSITIVE_KEYS = {
+    "access_token",
+    "authorization",
+    "client_secret",
+    "cookie",
+    "cookies",
+    "control_token",
+    "credential",
+    "credentials",
+    "password",
+    "refresh_token",
+    "secret",
+    "stream_key",
+    "token",
+    "upload_ticket",
+    "youtube_ingestion_url",
+}
+
+
+def cache_safe_runtime_payload(value: Any, key: str = "") -> Any:
+    """Keep runtime diagnostics useful while excluding credentials from disk caches."""
+    normalized_key = re.sub(r"[^a-z0-9_]", "", str(key or "").lower())
+    if normalized_key in _CACHE_SENSITIVE_KEYS or (
+        normalized_key.endswith("_token") and not normalized_key.startswith("has_")
+    ):
+        return None
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            child_key = str(raw_key)
+            safe_value = cache_safe_runtime_payload(raw_value, child_key)
+            child_normalized = re.sub(r"[^a-z0-9_]", "", child_key.lower())
+            if safe_value is not None and child_normalized not in _CACHE_SENSITIVE_KEYS:
+                result[child_key] = safe_value
+        return result
+    if isinstance(value, list):
+        return [cache_safe_runtime_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [cache_safe_runtime_payload(item) for item in value]
+    return value
+
+
+def load_agent_status_cache() -> dict[str, Any]:
+    try:
+        payload = json.loads(AGENT_STATUS_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    entries = payload.get("nodes")
+    if not isinstance(entries, dict):
+        entries = {}
+    try:
+        version = int(payload.get("version") or AGENT_STATUS_CACHE_VERSION)
+    except (TypeError, ValueError):
+        version = AGENT_STATUS_CACHE_VERSION
+    try:
+        updated_at_epoch = float(payload.get("updated_at_epoch") or 0)
+    except (TypeError, ValueError):
+        updated_at_epoch = 0.0
+    return {
+        "version": version,
+        "updated_at": str(payload.get("updated_at") or ""),
+        "updated_at_epoch": updated_at_epoch,
+        "nodes": {
+            str(node_id): entry
+            for node_id, entry in entries.items()
+            if isinstance(entry, dict)
+        },
+    }
+
+
+def save_agent_status_cache(payload: dict[str, Any]) -> None:
+    write_json_atomic(
+        AGENT_STATUS_CACHE_FILE,
+        cache_safe_runtime_payload({
+            "version": AGENT_STATUS_CACHE_VERSION,
+            "updated_at": str(payload.get("updated_at") or retention_timestamp_text()),
+            "updated_at_epoch": float(payload.get("updated_at_epoch") or time.time()),
+            "nodes": payload.get("nodes") or {},
+        }),
+        mode=0o600,
+    )
+
+
+def _agent_status_cache_entry(
+    node: dict[str, Any],
+    health: dict[str, Any],
+    hub_role: dict[str, Any],
+    *,
+    started_at: float,
+    error: str = "",
+) -> dict[str, Any]:
+    node_id = str(node.get("id") or "").strip()
+    checked_at = time.time()
+    safe_health = cache_safe_runtime_payload(health if isinstance(health, dict) else {})
+    safe_hub_role = cache_safe_runtime_payload(hub_role if isinstance(hub_role, dict) else {})
+    health_ok = bool(isinstance(safe_health, dict) and safe_health.get("ok"))
+    hub_ok = bool(isinstance(safe_hub_role, dict) and safe_hub_role.get("ok") and safe_hub_role.get("enabled"))
+    message_parts = [str(error or "").strip()]
+    if not health_ok and isinstance(safe_health, dict):
+        message_parts.append(str(safe_health.get("message") or "").strip())
+    if not hub_ok and isinstance(safe_hub_role, dict):
+        message_parts.append(str(safe_hub_role.get("message") or "").strip())
+    error_text = "; ".join(dict.fromkeys(item[:500] for item in message_parts if item))
+    return {
+        "node_id": node_id,
+        "checked_at": retention_timestamp_text(checked_at),
+        "checked_at_epoch": checked_at,
+        "duration_ms": round(max(0, (checked_at - started_at) * 1000), 1),
+        "ok": health_ok or hub_ok,
+        "health": safe_health,
+        "hub_role": safe_hub_role,
+        "error": error_text,
+    }
+
+
+def probe_agent_status_for_cache(node: dict[str, Any]) -> dict[str, Any]:
+    started_at = time.time()
+    if node.get("enabled", True) is False:
+        return _agent_status_cache_entry(
+            node,
+            {"ok": False, "message": "node disabled"},
+            {},
+            started_at=started_at,
+        )
+    try:
+        health = request_node_status(node, timeout=AGENT_STATUS_REFRESH_TIMEOUT_SECONDS)
+    except Exception as exc:
+        health = {"ok": False, "message": str(exc)}
+    try:
+        hub_role = request_hub_role_status(node, timeout=min(AGENT_STATUS_REFRESH_TIMEOUT_SECONDS, 6))
+    except Exception as exc:
+        hub_role = {"ok": False, "enabled": False, "message": str(exc)}
+    return _agent_status_cache_entry(node, health, hub_role, started_at=started_at)
+
+
+def agent_status_cache_needs_refresh(
+    nodes: list[dict[str, Any]],
+    cache: dict[str, Any] | None = None,
+    *,
+    force: bool = False,
+) -> bool:
+    if force:
+        return True
+    snapshot = cache or load_agent_status_cache()
+    entries = snapshot.get("nodes") or {}
+    if any(str(node.get("id") or "") not in entries for node in nodes):
+        return True
+    if not nodes:
+        return False
+    updated_at = float(snapshot.get("updated_at_epoch") or 0)
+    return not updated_at or time.time() - updated_at >= AGENT_STATUS_REFRESH_INTERVAL_SECONDS
+
+
+def refresh_agent_status_cache(nodes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Probe all configured nodes concurrently and persist partial results as they finish."""
+    snapshot_nodes = list(load_nodes() if nodes is None else nodes)
+    previous = load_agent_status_cache()
+    entries = {
+        str(node.get("id") or ""): previous["nodes"].get(str(node.get("id") or ""))
+        for node in snapshot_nodes
+        if str(node.get("id") or "")
+    }
+    if not snapshot_nodes:
+        payload = {
+            "version": AGENT_STATUS_CACHE_VERSION,
+            "updated_at": retention_timestamp_text(),
+            "updated_at_epoch": time.time(),
+            "nodes": {},
+        }
+        save_agent_status_cache(payload)
+        return payload
+
+    def persist_partial() -> None:
+        now = time.time()
+        save_agent_status_cache({
+            "version": AGENT_STATUS_CACHE_VERSION,
+            "updated_at": retention_timestamp_text(now),
+            "updated_at_epoch": now,
+            "nodes": entries,
+        })
+
+    workers = min(AGENT_STATUS_REFRESH_MAX_WORKERS, max(1, len(snapshot_nodes)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agent-status") as executor:
+        futures = {
+            executor.submit(probe_agent_status_for_cache, node): str(node.get("id") or "")
+            for node in snapshot_nodes
+            if str(node.get("id") or "")
+        }
+        for future in as_completed(futures):
+            node_id = futures[future]
+            try:
+                entries[node_id] = future.result()
+            except Exception as exc:
+                entries[node_id] = _agent_status_cache_entry(
+                    {"id": node_id},
+                    {"ok": False, "message": "status probe failed"},
+                    {},
+                    started_at=time.time(),
+                    error=str(exc),
+                )
+            persist_partial()
+    return load_agent_status_cache()
+
+
+def schedule_agent_status_refresh(
+    nodes: list[dict[str, Any]] | None = None,
+    *,
+    force: bool = False,
+) -> bool:
+    snapshot_nodes = list(load_nodes() if nodes is None else nodes)
+    with AGENT_STATUS_REFRESH_LOCK:
+        cache = load_agent_status_cache()
+        if AGENT_STATUS_REFRESH_STATE["running"]:
+            return False
+        if not agent_status_cache_needs_refresh(snapshot_nodes, cache, force=force):
+            return False
+        AGENT_STATUS_REFRESH_STATE.update({
+            "running": True,
+            "started_at": time.time(),
+            "last_error": "",
+        })
+
+    def worker() -> None:
+        try:
+            refresh_agent_status_cache(snapshot_nodes)
+        except Exception as exc:
+            APP.logger.exception("agent status cache refresh failed")
+            with AGENT_STATUS_REFRESH_LOCK:
+                AGENT_STATUS_REFRESH_STATE["last_error"] = str(exc)[:500]
+        finally:
+            with AGENT_STATUS_REFRESH_LOCK:
+                AGENT_STATUS_REFRESH_STATE["running"] = False
+                AGENT_STATUS_REFRESH_STATE["finished_at"] = time.time()
+
+    threading.Thread(target=worker, name="agent-status-cache-refresh", daemon=True).start()
+    return True
+
+
+def agent_status_cache_loop() -> None:
+    """Keep the cache warm even when no browser tab is open."""
+    while not AGENT_STATUS_REFRESH_STOP.is_set():
+        with suppress(Exception):
+            schedule_agent_status_refresh()
+        AGENT_STATUS_REFRESH_STOP.wait(AGENT_STATUS_REFRESH_INTERVAL_SECONDS)
+
+
+def agent_status_cache_view(
+    node: dict[str, Any],
+    cache: dict[str, Any],
+    *,
+    refreshing: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    node_id = str(node.get("id") or "")
+    entry = (cache.get("nodes") or {}).get(node_id)
+    if not isinstance(entry, dict):
+        return (
+            {"ok": False, "message": "状态读取中，后台正在连接 Agent"},
+            {
+                "source": "pending",
+                "checked_at": "",
+                "age_seconds": None,
+                "refreshing": bool(refreshing),
+                "error": "",
+            },
+        )
+    try:
+        checked_at_epoch = float(entry.get("checked_at_epoch") or 0)
+    except (TypeError, ValueError):
+        checked_at_epoch = 0.0
+    return (
+        entry.get("health") if isinstance(entry.get("health"), dict) else {"ok": False, "message": "缓存状态无效"},
+        {
+            "source": "cache",
+            "checked_at": str(entry.get("checked_at") or ""),
+            "refreshing": bool(refreshing),
+            "error": str(entry.get("error") or "")[:500],
+        },
+    )
 
 
 def retention_timestamp(value: Any) -> float:
@@ -12525,13 +12875,19 @@ def api_media_library_cleanup():
 @APP.get("/api/nodes")
 def api_nodes():
     result = []
+    configured_nodes = load_nodes()
+    force_refresh = str(request.args.get("refresh") or "").strip().lower() in {"1", "true", "yes"}
+    schedule_agent_status_refresh(configured_nodes, force=force_refresh)
+    status_cache = load_agent_status_cache()
+    with AGENT_STATUS_REFRESH_LOCK:
+        refresh_running = bool(AGENT_STATUS_REFRESH_STATE.get("running"))
     profile_map = node_youtube_profile_map()
     stream_locks = node_stream_lock_map()
     with YOUTUBE_AUTOTUNE_LOCK:
         autotune_history = list(load_youtube_autotune_state().get("history") or [])
     profiles = {profile["id"]: public_youtube_profile(profile) for profile in load_youtube_profiles_config()["profiles"]}
     default_profile = active_youtube_profile_id()
-    for node in load_nodes():
+    for node in configured_nodes:
         node_view = dict(node)
         node_view.pop("token", None)
         node_view.pop("control_token", None)
@@ -12543,7 +12899,9 @@ def api_nodes():
             event for event in autotune_history
             if str(event.get("node_id") or "") == str(node.get("id") or "")
         ][:20]
-        node_view["health"] = request_node_status(node) if node.get("enabled", True) else {"ok": False}
+        health, status_meta = agent_status_cache_view(node, status_cache, refreshing=refresh_running)
+        node_view["health"] = health if node.get("enabled", True) else {"ok": False, "message": "node disabled"}
+        node_view["status_meta"] = status_meta
         lock = dict(stream_locks.get(str(node.get("id") or ""), {}))
         stream_config = node_view["health"].get("stream_config") or {}
         if not lock.get("youtube_stream_id") and stream_config.get("youtube_stream_id"):
@@ -12557,7 +12915,12 @@ def api_nodes():
         hub_hint = role_hints.get("hub") if isinstance(role_hints.get("hub"), dict) else {}
         agent_health = node_view["health"]
         agent_info = agent_health.get("agent") or {}
-        hub_role = request_hub_role_status(node)
+        cache_entry = (status_cache.get("nodes") or {}).get(str(node.get("id") or ""))
+        hub_role = (
+            dict(cache_entry.get("hub_role") or {})
+            if isinstance(cache_entry, dict) and isinstance(cache_entry.get("hub_role"), dict)
+            else {}
+        )
         prepared_agent = dict(hub_role.pop("_prepared_agent", {}) or {})
         agent_role_status = (agent_health.get("roles") or {}).get("agent") or {}
         prepared_hub = (agent_health.get("roles") or {}).get("hub") or {}
@@ -12607,7 +12970,17 @@ def api_nodes():
             "hub": hub_view,
         }
         result.append(node_view)
-    return jsonify(result)
+    response = jsonify(result)
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    cache_entries = status_cache.get("nodes") or {}
+    has_all_node_cache = bool(configured_nodes) and all(
+        str(node.get("id") or "") in cache_entries for node in configured_nodes
+    )
+    response.headers["X-Node-Status-Source"] = "cache" if has_all_node_cache else "pending"
+    response.headers["X-Node-Status-Cached-At"] = str(status_cache.get("updated_at") or "")
+    response.headers["X-Node-Status-Refresh-Running"] = "1" if refresh_running else "0"
+    response.headers["X-Node-Status-Refresh-Interval"] = str(AGENT_STATUS_REFRESH_INTERVAL_SECONDS)
+    return response
 
 
 @APP.post("/api/nodes/youtube-profile")
@@ -14822,6 +15195,7 @@ def main() -> None:
     ensure_dirs()
     threading.Thread(target=youtube_autotune_loop, name="youtube-autotune", daemon=True).start()
     threading.Thread(target=offline_node_retention_loop, name="offline-node-retention", daemon=True).start()
+    threading.Thread(target=agent_status_cache_loop, name="agent-status-cache-loop", daemon=True).start()
     host = os.environ.get("STREAM_HUB_HOST", "127.0.0.1")
     try:
         from waitress import serve
