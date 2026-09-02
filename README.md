@@ -172,7 +172,7 @@ worker probes all configured nodes concurrently and updates the cache about ever
 30 seconds. A slow or unreachable node is isolated by its own request timeout and
 does not block the dashboard. Override the defaults with
 `STREAM_HUB_AGENT_STATUS_REFRESH_INTERVAL_SECONDS`,
-`STREAM_HUB_AGENT_STATUS_REFRESH_TIMEOUT_SECONDS`, and
+`STREAM_HUB_AGENT_STATUS_REFRESH_TIMEOUT_SECONDS` (default `20` seconds), and
 `STREAM_HUB_AGENT_STATUS_REFRESH_MAX_WORKERS`. The cache excludes tokens,
 passwords, stream keys, OAuth credentials, and ingestion URLs.
 
