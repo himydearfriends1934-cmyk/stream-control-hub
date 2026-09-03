@@ -1467,10 +1467,10 @@ def stream_source_metadata(state: dict[str, Any]) -> dict[str, Any]:
 
 def _motion_frame_metrics(frames: list[bytes]) -> list[dict[str, Any]]:
     metrics: list[dict[str, Any]] = []
-    for previous, current in zip(frames, frames[1:]):
+    for previous, current in zip(frames, frames[1:], strict=False):
         if len(previous) != len(current) or not current:
             continue
-        differences = [abs(left - right) for left, right in zip(previous, current)]
+        differences = [abs(left - right) for left, right in zip(previous, current, strict=False)]
         mean_diff = sum(differences) / (len(differences) * 255.0)
         changed_ratio = sum(1 for value in differences if value >= 12) / len(differences)
         metrics.append({
@@ -1510,8 +1510,7 @@ def extract_motion_samples(video_path: Path, source: dict[str, Any], sample_coun
                 "-pix_fmt", "gray",
                 "pipe:1",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=15,
             check=False,
         )

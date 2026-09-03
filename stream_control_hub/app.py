@@ -34,7 +34,7 @@ from werkzeug.utils import secure_filename
 from .env_file import load_env_file, update_env_file_values
 from .motion_analysis import classify_motion_samples, motion_profile_cache_key
 from .policy import POLICY_VERSION, issue_policy
-from .role_lock import RoleConflictError, assert_role, declared_role
+from .role_lock import RoleConflictError, assert_role
 from .youtube_api import YouTubeAPIClient, YouTubeAPIError
 from .stream_tuning import (
     FULL_HD_MIN_FPS,
@@ -471,11 +471,11 @@ def youtube_client_for_id(profile_id: str) -> YouTubeAPIClient:
                 str(getattr(cached, "credential_path", "") or ""),
             )
             if cached_signature == signature:
-                setattr(cached, "_profile_signature", signature)
+                cached._profile_signature = signature
         if cached is not None and getattr(cached, "_profile_signature", None) == signature:
             return cached
         client = make_youtube_client(profile)
-        setattr(client, "_profile_signature", signature)
+        client._profile_signature = signature
         if target == YOUTUBE_DEFAULT_PROFILE_ID:
             YOUTUBE_CLIENT = client
         else:
@@ -11004,7 +11004,7 @@ HTML = r"""
 @APP.get("/")
 def index():
     version = local_git_version()
-    etag = hashlib.sha256(f"{version}:{len(HTML)}".encode("utf-8")).hexdigest()[:24]
+    etag = hashlib.sha256(f"{version}:{len(HTML)}".encode()).hexdigest()[:24]
     if request.headers.get("If-None-Match", "").strip('"') == etag:
         response = make_response("", 304)
     else:
@@ -12708,9 +12708,9 @@ def agent_status_cache_view(
             },
         )
     try:
-        checked_at_epoch = float(entry.get("checked_at_epoch") or 0)
+        float(entry.get("checked_at_epoch") or 0)
     except (TypeError, ValueError):
-        checked_at_epoch = 0.0
+        pass
     return (
         entry.get("health") if isinstance(entry.get("health"), dict) else {"ok": False, "message": "缓存状态无效"},
         {

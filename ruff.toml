@@ -1,0 +1,20 @@
+[lint]
+# 只检查有实际价值的规则：
+#   F  - pyflakes（未定义名称、未使用导入、语法错误等）
+#   E7 - pycodestyle 语句级错误（多语句、比较 None/True/False 方式等）
+#   E9 - pycodestyle 运行时错误（语法、IO）
+#   W6 - pycodestyle 废弃写法
+#   B   - bugbear（常见 Bug 模式）
+#   UP  - pyupgrade（过时 Python 语法）
+# 明确跳过纯风格规则，避免对既有大文件产生大量噪音：
+#   E1,E2,E3,E4,E5 - 缩进/空格/空行（交给编辑器处理）
+#   E501            - 行太长（大文件历史遗留，暂不强制）
+#   I               - import 排序（isort 风格，存量代码量大）
+#   SIM             - 代码简化建议（风格偏好，非 Bug）
+#   RUF012          - 可变类属性默认值（测试 helper 类中正常用法）
+select = ["F", "E7", "E9", "W6", "B", "UP"]
+ignore = ["E501", "B904", "B006", "UP007", "UP035", "UP006"]
+
+[lint.per-file-ignores]
+# 测试文件放宽限制：允许断言简写、魔法值等
+"tests/*" = ["B", "UP"]
