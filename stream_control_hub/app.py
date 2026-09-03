@@ -36,7 +36,15 @@ from .motion_analysis import classify_motion_samples, motion_profile_cache_key
 from .policy import POLICY_VERSION, issue_policy
 from .role_lock import RoleConflictError, assert_role, declared_role
 from .youtube_api import YouTubeAPIClient, YouTubeAPIError
-from .stream_tuning import youtube_live_bitrate_for_payload
+from .stream_tuning import (
+    FULL_HD_MIN_FPS,
+    enforce_youtube_quality_floor,
+    lower_stream_resolution,
+    minimum_video_bitrate_for_resolution,
+    next_lower_fps,
+    parse_resolution,
+    youtube_live_bitrate_for_payload,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -206,6 +214,16 @@ YOUTUBE_AUTOTUNE_API_RETRY_MAX_SECONDS = max(
 )
 YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS = max(
     1200, int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_RECOVERY_STABLE_SECONDS", "1200"))
+)
+YOUTUBE_AUTOTUNE_STABILITY_WINDOW_SECONDS = 24 * 60 * 60
+YOUTUBE_AUTOTUNE_STABILITY_MAX_GAP_SECONDS = max(
+    600, int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_STABILITY_MAX_GAP_SECONDS", "900"))
+)
+YOUTUBE_AUTOTUNE_MEMORY_PRESSURE_AVAILABLE_MB = max(
+    128, int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_MEMORY_PRESSURE_AVAILABLE_MB", "256"))
+)
+YOUTUBE_AUTOTUNE_MEMORY_PRESSURE_PERCENT = min(
+    98, max(80, int(os.environ.get("STREAM_HUB_YOUTUBE_AUTOTUNE_MEMORY_PRESSURE_PERCENT", "90")))
 )
 YOUTUBE_PROFILE_CREDENTIALS_DIR = DATA_DIR / "youtube_profile_credentials"
 YOUTUBE_DEFAULT_PROFILE_ID = "default"
@@ -478,6 +496,10 @@ def youtube_autotune_payload_diff(current: dict[str, Any], recommendation: dict[
         next_bitrate = max(minimum, min(maximum, int(recommendation.get("video_bitrate") or 0)))
         if next_bitrate and next_bitrate != int(current.get("video_bitrate") or 0):
             result["video_bitrate"] = next_bitrate
+    guarded = enforce_youtube_quality_floor({**current, **result})
+    for key in ("fps", "resolution", "video_bitrate"):
+        if key in guarded and guarded.get(key) != current.get(key):
+            result[key] = guarded.get(key)
     return result
 
 
@@ -485,6 +507,136 @@ def youtube_autotune_parameter_snapshot(payload: dict[str, Any] | None) -> dict[
     source = payload or {}
     keys = ("copy_mode", "adaptive_mode", "preset", "video_bitrate", "audio_bitrate", "fps", "resolution", "keyframe_seconds")
     return {key: source.get(key) for key in keys if source.get(key) is not None}
+
+
+def youtube_autotune_stability_snapshot(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = payload or {}
+    keys = ("preset", "video_bitrate", "audio_bitrate", "fps", "resolution", "keyframe_seconds")
+    return {key: source.get(key) for key in keys if source.get(key) is not None}
+
+
+def youtube_autotune_level_key(payload: dict[str, Any] | None) -> str:
+    return json.dumps(
+        youtube_autotune_stability_snapshot(payload),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def youtube_autotune_record_stability(
+    state: dict[str, Any],
+    node_id: str,
+    stream_config: dict[str, Any],
+    *,
+    stable: bool,
+    now: float,
+    max_gap_seconds: int = YOUTUBE_AUTOTUNE_STABILITY_MAX_GAP_SECONDS,
+) -> dict[str, Any]:
+    """Accumulate healthy runtime time and roll it into a 24-hour preference."""
+    records = state.setdefault("node_suitability", {})
+    stream_identity = "|".join((
+        str(stream_config.get("youtube_stream_id") or ""),
+        str(stream_config.get("video_path") or ""),
+    ))
+    current_config = youtube_autotune_stability_snapshot(stream_config)
+    current_level = youtube_autotune_level_key(stream_config)
+    record = records.get(node_id)
+    if not isinstance(record, dict) or str(record.get("stream_identity") or "") != stream_identity:
+        record = {
+            "stream_identity": stream_identity,
+            "window_started_at": now,
+            "last_seen_at": 0,
+            "last_level": "",
+            "last_stable": False,
+            "level_durations": {},
+            "level_configs": {},
+            "preferred_level": "",
+            "preferred_config": {},
+            "preferred_duration_seconds": 0,
+        }
+        records[node_id] = record
+
+    record["level_configs"][current_level] = current_config
+    previous_seen = float(record.get("last_seen_at") or 0)
+    previous_level = str(record.get("last_level") or "")
+    previous_stable = bool(record.get("last_stable"))
+    max_gap = max(60, int(max_gap_seconds or YOUTUBE_AUTOTUNE_STABILITY_MAX_GAP_SECONDS))
+    if previous_seen and now > previous_seen and previous_level:
+        end = min(now, previous_seen + max_gap)
+        cursor = max(previous_seen, float(record.get("window_started_at") or previous_seen))
+        while cursor < end:
+            window_started = float(record.get("window_started_at") or cursor)
+            window_end = window_started + YOUTUBE_AUTOTUNE_STABILITY_WINDOW_SECONDS
+            segment_end = min(end, window_end)
+            if previous_stable and segment_end > cursor:
+                durations = record.setdefault("level_durations", {})
+                durations[previous_level] = round(
+                    float(durations.get(previous_level) or 0) + segment_end - cursor,
+                    3,
+                )
+            cursor = segment_end
+            if cursor >= window_end:
+                durations = record.setdefault("level_durations", {})
+                if durations:
+                    preferred_level = max(
+                        durations,
+                        key=lambda level: float(durations.get(level) or 0),
+                    )
+                    record["preferred_level"] = preferred_level
+                    record["preferred_config"] = dict(
+                        record.setdefault("level_configs", {}).get(preferred_level) or {}
+                    )
+                    record["preferred_duration_seconds"] = round(
+                        float(durations.get(preferred_level) or 0),
+                        3,
+                    )
+                    record["preferred_window_ended_at"] = window_end
+                record["window_started_at"] = window_end
+                record["level_durations"] = {}
+                record["level_configs"] = {}
+                if cursor >= end:
+                    break
+                continue
+            break
+
+    record.setdefault("level_configs", {})[current_level] = current_config
+    record["last_seen_at"] = now
+    record["last_level"] = current_level
+    record["last_stable"] = bool(stable)
+    record["current_config"] = current_config
+    record["updated_at"] = now
+    return record
+
+
+def youtube_autotune_preferred_payload(
+    stream_config: dict[str, Any],
+    preferred_config: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        key: preferred_config.get(key)
+        for key in ("preset", "video_bitrate", "audio_bitrate", "fps", "resolution", "keyframe_seconds")
+        if preferred_config.get(key) is not None
+    }
+    payload.update({
+        "stream_output_mode": str(stream_config.get("stream_output_mode") or "youtube_api"),
+        "youtube_stream_id": str(stream_config.get("youtube_stream_id") or ""),
+        "video_path": str(stream_config.get("video_path") or ""),
+    })
+    return payload
+
+
+def youtube_autotune_update_healthy_since(
+    entry: dict[str, Any],
+    *,
+    stable: bool,
+    now: float,
+) -> None:
+    if stable:
+        if not float(entry.get("healthy_since") or 0):
+            entry["healthy_since"] = now
+    else:
+        entry["healthy_since"] = 0
 
 
 def youtube_autotune_problems(health: dict[str, Any]) -> list[str]:
@@ -536,13 +688,47 @@ def youtube_autotune_runtime_snapshot(status: dict[str, Any], stream_config: dic
     speed = float(raw_speed) if raw_speed is not None else None
     raw_upload_kbps = runtime.get("upload_kbps")
     upload_kbps = float(raw_upload_kbps) if raw_upload_kbps is not None else None
+    memory = status.get("memory") or {}
+    raw_memory_available = memory.get("available")
+    memory_available_mb = (
+        float(raw_memory_available) / (1024 * 1024)
+        if raw_memory_available is not None and float(raw_memory_available) >= 0
+        else None
+    )
+    raw_memory_percent = memory.get("percent")
+    memory_percent = (
+        float(raw_memory_percent)
+        if raw_memory_percent is not None and float(raw_memory_percent) >= 0
+        else None
+    )
+    memory_pressure = (
+        memory_available_mb is not None
+        and memory_percent is not None
+        and (
+            memory_available_mb < YOUTUBE_AUTOTUNE_MEMORY_PRESSURE_AVAILABLE_MB
+            or memory_percent >= YOUTUBE_AUTOTUNE_MEMORY_PRESSURE_PERCENT
+        )
+    )
+    raw_delivery_rate_kbps = runtime.get("delivery_rate_kbps")
+    if raw_delivery_rate_kbps is None:
+        raw_delivery_rate_kbps = (runtime.get("network") or {}).get("delivery_rate_kbps")
+    delivery_rate_kbps = (
+        float(raw_delivery_rate_kbps)
+        if raw_delivery_rate_kbps is not None and float(raw_delivery_rate_kbps) > 0
+        else None
+    )
     expected_kbps = max(
         0,
         int(stream_config.get("video_bitrate") or 0) + int(stream_config.get("audio_bitrate") or 0),
     )
     upload_ratio = upload_kbps / expected_kbps if upload_kbps is not None and upload_kbps >= 0 and expected_kbps else None
     normalized_ffmpeg_cpu = min(100.0, ffmpeg_cpu / cpu_count)
-    encoder_overloaded = system_cpu >= 85 or normalized_ffmpeg_cpu >= 90 or (speed is not None and speed < 0.97)
+    encoder_overloaded = (
+        system_cpu >= 85
+        or normalized_ffmpeg_cpu >= 90
+        or (speed is not None and speed < 0.97)
+        or memory_pressure
+    )
     network_starved = (
         upload_ratio is not None
         and upload_ratio < 0.75
@@ -564,7 +750,11 @@ def youtube_autotune_runtime_snapshot(status: dict[str, Any], stream_config: dic
         "system_cpu_percent": round(system_cpu, 2),
         "ffmpeg_cpu_percent": round(ffmpeg_cpu, 2),
         "ffmpeg_cpu_normalized_percent": round(normalized_ffmpeg_cpu, 2),
+        "memory_available_mb": round(memory_available_mb, 2) if memory_available_mb is not None else None,
+        "memory_percent": round(memory_percent, 2) if memory_percent is not None else None,
+        "memory_pressure": memory_pressure,
         "upload_kbps": round(upload_kbps, 2) if upload_kbps is not None else None,
+        "delivery_rate_kbps": round(delivery_rate_kbps, 2) if delivery_rate_kbps is not None else None,
         "expected_upload_kbps": expected_kbps,
         "upload_ratio": round(upload_ratio, 3) if upload_ratio is not None else None,
     }
@@ -591,7 +781,7 @@ def youtube_autotune_smooth_runtime(entry: dict[str, Any], runtime: dict[str, An
     result["classification"] = classification
     for key in (
         "speed", "system_cpu_percent", "ffmpeg_cpu_percent", "ffmpeg_cpu_normalized_percent",
-        "upload_kbps", "upload_ratio",
+        "memory_available_mb", "memory_percent", "upload_kbps", "delivery_rate_kbps", "upload_ratio",
     ):
         value = median_value(key)
         result[key] = round(value, 3) if value is not None else None
@@ -606,11 +796,15 @@ def youtube_autotune_apply_runtime(
     stream_config: dict[str, Any],
     entry: dict[str, Any],
     motion_level: str = "medium",
+    *,
+    now: float | None = None,
+    stable_required_seconds: int = 0,
+    cooldown_seconds: int = 0,
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     runtime = youtube_autotune_smooth_runtime(entry, youtube_autotune_runtime_snapshot(status, stream_config))
     issue_fingerprint = youtube_autotune_issue_fingerprint(health)
     local_classification = str(runtime.get("classification") or "unknown")
-    if issue_fingerprint != "videoingestionstarved" and local_classification not in {"encoder_overloaded", "network_starved"}:
+    if issue_fingerprint != "videoingestionstarved" and local_classification not in {"encoder_overloaded", "network_starved", "healthy"}:
         return dict(recommendation), runtime, []
     result = dict(recommendation)
     decisions = []
@@ -620,23 +814,68 @@ def youtube_autotune_apply_runtime(
     classification = runtime["classification"]
     motion_level = motion_level if motion_level in {"static", "medium", "dynamic"} else "medium"
     if classification == "encoder_overloaded":
-        if not explicit_bitrate:
+        if current_bitrate:
+            # Encoder pressure is handled by preset, FPS, then resolution.
+            # Never let a simultaneous YouTube recommendation change bitrate
+            # order or make the overloaded encoder work harder.
             result["video_bitrate"] = current_bitrate
         preset = str(stream_config.get("preset") or "veryfast")
-        faster_presets = {"veryfast": "superfast", "superfast": "ultrafast"}
+        faster_presets = {
+            "slow": "medium",
+            "medium": "faster",
+            "fast": "veryfast",
+            "faster": "veryfast",
+            "veryfast": "superfast",
+            "superfast": "ultrafast",
+        }
         if preset in faster_presets:
             result["preset"] = faster_presets[preset]
             decisions.append(
-                f"Agent encoder pressure detected (speed={runtime['speed']}, CPU={runtime['system_cpu_percent']}%); use {result['preset']} before changing bitrate again."
+                f"Agent encoder pressure detected (speed={runtime['speed']}, CPU={runtime['system_cpu_percent']}%); switch preset to {result['preset']} before changing bitrate again."
             )
-        elif int(stream_config.get("fps") or 30) > 30:
-            result["fps"] = 30
-            decisions.append("Agent remains encoder-bound on the fastest preset; reduce frame rate to 30 FPS.")
-        elif int(stream_config.get("fps") or 30) > 24:
-            result["fps"] = 24
-            decisions.append("Agent remains encoder-bound at 30 FPS; reduce frame rate to 24 FPS.")
         else:
-            decisions.append("Agent is encoder-bound but already uses the fastest preset and 24 FPS; hold parameters for observation.")
+            current_fps = int(stream_config.get("fps") or 30)
+            current_resolution = str(
+                stream_config.get("resolution")
+                or recommendation.get("resolution")
+                or "1280x720"
+            )
+            current_short_side = min(parse_resolution(current_resolution))
+            quality_floor = minimum_video_bitrate_for_resolution(current_resolution)
+            if current_short_side >= 1080 and current_bitrate and current_bitrate < quality_floor:
+                next_fps = current_fps
+            else:
+                next_fps = next_lower_fps(current_fps, minimum=FULL_HD_MIN_FPS)
+            if next_fps < current_fps:
+                result["fps"] = next_fps
+                decisions.append(
+                    f"Agent remains encoder-bound at the fastest preset; reduce frame rate from {current_fps} to {next_fps} FPS while preserving the minimum {FULL_HD_MIN_FPS} FPS quality floor."
+                )
+            else:
+                next_resolution = lower_stream_resolution(current_resolution)
+                if next_resolution != current_resolution:
+                    target_fps = min(current_fps, 30)
+                    result["resolution"] = next_resolution
+                    if target_fps != current_fps:
+                        result["fps"] = target_fps
+                    result["video_bitrate"] = min(
+                        max(
+                            minimum_video_bitrate_for_resolution(next_resolution),
+                            current_bitrate,
+                        ),
+                        youtube_live_bitrate_for_payload({
+                            **stream_config,
+                            "resolution": next_resolution,
+                            "fps": target_fps,
+                        }),
+                    )
+                    decisions.append(
+                        f"1080P quality floor reached at {current_fps} FPS or lower; lower resolution from {current_resolution} to {next_resolution} and restore its recommended bitrate."
+                    )
+                else:
+                    decisions.append(
+                        "Agent remains encoder-bound at the fastest preset and minimum quality floor; keep at least 720P instead of degrading the picture further."
+                    )
         if motion_level == "static":
             decisions.append("Central motion analysis classifies this source as mostly static; preserve quality and avoid an unnecessary bitrate cut.")
     elif classification == "network_starved":
@@ -652,6 +891,46 @@ def youtube_autotune_apply_runtime(
         decisions.append(
             f"Agent speed and CPU are healthy; do not reduce bitrate for ingestion starvation alone, and restore at least {fallback_bitrate} Kbps."
         )
+    elif classification == "healthy":
+        result["preset"] = stream_config.get("preset") or "veryfast"
+        result["video_bitrate"] = current_bitrate
+        current_resolution = str(stream_config.get("resolution") or "1280x720")
+        target_bitrate = youtube_live_bitrate_for_payload({
+            "resolution": current_resolution,
+            "fps": int(stream_config.get("fps") or 30),
+        })
+        observed_capacity = float(runtime.get("delivery_rate_kbps") or 0)
+        current_time = time.time() if now is None else float(now)
+        healthy_since = float(entry.get("healthy_since") or 0)
+        enough_stability = (
+            healthy_since > 0
+            and current_time - healthy_since >= max(0, int(stable_required_seconds or 0))
+        )
+        enough_cooldown = (
+            not entry.get("last_adjusted")
+            or current_time - float(entry.get("last_adjusted") or 0)
+            >= max(0, int(cooldown_seconds or 0))
+        )
+        enough_network = (
+            observed_capacity >= target_bitrate + int(stream_config.get("audio_bitrate") or 128) + 256
+        )
+        if (
+            current_bitrate
+            and current_bitrate != target_bitrate
+            and enough_stability
+            and enough_cooldown
+            and enough_network
+            and not int(entry.get("episode_adjustments") or 0)
+        ):
+            result["video_bitrate"] = target_bitrate
+            direction = "increase" if target_bitrate > current_bitrate else "return"
+            decisions.append(
+                f"Agent is healthy with {observed_capacity:.0f} Kbps delivery headroom; {direction} video bitrate from {current_bitrate} to the YouTube {target_bitrate} Kbps baseline."
+            )
+        else:
+            decisions.append(
+                f"Agent runtime is healthy; hold current quality until it has enough stable time and delivery headroom to approach the {target_bitrate} Kbps baseline."
+            )
     else:
         decisions.append("Agent runtime telemetry is incomplete; keep the guarded YouTube recommendation and wait for another sample.")
     return result, runtime, decisions
@@ -712,7 +991,7 @@ def youtube_autotune_recovery_diff(
     current: dict[str, Any], entry: dict[str, Any], profile: dict[str, Any]
 ) -> dict[str, Any]:
     """Restore one degraded setting toward the pre-incident configuration."""
-    baseline = entry.get("baseline_config") or {}
+    baseline = entry.get("preferred_config") or entry.get("baseline_config") or {}
     if not isinstance(baseline, dict):
         return {}
     # Quality is restored from the least disruptive encoder setting outward.
@@ -856,7 +1135,15 @@ def youtube_autotune_tick() -> dict[str, Any]:
                 if explicit_bitrate:
                     entry["youtube_recommended_bitrate"] = explicit_bitrate
                 recommendation, runtime, runtime_decisions = youtube_autotune_apply_runtime(
-                    health, recommendation, status, stream_config, entry, motion_level
+                    health,
+                    recommendation,
+                    status,
+                    stream_config,
+                    entry,
+                    motion_level,
+                    now=now,
+                    stable_required_seconds=recovery_wait,
+                    cooldown_seconds=cooldown,
                 )
                 runtime_issue = str(runtime.get("classification") or "") in {"encoder_overloaded", "network_starved"}
                 if runtime_issue:
@@ -873,6 +1160,45 @@ def youtube_autotune_tick() -> dict[str, Any]:
                             float(runtime.get("speed") or 1) < 0.95
                             or float(runtime.get("system_cpu_percent") or 0) >= 95
                         ) else "warning"
+                stable_sample = (
+                    str(runtime.get("classification") or "") == "healthy"
+                    and not runtime_issue
+                    and not (severity in {"warning", "critical"} and bool(issue_fingerprint))
+                )
+                youtube_autotune_update_healthy_since(
+                    entry,
+                    stable=stable_sample,
+                    now=now,
+                )
+                suitability = youtube_autotune_record_stability(
+                    state,
+                    node_id,
+                    stream_config,
+                    stable=stable_sample,
+                    now=now,
+                    max_gap_seconds=max(
+                        YOUTUBE_AUTOTUNE_STABILITY_MAX_GAP_SECONDS,
+                        interval * 2,
+                    ),
+                )
+                preferred_config = dict(suitability.get("preferred_config") or {})
+                if preferred_config:
+                    entry["preferred_config"] = preferred_config
+                    preferred_level = str(suitability.get("preferred_level") or "")
+                    synced_level = str(entry.get("preferred_synced_level") or "")
+                    if preferred_level and preferred_level != synced_level:
+                        preferred_payload = issue_policy(
+                            youtube_autotune_preferred_payload(stream_config, preferred_config),
+                            reason="autotune-preferred-stability",
+                        )
+                        sync_result = post_node_json(
+                            node,
+                            "/api/stream/preferred-config",
+                            preferred_payload,
+                            timeout=30,
+                        )
+                        if sync_result.get("ok"):
+                            entry["preferred_synced_level"] = preferred_level
                 diff = youtube_autotune_payload_diff(stream_config, recommendation, profile)
                 event.update({
                     "severity": severity or "unknown",
@@ -884,6 +1210,11 @@ def youtube_autotune_tick() -> dict[str, Any]:
                     "recommended": youtube_autotune_parameter_snapshot(recommendation),
                     "changes": youtube_autotune_parameter_snapshot(diff),
                     "runtime": runtime,
+                    "stability": {
+                        "sample_stable": stable_sample,
+                        "preferred_config": preferred_config,
+                        "preferred_duration_seconds": suitability.get("preferred_duration_seconds", 0),
+                    },
                 })
                 entry["last_health"] = health.get("health") or {}
                 entry["last_analysis"] = health.get("analysis") or {}
@@ -950,6 +1281,43 @@ def youtube_autotune_tick() -> dict[str, Any]:
                                 "error": str(entry["last_error"])[:500],
                             })
                     else:
+                        if diff and stable_sample:
+                            promotion_payload = dict(stream_config)
+                            promotion_payload.update(diff)
+                            promotion_payload["stream_key"] = ""
+                            promotion_payload["youtube_profile_id"] = profile_id
+                            promotion_payload = issue_policy(
+                                promotion_payload,
+                                reason="autotune-stable-baseline",
+                            )
+                            result = post_node_json(
+                                node,
+                                "/api/start-stream",
+                                promotion_payload,
+                                timeout=60,
+                            )
+                            entry["last_adjusted"] = now
+                            entry["last_result"] = redacted_stream_result(result)
+                            if result.get("ok"):
+                                adjusted += 1
+                                entry["healthy_since"] = now
+                                verified_status = request_node_json(node, "/api/status", timeout=8)
+                                verified_config = verified_status.get("stream_config") or promotion_payload
+                                append_youtube_autotune_history(state, {
+                                    **event,
+                                    "outcome": "adjusted",
+                                    "after": youtube_autotune_parameter_snapshot(verified_config),
+                                    "agent_message": str(result.get("message") or "Agent baseline parameters applied")[:500],
+                                })
+                            else:
+                                entry["last_error"] = result.get("message") or "stable baseline restart failed"
+                                append_youtube_autotune_history(state, {
+                                    **event,
+                                    "outcome": "failed",
+                                    "after": event["before"],
+                                    "error": str(entry["last_error"])[:500],
+                                })
+                            continue
                         entry["consecutive_issues"] = 0
                         entry["active_issue_fingerprint"] = ""
                         entry["episode_adjustments"] = 0
@@ -4559,6 +4927,7 @@ HTML = r"""
             `速度 ${event.runtime.speed == null ? "--" : `${event.runtime.speed}x`}`,
             `CPU ${event.runtime.system_cpu_percent ?? "--"}%`,
             `FFmpeg ${event.runtime.ffmpeg_cpu_percent ?? "--"}%`,
+            `内存 ${event.runtime.memory_available_mb == null ? "--" : `${event.runtime.memory_available_mb} MB`}/${event.runtime.memory_percent == null ? "--" : `${event.runtime.memory_percent}%`}`,
             `上传 ${event.runtime.upload_kbps ?? "--"}/${event.runtime.expected_upload_kbps ?? "--"} Kbps`,
           ].join(" · "))}</div>` : ""}
           <div class="autotune-history-line"><strong>调参判断：</strong>${escapeHtml(reasons)}</div>
@@ -14365,7 +14734,7 @@ def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
         if sep and head.lower().startswith(("rtmp://", "rtmps://")) and tail:
             stream_url = head.rstrip("/")
             stream_key = tail.strip()
-    return {
+    result = {
         "stream_url": stream_url,
         "stream_key": stream_key,
         "youtube_profile_id": safe_youtube_profile_id(str(payload.get("youtube_profile_id") or payload.get("profile_id") or active_youtube_profile_id())),
@@ -14383,6 +14752,9 @@ def stream_payload_for_node(payload: dict[str, Any]) -> dict[str, Any]:
         "keyframe_seconds": int(payload.get("keyframe_seconds") or 2),
         "motion_level": str(payload.get("motion_level") or "").strip().lower(),
     }
+    if result["stream_output_mode"] == "youtube_api":
+        result = enforce_youtube_quality_floor(result)
+    return result
 
 
 def redacted_stream_result(data: dict[str, Any]) -> dict[str, Any]:

@@ -12,6 +12,14 @@ from typing import Any, Callable
 
 import requests
 
+from .stream_tuning import (
+    enforce_youtube_quality_floor,
+    lower_stream_resolution,
+    minimum_video_bitrate_for_resolution,
+    parse_resolution,
+    youtube_live_bitrate_for_payload,
+)
+
 
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 GOOGLE_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
@@ -188,13 +196,51 @@ def youtube_health_recommendation(
         keyframe_seconds = 2
         mark_action("YouTube reports a keyframe/GOP issue; use 2-second keyframes.")
     if issue_types & resolution_types or "resolution" in issue_text:
-        resolution = "1280x720"
+        previous_resolution = resolution
+        resolution = lower_stream_resolution(resolution)
         fps = min(fps, 30)
-        video_bitrate = min(video_bitrate, 4000)
-        mark_action("YouTube reports a resolution issue; use 1280x720 at no more than 30 FPS.")
+        video_bitrate = min(
+            video_bitrate,
+            youtube_live_bitrate_for_payload({"resolution": resolution, "fps": fps}),
+        )
+        if resolution != previous_resolution:
+            mark_action(
+                f"YouTube reports a resolution issue; lower resolution one step to {resolution} at no more than 30 FPS."
+            )
+        else:
+            mark_action("YouTube reports a resolution issue; keep the minimum supported resolution and no more than 30 FPS.")
+    quality_floor = minimum_video_bitrate_for_resolution(resolution)
+    if actions and video_bitrate < quality_floor and min(parse_resolution(resolution)) >= 1080:
+        fallback_resolution = lower_stream_resolution(resolution)
+        if fallback_resolution != resolution:
+            resolution = fallback_resolution
+            fps = min(fps, 30)
+            video_bitrate = youtube_live_bitrate_for_payload({"resolution": resolution, "fps": fps})
+            mark_action(
+                f"1080P quality floor reached at {quality_floor} Kbps; switch to {resolution} instead of keeping a low-quality 1080P stream."
+            )
     if issue_types & transcode_types:
         preset = "veryfast" if preset in {"copy", ""} else preset
         mark_action("YouTube reports a codec, container, profile, or audio-format issue; force H.264/AAC transcoding.")
+    guarded = enforce_youtube_quality_floor({
+        "preset": preset,
+        "copy_mode": copy_mode,
+        "video_bitrate": video_bitrate,
+        "audio_bitrate": audio_bitrate,
+        "fps": fps,
+        "resolution": resolution,
+        "keyframe_seconds": keyframe_seconds,
+    })
+    if guarded.get("resolution") != resolution:
+        resolution = str(guarded["resolution"])
+        fps = int(guarded.get("fps") or fps)
+        video_bitrate = int(guarded.get("video_bitrate") or video_bitrate)
+        mark_action(
+            f"Protect output quality by moving below-floor 1080P output to {resolution}."
+        )
+    elif int(guarded.get("video_bitrate") or video_bitrate) != video_bitrate:
+        video_bitrate = int(guarded["video_bitrate"])
+        mark_action(f"Keep 720P video bitrate at or above {video_bitrate} Kbps for usable quality.")
     handled_types = video_high_types | video_low_types | audio_high_types | audio_low_types | frame_types | keyframe_types | resolution_types | transcode_types | {"videoingestionstarved"}
     unsupported_types = sorted(issue_types - handled_types)
     if unsupported_types:

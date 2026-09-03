@@ -29,7 +29,12 @@ from .env_file import load_env_file, update_env_file_values
 from .policy import POLICY_VERSION, strip_policy, validate_policy
 from .role_lock import RoleConflictError, assert_role, declared_role
 from .youtube_api import YouTubeAPIClient, YouTubeAPIError
-from .stream_tuning import initial_stream_recommendation, parse_fraction, source_copy_compatible
+from .stream_tuning import (
+    enforce_youtube_quality_floor,
+    initial_stream_recommendation,
+    parse_fraction,
+    source_copy_compatible,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -936,11 +941,41 @@ def normalize_stream_payload(payload: dict[str, Any], output_url: str = "") -> d
         if str(normalized.get("preset") or "").strip().lower() == "copy":
             normalized["preset"] = "superfast"
     normalized["keyframe_seconds"] = max(1, min(4, int(normalized.get("keyframe_seconds") or 2)))
-    return normalized
+    return enforce_youtube_quality_floor(normalized)
 
 
 def remove_stream_restart_payload() -> None:
     STREAM_RESTART_FILE.unlink(missing_ok=True)
+
+
+def stream_preferred_config_matches(preferred: dict[str, Any], payload: dict[str, Any]) -> bool:
+    preferred_stream_id = str(preferred.get("youtube_stream_id") or "").strip()
+    payload_stream_id = str(payload.get("youtube_stream_id") or "").strip()
+    preferred_video_path = str(preferred.get("video_path") or "").strip()
+    payload_video_path = str(payload.get("video_path") or "").strip()
+    return (
+        bool(preferred_stream_id)
+        and preferred_stream_id == payload_stream_id
+        and bool(preferred_video_path)
+        and preferred_video_path == payload_video_path
+    )
+
+
+def stream_preferred_quality_config(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: payload.get(key)
+        for key in ("preset", "video_bitrate", "audio_bitrate", "fps", "resolution", "keyframe_seconds")
+        if payload.get(key) is not None
+    }
+
+
+def apply_preferred_stream_config(payload: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    preferred = state.get("preferred_stream_config")
+    if not isinstance(preferred, dict) or not stream_preferred_config_matches(preferred, payload):
+        return payload
+    result = dict(payload)
+    result.update(stream_preferred_quality_config(preferred))
+    return normalize_stream_payload(result, stream_output_url(result))
 
 
 def format_duration(seconds: float) -> str:
@@ -1947,6 +1982,7 @@ def stream_watchdog_tick() -> dict[str, Any]:
             return {"ok": False, "message": auto_restart["last_error"]}
 
         try:
+            payload = apply_preferred_stream_config(payload, state)
             result = launch_stream_process(payload, reason="auto-recovery", persist_recovery=False)
             verify_launched_stream(result)
             return {"ok": True, "restarted": True, **result}
@@ -2160,6 +2196,9 @@ def api_status():
                 if key not in {"stream_key", "youtube_ingestion_url"}
             },
         },
+        "preferred_stream_config": stream_preferred_quality_config(
+            state.get("preferred_stream_config") or {}
+        ),
         "youtube": YOUTUBE_CLIENT.local_status(),
         "transfer": upload_transfer_status(state),
         "public_upload": {
@@ -2932,6 +2971,43 @@ def api_youtube_prepare():
     return jsonify({"ok": True, "message": "YouTube broadcast prepared and bound", "result": result})
 
 
+@APP.post("/api/stream/preferred-config")
+def api_stream_preferred_config():
+    payload = request.get_json(silent=True) or {}
+    policy_error = validate_policy(payload)
+    if policy_error:
+        return jsonify({"ok": False, "message": policy_error}), 409
+    with STREAM_LIFECYCLE_LOCK:
+        state = load_state()
+        current = state.get("stream_config") or {}
+        if not state.get("stream_desired") or not current:
+            return jsonify({"ok": False, "message": "no active stream to bind a preferred configuration"}), 409
+        if str(payload.get("youtube_stream_id") or "").strip() != str(current.get("youtube_stream_id") or "").strip():
+            return jsonify({"ok": False, "message": "preferred configuration stream does not match the active stream"}), 409
+        if str(payload.get("video_path") or "").strip() != str(current.get("video_path") or "").strip():
+            return jsonify({"ok": False, "message": "preferred configuration media does not match the active stream"}), 409
+        merged = dict(current)
+        merged.update(stream_preferred_quality_config(payload))
+        normalized = normalize_stream_payload(merged, stream_output_url(merged))
+        preferred = {
+            **stream_preferred_quality_config(normalized),
+            "youtube_stream_id": str(current.get("youtube_stream_id") or ""),
+            "video_path": str(current.get("video_path") or ""),
+            "updated_at": time.time(),
+        }
+        state["preferred_stream_config"] = preferred
+        save_state(state)
+        recovery = load_stream_restart_payload()
+        if recovery and stream_preferred_config_matches(preferred, recovery):
+            recovery.update(stream_preferred_quality_config(preferred))
+            write_private_json(STREAM_RESTART_FILE, recovery)
+    return jsonify({
+        "ok": True,
+        "message": "preferred stream configuration saved for future recovery",
+        "preferred_stream_config": stream_preferred_quality_config(preferred),
+    })
+
+
 @APP.post("/api/start-stream")
 def api_start_stream():
     payload = request.get_json(silent=True) or {}
@@ -3033,6 +3109,7 @@ def api_restart_stream():
         if not payload:
             return jsonify({"ok": False, "message": "no active stream recovery configuration"}), 409
         state = load_state()
+        payload = apply_preferred_stream_config(payload, state)
         previous_pid = int(state.get("stream_pid") or 0)
         state["stream_desired"] = True
         save_state(state)

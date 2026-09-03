@@ -867,7 +867,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
         )
 
         self.assertEqual(result["severity"], "warning")
-        self.assertEqual(result["recommendation"]["video_bitrate"], 2500)
+        self.assertEqual(result["recommendation"]["video_bitrate"], 3200)
 
     def test_youtube_health_handles_kiana_bitrate_and_starvation_issues(self):
         result = youtube_health_recommendation(
@@ -893,7 +893,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
         )
 
         self.assertEqual(result["severity"], "critical")
-        self.assertEqual(result["recommendation"]["video_bitrate"], 2500)
+        self.assertEqual(result["recommendation"]["video_bitrate"], 3200)
         self.assertEqual(result["recommendation"]["preset"], "superfast")
         self.assertTrue(any("ingestion starvation" in reason for reason in result["analysis"]["reasons"]))
 
@@ -1012,7 +1012,15 @@ class YouTubeAPIClientTests(unittest.TestCase):
             status = MagicMock(side_effect=[
                 {"ok": True, "stream": {"running": True}, "stream_config": stream_config},
                 {"ok": True, "stream": {"running": True}, "stream_config": stream_config},
-                {"ok": True, "stream_config": {**stream_config, "video_bitrate": 4800}},
+                {
+                    "ok": True,
+                    "stream_config": {
+                        **stream_config,
+                        "resolution": "1280x720",
+                        "fps": 30,
+                        "video_bitrate": 4000,
+                    },
+                },
             ])
             with patch.object(app, "YOUTUBE_AUTOTUNE_STATE_FILE", state_file), patch.object(
                 app, "load_youtube_profiles_config", return_value={
@@ -1043,8 +1051,10 @@ class YouTubeAPIClientTests(unittest.TestCase):
         event = saved["history"][0]
         self.assertEqual(event["outcome"], "adjusted")
         self.assertEqual(event["before"]["video_bitrate"], 6000)
-        self.assertEqual(event["changes"]["video_bitrate"], 4800)
-        self.assertEqual(event["after"]["video_bitrate"], 4800)
+        self.assertEqual(event["changes"]["resolution"], "1280x720")
+        self.assertEqual(event["changes"]["video_bitrate"], 4000)
+        self.assertEqual(event["after"]["resolution"], "1280x720")
+        self.assertEqual(event["after"]["video_bitrate"], 4000)
         self.assertTrue(any("videoBitrateIsHigh" in item for item in event["api_problems"]))
         self.assertIn("Reduce bitrate", event["recommendation_reasons"])
         self.assertNotIn("youtube_ingestion_url", json.dumps(event))
@@ -1223,7 +1233,7 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(len(post.call_args_list), 1)
         recovered = post.call_args.args[2]
         self.assertEqual(recovered["preset"], "veryfast")
-        self.assertEqual(recovered["video_bitrate"], 2880)
+        self.assertEqual(recovered["video_bitrate"], 3200)
         self.assertIn("policy_decision_id", recovered)
         entry = saved["entries"]["node-a:account-a:stream-a"]
         self.assertEqual(entry["episode_adjustments"], 1)
@@ -1303,6 +1313,178 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(runtime["classification"], "network_starved")
         self.assertEqual(network_limited["video_bitrate"], 4500)
         self.assertEqual(network_limited["preset"], "superfast")
+
+    def test_autotune_degrades_encoder_before_resolution(self):
+        from stream_control_hub import app
+
+        health = {"severity": "critical", "analysis": {"configuration_issues": []}}
+        overloaded_status = {
+            "cpu_count": 2,
+            "stream": {"runtime": {"speed": 0.91, "system_cpu_percent": 96, "ffmpeg_cpu_percent": 192}},
+        }
+        config = {
+            "video_bitrate": 10000,
+            "audio_bitrate": 128,
+            "resolution": "1920x1080",
+            "fps": 60,
+            "preset": "superfast",
+        }
+        entry = {
+            "runtime_samples": [{
+                "classification": "encoder_overloaded",
+                "speed": 0.91,
+                "system_cpu_percent": 96,
+                "ffmpeg_cpu_percent": 192,
+                "ffmpeg_cpu_normalized_percent": 96,
+            }],
+        }
+
+        faster, _, reasons = app.youtube_autotune_apply_runtime(
+            health, config, overloaded_status, config, entry
+        )
+        self.assertEqual(faster["preset"], "ultrafast")
+        self.assertEqual(faster["resolution"], "1920x1080")
+        self.assertTrue(any("preset" in reason for reason in reasons))
+
+        lower_fps, _, reasons = app.youtube_autotune_apply_runtime(
+            health,
+            {**config, "preset": "ultrafast"},
+            overloaded_status,
+            {**config, "preset": "ultrafast"},
+            entry,
+        )
+        self.assertEqual(lower_fps["fps"], 30)
+        self.assertEqual(lower_fps["resolution"], "1920x1080")
+        self.assertTrue(any("FPS" in reason for reason in reasons))
+
+        lower_resolution, _, reasons = app.youtube_autotune_apply_runtime(
+            health,
+            {**config, "preset": "ultrafast", "fps": 24},
+            overloaded_status,
+            {**config, "preset": "ultrafast", "fps": 24},
+            entry,
+        )
+        self.assertEqual(lower_resolution["resolution"], "1280x720")
+        self.assertEqual(lower_resolution["video_bitrate"], 4000)
+        self.assertTrue(any("resolution" in reason for reason in reasons))
+
+        quality_floor, _, reasons = app.youtube_autotune_apply_runtime(
+            health,
+            {**config, "preset": "ultrafast", "fps": 24, "video_bitrate": 6000},
+            overloaded_status,
+            {**config, "preset": "ultrafast", "fps": 24, "video_bitrate": 6000},
+            entry,
+        )
+        self.assertEqual(quality_floor["resolution"], "1280x720")
+        self.assertEqual(quality_floor["video_bitrate"], 4000)
+        self.assertTrue(any("quality floor" in reason for reason in reasons))
+
+    def test_autotune_stability_selects_longest_level_and_resets_identity(self):
+        from stream_control_hub import app
+
+        config_1080 = {
+            "youtube_stream_id": "stream-a",
+            "video_path": "/media/video.mp4",
+            "preset": "veryfast",
+            "video_bitrate": 10000,
+            "audio_bitrate": 128,
+            "fps": 30,
+            "resolution": "1920x1080",
+            "keyframe_seconds": 2,
+        }
+        config_720 = {
+            **config_1080,
+            "preset": "superfast",
+            "video_bitrate": 4000,
+            "fps": 24,
+            "resolution": "1280x720",
+        }
+        state = {}
+        start = 1_000.0
+        app.youtube_autotune_record_stability(
+            state,
+            "node-a",
+            config_1080,
+            stable=True,
+            now=start,
+            max_gap_seconds=24 * 60 * 60,
+        )
+        app.youtube_autotune_record_stability(
+            state,
+            "node-a",
+            config_720,
+            stable=True,
+            now=start + 3 * 60 * 60,
+            max_gap_seconds=24 * 60 * 60,
+        )
+        record = app.youtube_autotune_record_stability(
+            state,
+            "node-a",
+            config_720,
+            stable=True,
+            now=start + 24 * 60 * 60,
+            max_gap_seconds=24 * 60 * 60,
+        )
+
+        self.assertEqual(record["preferred_level"], app.youtube_autotune_level_key(config_720))
+        self.assertEqual(record["preferred_config"], app.youtube_autotune_stability_snapshot(config_720))
+        self.assertEqual(record["preferred_duration_seconds"], 21 * 60 * 60)
+
+        new_stream = {**config_720, "youtube_stream_id": "stream-b"}
+        fresh = app.youtube_autotune_record_stability(
+            state,
+            "node-a",
+            new_stream,
+            stable=True,
+            now=start + 24 * 60 * 60 + 1,
+            max_gap_seconds=24 * 60 * 60,
+        )
+        self.assertEqual(fresh["stream_identity"], "stream-b|/media/video.mp4")
+        self.assertEqual(fresh["preferred_config"], {})
+
+    def test_autotune_restarts_healthy_timer_after_an_unstable_sample(self):
+        from stream_control_hub import app
+
+        entry = {"healthy_since": 123.0}
+        app.youtube_autotune_update_healthy_since(entry, stable=False, now=200.0)
+        self.assertEqual(entry["healthy_since"], 0)
+
+        app.youtube_autotune_update_healthy_since(entry, stable=True, now=300.0)
+        self.assertEqual(entry["healthy_since"], 300.0)
+
+        app.youtube_autotune_update_healthy_since(entry, stable=True, now=400.0)
+        self.assertEqual(entry["healthy_since"], 300.0)
+
+    def test_autotune_treats_low_available_memory_as_encoder_pressure(self):
+        from stream_control_hub import app
+
+        runtime = app.youtube_autotune_runtime_snapshot(
+            {
+                "cpu_count": 2,
+                "cpu_percent": 40,
+                "memory": {
+                    "total": 2 * 1024 * 1024 * 1024,
+                    "available": 200 * 1024 * 1024,
+                    "percent": 90.23,
+                },
+                "stream": {
+                    "runtime": {
+                        "speed": 1.0,
+                        "system_cpu_percent": 40,
+                        "ffmpeg_cpu_percent": 70,
+                        "upload_kbps": 12000,
+                    },
+                },
+            },
+            {
+                "video_bitrate": 10000,
+                "audio_bitrate": 128,
+            },
+        )
+
+        self.assertEqual(runtime["classification"], "encoder_overloaded")
+        self.assertTrue(runtime["memory_pressure"])
+        self.assertEqual(runtime["memory_available_mb"], 200.0)
 
     def test_agent_parses_latest_ffmpeg_speed_and_runtime_load(self):
         from stream_control_hub import headless_agent

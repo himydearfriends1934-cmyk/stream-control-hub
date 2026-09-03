@@ -69,6 +69,118 @@ class StreamRecoveryTests(unittest.TestCase):
         self.assertEqual(stopped.status_code, 200)
         self.assertFalse(recovery_exists_after_stop)
 
+    def test_manual_restart_uses_matching_preferred_quality_config(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self.recovery_paths(headless_agent, tmp)
+            with patches[0], patches[1], patches[2], patches[3], patch.object(
+                headless_agent, "validate_policy", return_value=""
+            ), patch.object(
+                headless_agent,
+                "stream_output_url",
+                return_value="rtmps://example.test/live/preferred-target",
+            ), patch.object(
+                headless_agent,
+                "launch_stream_process",
+                return_value={"pid": 4103, "log_path": "ffmpeg.log", "video_path": "/media/video.mp4"},
+            ) as launch, patch.object(
+                headless_agent, "verify_stream_started", return_value={"ok": True}
+            ), patch.object(
+                headless_agent, "stop_process", return_value={"ok": True, "skipped": True}
+            ):
+                headless_agent.save_state({
+                    "stream_desired": True,
+                    "stream_pid": 4101,
+                    "preferred_stream_config": {
+                        "youtube_stream_id": "stream-a",
+                        "video_path": "/media/video.mp4",
+                        "preset": "veryfast",
+                        "video_bitrate": 10000,
+                        "audio_bitrate": 128,
+                        "fps": 30,
+                        "resolution": "1920x1080",
+                        "keyframe_seconds": 2,
+                    },
+                })
+                headless_agent.write_private_json(
+                    headless_agent.STREAM_RESTART_FILE,
+                    {
+                        "stream_output_mode": "youtube_api",
+                        "youtube_stream_id": "stream-a",
+                        "youtube_ingestion_url": "rtmps://example.test/live/private-target",
+                        "video_path": "/media/video.mp4",
+                        "stream_key": "",
+                        "preset": "superfast",
+                        "video_bitrate": 4000,
+                        "audio_bitrate": 128,
+                        "fps": 24,
+                        "resolution": "1280x720",
+                        "keyframe_seconds": 2,
+                    },
+                )
+                response = headless_agent.APP.test_client().post("/api/restart-stream")
+
+        self.assertEqual(response.status_code, 200)
+        launch_payload = launch.call_args.args[0]
+        self.assertEqual(launch_payload["preset"], "veryfast")
+        self.assertEqual(launch_payload["video_bitrate"], 10000)
+        self.assertEqual(launch_payload["fps"], 30)
+        self.assertEqual(launch_payload["resolution"], "1920x1080")
+        self.assertEqual(launch.call_args.kwargs["reason"], "manual-restart")
+
+    def test_preferred_config_endpoint_requires_active_stream_identity(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self.recovery_paths(headless_agent, tmp)
+            with patches[0], patches[1], patches[2], patches[3], patch.object(
+                headless_agent, "validate_policy", return_value=""
+            ), patch.object(
+                headless_agent,
+                "stream_output_url",
+                return_value="rtmps://example.test/live/private-target",
+            ):
+                headless_agent.save_state({
+                    "stream_desired": True,
+                    "stream_config": {
+                        "stream_output_mode": "youtube_api",
+                        "youtube_stream_id": "stream-a",
+                        "video_path": "/media/video.mp4",
+                        "preset": "superfast",
+                        "video_bitrate": 4000,
+                        "audio_bitrate": 128,
+                        "fps": 24,
+                        "resolution": "1280x720",
+                        "keyframe_seconds": 2,
+                    },
+                })
+                client = headless_agent.APP.test_client()
+                response = client.post("/api/stream/preferred-config", json={
+                    "youtube_stream_id": "stream-a",
+                    "video_path": "/media/video.mp4",
+                    "preset": "veryfast",
+                    "video_bitrate": 10000,
+                    "audio_bitrate": 128,
+                    "fps": 30,
+                    "resolution": "1920x1080",
+                    "keyframe_seconds": 2,
+                })
+                mismatch = client.post("/api/stream/preferred-config", json={
+                    "youtube_stream_id": "stream-b",
+                    "video_path": "/media/video.mp4",
+                    "preset": "ultrafast",
+                    "video_bitrate": 3200,
+                    "fps": 24,
+                    "resolution": "1280x720",
+                })
+                saved = headless_agent.load_state()["preferred_stream_config"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(saved["video_bitrate"], 10000)
+        self.assertEqual(saved["resolution"], "1920x1080")
+        self.assertEqual(mismatch.status_code, 409)
+
     def test_watchdog_restarts_desired_stream_after_process_exit(self):
         from stream_control_hub import headless_agent
 

@@ -5,7 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from stream_control_hub.stream_tuning import (
+    FULL_HD_MIN_FPS,
+    enforce_youtube_quality_floor,
     initial_stream_recommendation,
+    lower_stream_resolution,
+    minimum_video_bitrate_for_resolution,
+    next_lower_fps,
     youtube_live_video_bitrate_kbps,
 )
 
@@ -32,22 +37,55 @@ class StreamTuningTests(unittest.TestCase):
         )
 
         recommendation = result["recommendation"]
-        self.assertEqual(recommendation["resolution"], "1920x1080")
-        self.assertEqual(recommendation["video_bitrate"], 4672)
+        self.assertEqual(recommendation["resolution"], "1280x720")
+        self.assertEqual(recommendation["video_bitrate"], 4000)
         self.assertEqual(recommendation["audio_bitrate"], 128)
-        self.assertEqual(result["analysis"]["youtube_recommended_bitrate_kbps"], 10000)
+        self.assertEqual(result["analysis"]["youtube_recommended_bitrate_kbps"], 4000)
+        self.assertTrue(any("720P" in warning for warning in result["analysis"]["warnings"]))
 
-    def test_low_cpu_recommendation_downscales_without_distorting_vertical_source(self):
+    def test_low_cpu_recommendation_preserves_source_resolution_without_distorting_vertical_source(self):
         result = initial_stream_recommendation(
             {"width": 1080, "height": 1920, "fps": 60, "video_codec": "vp9", "audio_codec": "opus"},
             cpu_count=2,
             memory_available_mb=1024,
         )
 
-        self.assertEqual(result["recommendation"]["resolution"], "720x1280")
+        self.assertEqual(result["recommendation"]["resolution"], "1080x1920")
         self.assertEqual(result["recommendation"]["fps"], 30)
         self.assertEqual(result["recommendation"]["preset"], "superfast")
+        self.assertEqual(result["quality_bounds"]["min_quality"]["resolution"], "720x1280")
         self.assertFalse(result["analysis"]["copy_compatible"])
+
+    def test_degradation_helpers_step_down_fps_before_resolution(self):
+        self.assertEqual(next_lower_fps(60), 30)
+        self.assertEqual(next_lower_fps(30), 24)
+        self.assertEqual(next_lower_fps(24), 24)
+        self.assertEqual(next_lower_fps(60, minimum=30), 30)
+        self.assertEqual(FULL_HD_MIN_FPS, 24)
+        self.assertEqual(lower_stream_resolution("1920x1080"), "1280x720")
+        self.assertEqual(lower_stream_resolution("1080x1920"), "720x1280")
+        self.assertEqual(lower_stream_resolution("3840x2160"), "1920x1080")
+        self.assertEqual(lower_stream_resolution("1280x720"), "1280x720")
+        self.assertEqual(minimum_video_bitrate_for_resolution("1920x1080"), 8000)
+        self.assertEqual(minimum_video_bitrate_for_resolution("1280x720"), 3200)
+
+    def test_quality_floor_moves_low_quality_full_hd_to_720p_and_bounds_hd_bitrate(self):
+        full_hd = enforce_youtube_quality_floor({
+            "resolution": "1920x1080",
+            "fps": 30,
+            "video_bitrate": 6000,
+        })
+        self.assertEqual(full_hd["resolution"], "1280x720")
+        self.assertEqual(full_hd["fps"], 30)
+        self.assertEqual(full_hd["video_bitrate"], 4000)
+
+        hd = enforce_youtube_quality_floor({
+            "resolution": "1280x720",
+            "fps": 30,
+            "video_bitrate": 2500,
+        })
+        self.assertEqual(hd["resolution"], "1280x720")
+        self.assertEqual(hd["video_bitrate"], 3200)
 
     def test_static_youtube_source_still_transcodes_for_controlled_gop(self):
         result = initial_stream_recommendation(
