@@ -821,19 +821,30 @@ def youtube_autotune_apply_runtime(
     local_classification = str(runtime.get("classification") or "unknown")
     if issue_fingerprint != "videoingestionstarved" and local_classification not in {"encoder_overloaded", "network_starved", "healthy"}:
         return dict(recommendation), runtime, []
-    result = dict(recommendation)
     decisions = []
     current_bitrate = int(stream_config.get("video_bitrate") or 0)
     explicit_bitrate = int((health.get("analysis") or {}).get("recommended_video_bitrate") or 0)
     fallback_bitrate = int(entry.get("youtube_recommended_bitrate") or 0) or youtube_autotune_resolution_bitrate(stream_config)
     classification = runtime["classification"]
     motion_level = motion_level if motion_level in {"static", "medium", "dynamic"} else "medium"
+    # Runtime pressure follows the local degradation order. Start from the
+    # actual stream config so a low YouTube suggestion cannot also lower the
+    # resolution while we are only trying the next encoder preset.
+    result = (
+        dict(stream_config)
+        if classification in {"encoder_overloaded", "network_starved"}
+        else dict(recommendation)
+    )
     if classification == "encoder_overloaded":
         if current_bitrate:
             # Encoder pressure is handled by preset, FPS, then resolution.
             # Never let a simultaneous YouTube recommendation change bitrate
             # order or make the overloaded encoder work harder.
             result["video_bitrate"] = current_bitrate
+        if explicit_bitrate and explicit_bitrate != current_bitrate:
+            decisions.append(
+                f"Defer YouTube's {explicit_bitrate} Kbps bitrate suggestion while the encoder is overloaded; keep the current bitrate and reduce preset/FPS before considering resolution."
+            )
         preset = str(stream_config.get("preset") or "veryfast")
         faster_presets = {
             "slow": "medium",
@@ -1369,19 +1380,27 @@ def youtube_autotune_tick(*, force: bool = False) -> dict[str, Any]:
                 entry["last_adjusted"] = now
                 entry["last_result"] = redacted_stream_result(result)
                 if result.get("ok"):
-                    adjusted += 1
-                    entry["episode_adjustments"] = int(entry.get("episode_adjustments") or 0) + 1
-                    entry["recovery_applied"] = False
-                    entry["consecutive_issues"] = 0
-                    entry["last_error"] = ""
-                    verified_status = request_node_json(node, "/api/status", timeout=8)
-                    verified_config = verified_status.get("stream_config") or payload
-                    append_youtube_autotune_history(state, {
-                        **event,
-                        "outcome": "adjusted",
-                        "after": youtube_autotune_parameter_snapshot(verified_config),
-                        "agent_message": str(result.get("message") or "Agent parameters updated")[:500],
-                    })
+                    verified_status, verified_config, verified = verify_node_stream_config(node, payload)
+                    if verified:
+                        adjusted += 1
+                        entry["episode_adjustments"] = int(entry.get("episode_adjustments") or 0) + 1
+                        entry["recovery_applied"] = False
+                        entry["consecutive_issues"] = 0
+                        entry["last_error"] = ""
+                        append_youtube_autotune_history(state, {
+                            **event,
+                            "outcome": "adjusted",
+                            "after": youtube_autotune_parameter_snapshot(verified_config),
+                            "agent_message": str(result.get("message") or "Agent parameters updated")[:500],
+                        })
+                    else:
+                        entry["last_error"] = "Agent accepted the change but status verification did not match the requested parameters"
+                        append_youtube_autotune_history(state, {
+                            **event,
+                            "outcome": "verification_failed",
+                            "after": youtube_autotune_parameter_snapshot(verified_config),
+                            "error": entry["last_error"],
+                        })
                 else:
                     entry["last_error"] = result.get("message") or "auto tune restart failed"
                     append_youtube_autotune_history(state, {
@@ -1994,18 +2013,26 @@ def upgrade_postcheck_agent(
         message = str(adjust_result.get("message") or "推流参数调整失败")[:500]
         record.update({"state": "adjustment_failed", "completed": True, "error": message, "message": message})
         return record
-    verified = request_node_json(node, "/api/status", timeout=12)
-    verified_config = verified.get("stream_config") if isinstance(verified.get("stream_config"), dict) else {}
+    verified, verified_config, verified_match = verify_node_stream_config(
+        node,
+        payload,
+        attempts=3,
+        interval_seconds=0.5,
+    )
     record["verified_stream_config"] = upgrade_postcheck_config_snapshot(verified_config)
     record.update({
-        "state": "adjusted",
+        "state": "adjusted" if verified_match else "verification_failed",
         "completed": True,
-        "message": "已按当前负载和 YouTube 基准调整推流参数，并完成 Agent 状态复核"
-        if verified.get("ok")
-        else "推流参数已提交调整，但调整后的 Agent 复核失败",
+        "message": (
+            "已按当前负载和 YouTube 基准调整推流参数，并完成 Agent 状态复核"
+            if verified_match
+            else "Agent 已接受推流参数调整，但调整后的实际参数复核不一致"
+        ),
     })
-    if not verified.get("ok"):
-        record["error"] = str(verified.get("message") or "调整后 Agent 状态复核失败")[:500]
+    if not verified_match:
+        record["error"] = (
+            str(verified.get("message") or "调整后的 Agent 参数与请求不一致")[:500]
+        )
     return record
 
 
@@ -5923,6 +5950,7 @@ HTML = r"""
         cooldown: "冷却等待",
         observing: "已恢复推荐值，持续观察",
         adjusted: "已修改 Agent",
+        verification_failed: "修改后校验失败",
         failed: "Agent 修改失败",
         error: "检查错误",
       };
@@ -16064,6 +16092,55 @@ def redacted_stream_result(data: dict[str, Any]) -> dict[str, Any]:
         nested.pop("youtube_ingestion_url", None)
         result["result"] = nested
     return result
+
+
+def stream_quality_config_matches(
+    actual: dict[str, Any] | None,
+    requested: dict[str, Any] | None,
+) -> bool:
+    actual = actual if isinstance(actual, dict) else {}
+    requested = requested if isinstance(requested, dict) else {}
+    if not actual or not requested:
+        return False
+    numeric_keys = {"video_bitrate", "audio_bitrate", "fps", "keyframe_seconds"}
+    for key in ("copy_mode", "preset", "video_bitrate", "audio_bitrate", "fps", "resolution", "keyframe_seconds"):
+        if key not in requested or requested.get(key) is None:
+            continue
+        expected = requested.get(key)
+        observed = actual.get(key)
+        if key in numeric_keys:
+            try:
+                if int(float(observed)) != int(float(expected)):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        elif key == "copy_mode":
+            if bool(observed) != bool(expected):
+                return False
+        elif str(observed or "").strip().lower() != str(expected or "").strip().lower():
+            return False
+    return True
+
+
+def verify_node_stream_config(
+    node: dict[str, Any],
+    requested: dict[str, Any],
+    *,
+    attempts: int = 3,
+    interval_seconds: float = 0.5,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Confirm the Agent persisted the requested quality settings after restart."""
+    last_status: dict[str, Any] = {}
+    last_config: dict[str, Any] = {}
+    for attempt in range(max(1, int(attempts or 1))):
+        last_status = request_node_json(node, "/api/status", timeout=8)
+        candidate = last_status.get("stream_config")
+        last_config = candidate if isinstance(candidate, dict) else {}
+        if last_status.get("ok") and stream_quality_config_matches(last_config, requested):
+            return last_status, last_config, True
+        if attempt + 1 < max(1, int(attempts or 1)):
+            time.sleep(max(0.0, float(interval_seconds or 0)))
+    return last_status, last_config, False
 
 
 def ensure_library_media_on_node(target_node: dict[str, Any], filename: str) -> dict[str, Any]:

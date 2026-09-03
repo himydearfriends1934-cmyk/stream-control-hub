@@ -1379,6 +1379,53 @@ class YouTubeAPIClientTests(unittest.TestCase):
         self.assertEqual(quality_floor["video_bitrate"], 4000)
         self.assertTrue(any("quality floor" in reason for reason in reasons))
 
+    def test_autotune_overload_does_not_inherit_low_resolution_api_recommendation(self):
+        from stream_control_hub import app
+
+        current = {
+            "video_bitrate": 10000,
+            "audio_bitrate": 128,
+            "resolution": "1920x1080",
+            "fps": 24,
+            "preset": "superfast",
+        }
+        api_recommendation = {
+            **current,
+            "video_bitrate": 2500,
+            "resolution": "1280x720",
+            "preset": "superfast",
+        }
+        result, runtime, reasons = app.youtube_autotune_apply_runtime(
+            {
+                "severity": "warning",
+                "analysis": {
+                    "recommended_video_bitrate": 2500,
+                    "configuration_issues": [{"type": "bitrateHigh"}],
+                },
+            },
+            api_recommendation,
+            {
+                "cpu_count": 2,
+                "stream": {
+                    "runtime": {
+                        "speed": 1.0,
+                        "system_cpu_percent": 87.5,
+                        "ffmpeg_cpu_percent": 169,
+                        "upload_kbps": 10094,
+                    },
+                },
+            },
+            current,
+            {},
+            motion_level="static",
+        )
+
+        self.assertEqual(runtime["classification"], "encoder_overloaded")
+        self.assertEqual(result["preset"], "ultrafast")
+        self.assertEqual(result["resolution"], "1920x1080")
+        self.assertEqual(result["video_bitrate"], 10000)
+        self.assertTrue(any("Defer YouTube" in reason for reason in reasons))
+
     def test_autotune_stability_selects_longest_level_and_resets_identity(self):
         from stream_control_hub import app
 

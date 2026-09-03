@@ -3103,8 +3103,9 @@ def api_start_stream():
     if policy_error:
         return jsonify({"ok": False, "message": policy_error}), 409
     try:
-        video_path = resolve_media_path(str(payload.get("video_path") or ""))
         output_url = stream_output_url(payload)
+        payload = normalize_stream_payload(payload, output_url)
+        video_path = resolve_media_path(str(payload.get("video_path") or ""))
         ffmpeg_command(payload, video_path, output_url)
     except Exception as exc:
         if isinstance(exc, YouTubeAPIError):
@@ -3150,6 +3151,9 @@ def api_start_stream():
             "duplicate_processes": 1 if previous_pid and stop_result.get("ok") and not stop_result.get("skipped") else 0,
             "log_path": result["log_path"],
             "auto_restart": STREAM_AUTO_RESTART_ENABLED,
+            "applied_stream_config": stream_preferred_quality_config(
+                load_state().get("stream_config") or {}
+            ),
         },
     })
 

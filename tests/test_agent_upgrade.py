@@ -1696,6 +1696,10 @@ class AgentUpgradeTests(unittest.TestCase):
                 app,
                 "node_delete_migration_plan",
                 return_value={"ok": True, "online": True, "plan": [{"name": "a.mp4", "video_path": "a.mp4", "size": 10, "target_node": target, "target_node_id": "target"}]},
+            ), patch.object(
+                app,
+                "tailscale_status",
+                return_value={"ok": False},
             ), patch.object(app.threading.Thread, "start", return_value=None) as start:
                 response = app.APP.test_client().post(
                     "/api/nodes/delete",
