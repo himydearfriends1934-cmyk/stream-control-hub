@@ -555,6 +555,189 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(status_response.get_json()["agents"][0]["node_id"], "agent-a")
         self.assertEqual(missing_response.status_code, 404)
 
+    def test_upgrade_postcheck_repairs_720p_output_for_1080p_source(self):
+        from stream_control_hub import app
+
+        node = {"id": "agent-a", "name": "Agent A", "base_url": "http://100.64.0.10:8787"}
+        current_config = {
+            "youtube_profile_id": "default",
+            "youtube_stream_id": "stream-a",
+            "stream_output_mode": "youtube_api",
+            "adaptive_mode": "auto",
+            "video_path": "video.mp4",
+            "preset": "superfast",
+            "video_bitrate": 4000,
+            "audio_bitrate": 128,
+            "fps": 30,
+            "resolution": "1280x720",
+            "keyframe_seconds": 2,
+        }
+        status = {
+            "ok": True,
+            "agent": {"version": "def5678"},
+            "stream": {
+                "running": True,
+                "runtime": {
+                    "speed": 1.0,
+                    "system_cpu_percent": 35,
+                    "upload_kbps": 20000,
+                },
+            },
+            "stream_config": current_config,
+            "stream_source": {
+                "video_path": "video.mp4",
+                "width": 1920,
+                "height": 1080,
+                "fps": 30,
+                "video_codec": "h264",
+                "audio_codec": "aac",
+                "available": True,
+            },
+            "cpu_count": 2,
+            "cpu_percent": 35,
+            "memory": {
+                "available": 1.5 * 1024 * 1024 * 1024,
+                "percent": 30,
+            },
+            "net": {"upload_kbps": 20000},
+        }
+        recommendation = {
+            **current_config,
+            "preset": "superfast",
+            "video_bitrate": 10000,
+            "resolution": "1920x1080",
+            "fps": 30,
+        }
+        post_calls = []
+
+        def fake_post(node_arg, path, payload, *, timeout):
+            post_calls.append((path, payload, timeout))
+            if path == "/api/stream/recommend":
+                return {"ok": True, "recommendation": recommendation}
+            self.assertEqual(path, "/api/start-stream")
+            return {"ok": True, "message": "参数已调整"}
+
+        with patch.object(app, "request_node_json", side_effect=[status, {
+            **status,
+            "stream_config": {**current_config, "video_bitrate": 10000, "resolution": "1920x1080"},
+        }]), patch.object(
+            app, "post_node_json", side_effect=fake_post
+        ), patch.object(
+            app, "upgrade_postcheck_youtube_health",
+            return_value={"status": "ok", "severity": "ok", "problems": []},
+        ), patch.object(app, "load_youtube_autotune_state", return_value={}):
+            result = app.upgrade_postcheck_agent(
+                node,
+                {"node_id": "agent-a", "state": "scheduled"},
+                "def5678",
+            )
+
+        self.assertEqual(result["state"], "adjusted")
+        self.assertEqual(len(post_calls), 2)
+        self.assertEqual(post_calls[1][1]["resolution"], "1920x1080")
+        self.assertEqual(post_calls[1][1]["video_bitrate"], 10000)
+
+    def test_upgrade_postcheck_respects_autotune_cooldown(self):
+        from stream_control_hub import app
+
+        node = {"id": "agent-a", "name": "Agent A", "base_url": "http://100.64.0.10:8787"}
+        stream_config = {
+            "youtube_profile_id": "default",
+            "youtube_stream_id": "stream-a",
+            "stream_output_mode": "youtube_api",
+            "adaptive_mode": "auto",
+            "video_path": "video.mp4",
+            "preset": "superfast",
+            "video_bitrate": 4000,
+            "audio_bitrate": 128,
+            "fps": 30,
+            "resolution": "1280x720",
+            "keyframe_seconds": 2,
+        }
+        status = {
+            "ok": True,
+            "agent": {"version": "def5678"},
+            "stream": {
+                "running": True,
+                "runtime": {
+                    "speed": 1.0,
+                    "system_cpu_percent": 35,
+                    "upload_kbps": 20000,
+                },
+            },
+            "stream_config": stream_config,
+            "stream_source": {"video_path": "video.mp4", "width": 1920, "height": 1080, "available": True},
+            "cpu_count": 2,
+            "cpu_percent": 35,
+            "memory": {"available": 1.5 * 1024 * 1024 * 1024, "percent": 30},
+            "net": {"upload_kbps": 20000},
+        }
+        recommendation = {**stream_config, "video_bitrate": 10000, "resolution": "1920x1080"}
+
+        def fake_post(node_arg, path, payload, *, timeout):
+            if path == "/api/stream/recommend":
+                return {"ok": True, "recommendation": recommendation}
+            self.fail("cooldown must prevent a stream restart")
+
+        with patch.object(app, "request_node_json", return_value=status), patch.object(
+            app, "post_node_json", side_effect=fake_post
+        ), patch.object(
+            app, "upgrade_postcheck_youtube_health",
+            return_value={"status": "ok", "severity": "ok", "problems": []},
+        ), patch.object(
+            app, "load_youtube_autotune_state",
+            return_value={"entries": {"agent-a:default:stream-a": {"last_adjusted": 950}}},
+        ), patch.object(app.time, "time", return_value=1000):
+            result = app.upgrade_postcheck_agent(
+                node,
+                {"node_id": "agent-a", "state": "scheduled"},
+                "def5678",
+            )
+
+        self.assertEqual(result["state"], "cooldown")
+        self.assertGreater(result["cooldown_remaining_seconds"], 0)
+
+    def test_upgrade_postcheck_persists_final_report_after_hub_restart(self):
+        from stream_control_hub import app
+
+        node = {"id": "agent-a", "name": "Agent A", "base_url": "http://100.64.0.10:8787"}
+        batch = {
+            "version": 1,
+            "batch_id": "batch-after-restart",
+            "state": "scheduled",
+            "target_version": "def5678",
+            "hub": {"state": "scheduled", "unit": "hub-upgrade-1"},
+            "agents": [{"node_id": "agent-a", "node_name": "Agent A", "state": "scheduled"}],
+            "postcheck": {
+                "version": 1,
+                "state": "pending",
+                "agents": [{"node_id": "agent-a", "node_name": "Agent A", "state": "pending", "completed": False}],
+            },
+        }
+        audit = {
+            "node_id": "agent-a",
+            "node_name": "Agent A",
+            "state": "healthy",
+            "completed": True,
+            "message": "当前负载与推流参数匹配，无需调整",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            status_file = Path(tmp) / "upgrade-batch.json"
+            with patch.object(app, "UPGRADE_BATCH_STATUS_FILE", status_file), patch.object(
+                app, "upgrade_postcheck_hub_ready", return_value=(True, "Hub 已恢复")
+            ), patch.object(app, "upgradeable_agent_nodes", return_value=[node]), patch.object(
+                app, "upgrade_postcheck_agent", return_value=audit
+            ), patch.object(app, "youtube_autotune_tick", return_value={"ok": True}):
+                app.save_upgrade_batch_status(batch)
+                app.run_upgrade_postcheck("batch-after-restart")
+                saved = app.load_upgrade_batch_status()
+
+        self.assertEqual(saved["state"], "completed")
+        self.assertEqual(saved["postcheck"]["state"], "completed")
+        self.assertTrue(saved["postcheck"]["ok"])
+        self.assertEqual(saved["postcheck"]["agents"][0]["state"], "healthy")
+
     def test_ui_remembers_last_agent_and_keeps_role_actions_in_settings(self):
         from stream_control_hub import app
 

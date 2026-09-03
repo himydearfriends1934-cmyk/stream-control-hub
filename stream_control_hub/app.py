@@ -276,6 +276,15 @@ UPGRADE_BATCH_STALE_SECONDS = max(
     15 * 60,
     int(os.environ.get("STREAM_HUB_UPGRADE_BATCH_STALE_SECONDS", str(30 * 60))),
 )
+UPGRADE_POSTCHECK_TIMEOUT_SECONDS = max(
+    120,
+    int(os.environ.get("STREAM_HUB_UPGRADE_POSTCHECK_TIMEOUT_SECONDS", str(15 * 60))),
+)
+UPGRADE_POSTCHECK_INTERVAL_SECONDS = max(
+    2,
+    int(os.environ.get("STREAM_HUB_UPGRADE_POSTCHECK_INTERVAL_SECONDS", "10")),
+)
+UPGRADE_POSTCHECK_LOCK = threading.Lock()
 
 
 def youtube_quota_day() -> str:
@@ -1013,7 +1022,7 @@ def youtube_autotune_recovery_diff(
     return {}
 
 
-def youtube_autotune_tick() -> dict[str, Any]:
+def youtube_autotune_tick(*, force: bool = False) -> dict[str, Any]:
     with YOUTUBE_AUTOTUNE_LOCK:
         now = time.time()
         config = load_youtube_profiles_config()
@@ -1051,7 +1060,7 @@ def youtube_autotune_tick() -> dict[str, Any]:
             next_api_retry_at = float(entry.get("next_api_retry_at") or 0)
             if next_api_retry_at and now < next_api_retry_at:
                 continue
-            if not next_api_retry_at and now - float(entry.get("last_check") or 0) < interval:
+            if not force and not next_api_retry_at and now - float(entry.get("last_check") or 0) < interval:
                 continue
             entry["last_check"] = now
             checked += 1
@@ -1512,6 +1521,701 @@ def update_upgrade_batch_agent(
         return payload
 
 
+def update_upgrade_batch_postcheck(
+    batch_id: str,
+    **updates: Any,
+) -> dict[str, Any]:
+    with UPGRADE_BATCH_LOCK:
+        payload = load_upgrade_batch_status()
+        if str(payload.get("batch_id") or "") != str(batch_id):
+            return payload
+        postcheck = dict(payload.get("postcheck") or {})
+        postcheck.update(updates)
+        payload["postcheck"] = postcheck
+        payload["updated_at"] = time.time()
+        save_upgrade_batch_status(payload)
+        return payload
+
+
+def update_upgrade_batch_postcheck_agent(
+    batch_id: str,
+    node_id: str,
+    **updates: Any,
+) -> dict[str, Any]:
+    with UPGRADE_BATCH_LOCK:
+        payload = load_upgrade_batch_status()
+        if str(payload.get("batch_id") or "") != str(batch_id):
+            return payload
+        postcheck = dict(payload.get("postcheck") or {})
+        agents = list(postcheck.get("agents") or [])
+        found = False
+        for item in agents:
+            if str(item.get("node_id") or "") == str(node_id):
+                item.update(updates)
+                found = True
+                break
+        if not found:
+            agents.append({"node_id": str(node_id), **updates})
+        postcheck["agents"] = agents
+        postcheck["updated_at"] = time.time()
+        payload["postcheck"] = postcheck
+        payload["updated_at"] = time.time()
+        save_upgrade_batch_status(payload)
+        return payload
+
+
+def upgrade_postcheck_profile(stream_config: dict[str, Any]) -> dict[str, Any]:
+    profile_id = safe_youtube_profile_id(
+        str(stream_config.get("youtube_profile_id") or active_youtube_profile_id())
+    )
+    try:
+        profile = youtube_profile_by_id(profile_id)
+    except Exception:
+        profile = default_youtube_profile()
+    return {
+        **default_youtube_profile(),
+        **profile,
+        "id": profile_id,
+    }
+
+
+def upgrade_postcheck_source_snapshot(source: Any) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return {}
+    keys = (
+        "video_path",
+        "width",
+        "height",
+        "fps",
+        "rotation",
+        "video_codec",
+        "pixel_format",
+        "field_order",
+        "video_bitrate_kbps",
+        "has_audio",
+        "audio_codec",
+        "audio_channels",
+        "audio_sample_rate",
+        "duration_seconds",
+        "copy_compatible",
+        "available",
+        "error",
+        "checked_at",
+    )
+    return {
+        key: source.get(key)
+        for key in keys
+        if source.get(key) is not None
+    }
+
+
+def upgrade_postcheck_config_snapshot(config: Any) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    return youtube_autotune_parameter_snapshot(config) | {
+        key: config.get(key)
+        for key in ("video_path", "youtube_stream_id", "youtube_profile_id", "stream_output_mode", "adaptive_mode")
+        if config.get(key) is not None
+    }
+
+
+def upgrade_postcheck_runtime_snapshot(status: dict[str, Any], stream_config: dict[str, Any]) -> dict[str, Any]:
+    runtime = youtube_autotune_runtime_snapshot(status, stream_config)
+    memory = status.get("memory") if isinstance(status.get("memory"), dict) else {}
+    network = status.get("net") if isinstance(status.get("net"), dict) else {}
+    return {
+        **runtime,
+        "cpu_percent": status.get("cpu_percent"),
+        "cpu_count": status.get("cpu_count"),
+        "load_avg": status.get("load_avg") or [],
+        "memory": {
+            key: memory.get(key)
+            for key in ("total", "used", "available", "percent")
+            if memory.get(key) is not None
+        },
+        "network": {
+            key: network.get(key)
+            for key in ("bytes_recv", "bytes_sent", "upload_bps", "upload_kbps")
+            if network.get(key) is not None
+        },
+    }
+
+
+def upgrade_postcheck_youtube_health(
+    stream_config: dict[str, Any],
+) -> dict[str, Any]:
+    stream_id = str(stream_config.get("youtube_stream_id") or "").strip()
+    if str(stream_config.get("stream_output_mode") or "").strip().lower() != "youtube_api" or not stream_id:
+        return {"status": "not_youtube", "message": "不是 YouTube API 推流，跳过 YouTube API 检查"}
+    profile_id = safe_youtube_profile_id(
+        str(stream_config.get("youtube_profile_id") or active_youtube_profile_id())
+    )
+    try:
+        client = youtube_client_for_id(profile_id)
+        local_status = client.local_status()
+        if not local_status.get("authorized"):
+            return {
+                "status": "unavailable",
+                "profile_id": profile_id,
+                "message": "YouTube API 未授权，保留 Agent 本地运行状态作为判断依据",
+            }
+        health = client.stream_health(stream_id, stream_config)
+        return {
+            "status": "ok" if str(health.get("severity") or "").lower() not in {"warning", "critical"} else "warning",
+            "profile_id": profile_id,
+            "severity": str(health.get("severity") or "unknown"),
+            "ok": bool(health.get("ok")),
+            "problems": youtube_autotune_problems(health),
+            "analysis": {
+                key: (health.get("analysis") or {}).get(key)
+                for key in ("score", "recommended_video_bitrate", "reasons", "warnings")
+                if (health.get("analysis") or {}).get(key) is not None
+            },
+        }
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "profile_id": profile_id,
+            "message": str(exc)[:500],
+        }
+
+
+def upgrade_postcheck_cooldown_remaining(
+    node: dict[str, Any],
+    stream_config: dict[str, Any],
+    *,
+    now: float,
+) -> tuple[int, str]:
+    profile = upgrade_postcheck_profile(stream_config)
+    profile_id = str(profile.get("id") or YOUTUBE_DEFAULT_PROFILE_ID)
+    stream_id = str(stream_config.get("youtube_stream_id") or "")
+    key = f"{node.get('id')}:{profile_id}:{stream_id}"
+    autotune_state = load_youtube_autotune_state()
+    entry = (autotune_state.get("entries") or {}).get(key) or {}
+    cooldown = max(60, int(profile.get("auto_tune_cooldown_seconds") or 900))
+    last_adjusted = float(entry.get("last_adjusted") or 0)
+    remaining = max(0, int(last_adjusted + cooldown - now)) if last_adjusted else 0
+    return remaining, key
+
+
+def upgrade_postcheck_parameter_match(
+    source: dict[str, Any],
+    stream_config: dict[str, Any],
+    recommendation: dict[str, Any],
+    preferred: dict[str, Any],
+    runtime: dict[str, Any],
+    youtube_health: dict[str, Any],
+) -> tuple[bool | None, list[str], dict[str, Any]]:
+    if not stream_config:
+        return None, ["Agent 没有当前推流参数"], {}
+    if not runtime.get("stream_running", True):
+        return None, ["当前没有正在运行的推流进程"], {}
+
+    reasons: list[str] = []
+    source_width = int(source.get("width") or 0)
+    source_height = int(source.get("height") or 0)
+    source_resolution = f"{source_width}x{source_height}" if source_width and source_height else ""
+    current_resolution = str(stream_config.get("resolution") or "").strip()
+    current_short = min(parse_resolution(current_resolution)) if current_resolution else 0
+    source_short = min(source_width, source_height) if source_width and source_height else 0
+    runtime_classification = str(runtime.get("classification") or "").lower()
+    overloaded = runtime_classification in {"encoder_overloaded", "network_starved"} or (
+        float(runtime.get("system_cpu_percent") or 0) >= 95
+        or bool(runtime.get("memory_pressure"))
+    )
+    api_severity = str(youtube_health.get("severity") or "").lower()
+    api_problem = api_severity in {"warning", "critical"} and bool(youtube_health.get("problems"))
+    if overloaded:
+        reasons.append(f"运行负载异常：{runtime_classification or '未知'}")
+    if api_problem:
+        reasons.extend(str(value)[:500] for value in youtube_health.get("problems") or [])
+
+    preferred_resolution = str(preferred.get("resolution") or "").strip()
+    preferred_short = min(parse_resolution(preferred_resolution)) if preferred_resolution else 0
+    preferred_valid = bool(
+        preferred
+        and preferred.get("resolution")
+        and (
+            not preferred.get("youtube_stream_id")
+            or str(preferred.get("youtube_stream_id") or "") == str(stream_config.get("youtube_stream_id") or "")
+        )
+        and (
+            not preferred.get("video_path")
+            or str(preferred.get("video_path") or "") == str(stream_config.get("video_path") or "")
+        )
+    )
+    recommended_resolution = str(recommendation.get("resolution") or "").strip()
+    recommended_short = min(parse_resolution(recommended_resolution)) if recommended_resolution else 0
+    desired_resolution = recommended_resolution
+    desired_short = recommended_short
+    if preferred_valid and preferred_short:
+        desired_resolution = preferred_resolution
+        desired_short = preferred_short
+        preferred_matches = not any(
+            preferred.get(key) is not None and preferred.get(key) != stream_config.get(key)
+            for key in ("preset", "video_bitrate", "audio_bitrate", "fps", "resolution", "keyframe_seconds")
+        )
+        if not preferred_matches:
+            reasons.append("当前参数与 24 小时稳定时长最长的优选配置不一致")
+
+    if source_short >= 1080 and current_short < 1080 and not (
+        preferred_valid and preferred_short >= 720
+    ):
+        reasons.append(f"源视频为 {source_resolution or '高于 720P'}，当前输出低于 1080P")
+    if desired_short and current_short < desired_short:
+        reasons.append(f"当前输出 {current_resolution or '未知'} 低于推荐输出 {desired_resolution}")
+    elif desired_short and current_short > desired_short and overloaded:
+        reasons.append(f"当前输出 {current_resolution} 超出当前负载可稳定维持的 {desired_resolution}")
+
+    if current_short >= 1080:
+        if int(stream_config.get("video_bitrate") or 0) < 8000:
+            reasons.append("1080P 视频码率低于 8000 Kbps 质量底线")
+        if int(stream_config.get("fps") or 0) < FULL_HD_MIN_FPS:
+            reasons.append(f"1080P FPS 低于 {FULL_HD_MIN_FPS} 的质量底线")
+    elif current_short >= 720 and int(stream_config.get("video_bitrate") or 0) < 3200:
+        reasons.append("720P 视频码率低于 3200 Kbps 质量底线")
+
+    if recommendation and not overloaded and not preferred_valid:
+        for key in ("preset", "fps", "video_bitrate", "audio_bitrate", "keyframe_seconds"):
+            expected = recommendation.get(key)
+            current = stream_config.get(key)
+            if expected is not None and current is not None and expected != current:
+                reasons.append(f"{key} 当前为 {current}，推荐基准为 {expected}")
+
+    if runtime_classification == "healthy" and youtube_health.get("status") == "ok":
+        reasons = [item for item in reasons if not item.startswith("运行负载异常：")]
+    match = not reasons
+    details = {
+        "source_resolution": source_resolution,
+        "current_resolution": current_resolution,
+        "recommended_resolution": recommended_resolution,
+        "preferred_resolution": preferred_resolution,
+        "preferred_valid": preferred_valid,
+        "preferred_matches": preferred_valid and not any(
+            preferred.get(key) is not None and preferred.get(key) != stream_config.get(key)
+            for key in ("preset", "video_bitrate", "audio_bitrate", "fps", "resolution", "keyframe_seconds")
+        ),
+        "runtime_classification": runtime_classification or "unknown",
+        "overloaded": overloaded,
+        "api_problem": api_problem,
+    }
+    return match, list(dict.fromkeys(reasons))[:12], details
+
+
+def upgrade_postcheck_agent(
+    node: dict[str, Any],
+    batch_agent: dict[str, Any],
+    target_version: str,
+) -> dict[str, Any]:
+    node_id = str(node.get("id") or "")
+    record: dict[str, Any] = {
+        "node_id": node_id,
+        "node_name": str(node.get("name") or node_id),
+        "state": "checking",
+        "completed": False,
+        "upgrade_state": str(batch_agent.get("state") or ""),
+        "actions": [],
+        "checked_at": retention_timestamp_text(),
+    }
+    if str(batch_agent.get("state") or "").lower() == "failed":
+        record.update({
+            "state": "upgrade_failed",
+            "completed": True,
+            "error": str(batch_agent.get("message") or "Agent 升级任务提交失败")[:500],
+            "message": str(batch_agent.get("message") or "Agent 升级任务提交失败")[:500],
+        })
+        return record
+
+    status = request_node_json(node, "/api/status", timeout=AGENT_STATUS_REFRESH_TIMEOUT_SECONDS)
+    record["online"] = bool(status.get("ok"))
+    record["status_code"] = int(status.get("status_code") or 0)
+    if not status.get("ok"):
+        message = str(status.get("message") or "Agent 暂时无法连接")[:500]
+        record.update({
+            "state": "offline",
+            "error": message,
+            "message": message,
+        })
+        return record
+
+    agent_info = status.get("agent") if isinstance(status.get("agent"), dict) else {}
+    version = str(agent_info.get("version") or "")
+    upgrade_status = agent_info.get("upgrade_status") if isinstance(agent_info.get("upgrade_status"), dict) else {}
+    record["version"] = version
+    record["upgrade_status"] = {
+        key: upgrade_status.get(key)
+        for key in ("state", "unit", "target_version", "message", "exit_code", "updated_at")
+        if upgrade_status.get(key) is not None
+    }
+    if target_version and version.lower() != target_version.lower():
+        message = f"Agent 当前版本 {version or '未识别'}，等待目标版本 {target_version}"
+        record.update({"state": "waiting_upgrade", "message": message})
+        return record
+
+    stream = status.get("stream") if isinstance(status.get("stream"), dict) else {}
+    stream_config = status.get("stream_config") if isinstance(status.get("stream_config"), dict) else {}
+    source = upgrade_postcheck_source_snapshot(status.get("stream_source"))
+    preferred = status.get("preferred_stream_config") if isinstance(status.get("preferred_stream_config"), dict) else {}
+    runtime = upgrade_postcheck_runtime_snapshot(status, stream_config)
+    runtime["stream_running"] = bool(stream.get("running"))
+    youtube_health = upgrade_postcheck_youtube_health(stream_config)
+    record.update({
+        "stream_running": bool(stream.get("running")),
+        "cpu_percent": status.get("cpu_percent"),
+        "memory": runtime.get("memory") or {},
+        "network": runtime.get("network") or {},
+        "load_avg": runtime.get("load_avg") or [],
+        "stream_source": source,
+        "stream_config": upgrade_postcheck_config_snapshot(stream_config),
+        "preferred_stream_config": upgrade_postcheck_config_snapshot(preferred),
+        "runtime": runtime,
+        "youtube": youtube_health,
+    })
+    video_path = str(stream_config.get("video_path") or source.get("video_path") or "").strip()
+    recommendation_result: dict[str, Any] = {}
+    recommendation: dict[str, Any] = {}
+    if video_path:
+        recommendation_result = post_node_json(
+            node,
+            "/api/stream/recommend",
+            {
+                "video_path": video_path,
+                "motion_level": str(stream_config.get("motion_level") or "medium"),
+            },
+            timeout=60,
+        )
+        recommendation = (
+            recommendation_result.get("recommendation")
+            if isinstance(recommendation_result.get("recommendation"), dict)
+            else {}
+        )
+    record["recommendation"] = upgrade_postcheck_config_snapshot(recommendation)
+    if not recommendation_result.get("ok") and video_path:
+        record.update({
+            "state": "recommendation_failed",
+            "completed": True,
+            "message": str(recommendation_result.get("message") or "Agent 推荐参数读取失败")[:500],
+            "error": str(recommendation_result.get("message") or "Agent 推荐参数读取失败")[:500],
+        })
+        return record
+
+    matched, reasons, match_details = upgrade_postcheck_parameter_match(
+        source,
+        stream_config,
+        recommendation,
+        preferred,
+        runtime,
+        youtube_health,
+    )
+    record["match"] = matched
+    record["match_details"] = match_details
+    record["reasons"] = reasons
+    if matched is None:
+        record.update({
+            "state": "not_running",
+            "completed": True,
+            "message": "Agent 在线，但当前没有运行中的推流，未执行参数重启",
+        })
+        return record
+    if matched:
+        record.update({
+            "state": "healthy",
+            "completed": True,
+            "message": "当前负载与推流参数匹配，无需调整",
+        })
+        return record
+
+    if str(stream_config.get("adaptive_mode") or "auto").lower() == "off":
+        record.update({
+            "state": "manual_mode",
+            "completed": True,
+            "message": "检测到参数不匹配，但 Agent 自适应调参已关闭，未强制重启",
+        })
+        return record
+    if str(stream_config.get("stream_output_mode") or "").lower() != "youtube_api":
+        record.update({
+            "state": "manual_mode",
+            "completed": True,
+            "message": "检测到参数不匹配，但当前不是 YouTube API 推流，未使用缺失的明文推流密钥强制重启",
+        })
+        return record
+
+    profile = upgrade_postcheck_profile(stream_config)
+    state = load_youtube_autotune_state()
+    runtime_entry = (
+        (state.get("entries") or {}).get(
+            f"{node_id}:{profile.get('id')}:{stream_config.get('youtube_stream_id')}"
+        )
+        or {}
+    )
+    candidate = dict(preferred) if match_details.get("preferred_valid") else dict(recommendation)
+    if runtime.get("classification") in {"encoder_overloaded", "network_starved"}:
+        candidate, _, decisions = youtube_autotune_apply_runtime(
+            {"analysis": {}},
+            candidate,
+            status,
+            stream_config,
+            runtime_entry,
+            str(stream_config.get("motion_level") or "medium"),
+            now=time.time(),
+            stable_required_seconds=0,
+            cooldown_seconds=0,
+        )
+        reasons.extend(decisions)
+    diff = youtube_autotune_payload_diff(stream_config, candidate, profile)
+    if not diff:
+        record.update({
+            "state": "deferred",
+            "completed": True,
+            "message": "检测到不匹配，但现有推荐逻辑没有产生可执行的安全调整",
+        })
+        return record
+    remaining, _ = upgrade_postcheck_cooldown_remaining(node, stream_config, now=time.time())
+    if remaining > 0:
+        record.update({
+            "state": "cooldown",
+            "completed": True,
+            "cooldown_remaining_seconds": remaining,
+            "message": f"现有自动调参冷却中，剩余约 {remaining} 秒，暂不频繁重启推流",
+        })
+        return record
+
+    payload = dict(stream_config)
+    payload.update(diff)
+    payload["stream_key"] = ""
+    payload = issue_policy(payload, reason="upgrade-postcheck")
+    adjust_result = post_node_json(node, "/api/start-stream", payload, timeout=60)
+    record["actions"].append({
+        "action": "restart_stream",
+        "changes": youtube_autotune_parameter_snapshot(diff),
+        "result": redacted_stream_result(adjust_result),
+    })
+    if not adjust_result.get("ok"):
+        message = str(adjust_result.get("message") or "推流参数调整失败")[:500]
+        record.update({"state": "adjustment_failed", "completed": True, "error": message, "message": message})
+        return record
+    verified = request_node_json(node, "/api/status", timeout=12)
+    verified_config = verified.get("stream_config") if isinstance(verified.get("stream_config"), dict) else {}
+    record["verified_stream_config"] = upgrade_postcheck_config_snapshot(verified_config)
+    record.update({
+        "state": "adjusted",
+        "completed": True,
+        "message": "已按当前负载和 YouTube 基准调整推流参数，并完成 Agent 状态复核"
+        if verified.get("ok")
+        else "推流参数已提交调整，但调整后的 Agent 复核失败",
+    })
+    if not verified.get("ok"):
+        record["error"] = str(verified.get("message") or "调整后 Agent 状态复核失败")[:500]
+    return record
+
+
+def upgrade_postcheck_hub_ready(batch: dict[str, Any]) -> tuple[bool, str]:
+    target_version = normalize_target_version(batch.get("target_version")) or ""
+    hub = batch.get("hub") if isinstance(batch.get("hub"), dict) else {}
+    upgrade_status = load_upgrade_status()
+    unit = str(hub.get("unit") or "").strip()
+    status_unit = str(upgrade_status.get("unit") or "").strip()
+    status_state = str(upgrade_status.get("state") or "").lower()
+    if unit and status_unit == unit and status_state == "failed":
+        return False, str(upgrade_status.get("message") or "Hub 升级任务失败")[:500]
+    actual_version = local_git_version()
+    if target_version and actual_version.lower() != target_version.lower():
+        return False, f"Hub 当前版本 {actual_version or '未识别'}，等待目标版本 {target_version}"
+    if unit and status_unit == unit and status_state in {"pending", "running"}:
+        return False, "Hub 升级任务仍在执行或服务正在重启"
+    return True, "Hub 已恢复并完成版本验证"
+
+
+def run_upgrade_postcheck(batch_id: str) -> None:
+    if not UPGRADE_POSTCHECK_LOCK.acquire(blocking=False):
+        return
+    try:
+        batch = load_upgrade_batch_status()
+        if str(batch.get("batch_id") or "") != str(batch_id):
+            return
+        postcheck = batch.get("postcheck") if isinstance(batch.get("postcheck"), dict) else {}
+        if str(postcheck.get("state") or "").lower() in {"completed", "partial", "failed"}:
+            return
+        started_at = time.time()
+        update_upgrade_batch_status(
+            batch_id,
+            state="postcheck",
+            message="Hub 已升级完成，正在后台体检所有 Agent",
+        )
+        update_upgrade_batch_postcheck(
+            batch_id,
+            version=1,
+            state="running",
+            started_at=started_at,
+            attempts=0,
+            message="正在等待所有 Agent 升级服务恢复",
+        )
+        while time.time() - started_at < UPGRADE_POSTCHECK_TIMEOUT_SECONDS:
+            batch = load_upgrade_batch_status()
+            if str(batch.get("batch_id") or "") != str(batch_id):
+                return
+            ready, hub_message = upgrade_postcheck_hub_ready(batch)
+            if not ready:
+                update_upgrade_batch_postcheck(
+                    batch_id,
+                    attempts=int((batch.get("postcheck") or {}).get("attempts") or 0) + 1,
+                    message=hub_message,
+                )
+                time.sleep(UPGRADE_POSTCHECK_INTERVAL_SECONDS)
+                continue
+
+            nodes_by_id = {
+                str(node.get("id") or ""): node
+                for node in upgradeable_agent_nodes()
+                if str(node.get("id") or "")
+            }
+            agent_items = list(batch.get("agents") or [])
+            pending_items = [
+                item for item in agent_items
+                if str(item.get("state") or "").lower() != "failed"
+            ]
+            postcheck_agents: list[dict[str, Any]] = []
+            workers = min(AGENT_STATUS_REFRESH_MAX_WORKERS, max(1, len(pending_items)))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="upgrade-postcheck") as executor:
+                futures = {
+                    executor.submit(
+                        upgrade_postcheck_agent,
+                        nodes_by_id.get(str(item.get("node_id") or ""), {}),
+                        item,
+                        normalize_target_version(batch.get("target_version")) or "",
+                    ): item
+                    for item in pending_items
+                    if str(item.get("node_id") or "") in nodes_by_id
+                }
+                for future in as_completed(futures):
+                    item = futures[future]
+                    try:
+                        record = future.result()
+                    except Exception as exc:
+                        record = {
+                            "node_id": str(item.get("node_id") or ""),
+                            "node_name": str(item.get("node_name") or item.get("node_id") or ""),
+                            "state": "failed",
+                            "completed": False,
+                            "message": str(exc)[:500],
+                            "error": str(exc)[:500],
+                        }
+                    postcheck_agents.append(record)
+                    update_upgrade_batch_postcheck_agent(
+                        batch_id,
+                        str(record.get("node_id") or ""),
+                        **{key: value for key, value in record.items() if key != "node_id"},
+                    )
+
+            for item in agent_items:
+                if str(item.get("state") or "").lower() == "failed":
+                    record = {
+                        "node_id": str(item.get("node_id") or ""),
+                        "node_name": str(item.get("node_name") or item.get("node_id") or ""),
+                        "state": "upgrade_failed",
+                        "completed": True,
+                        "message": str(item.get("message") or "Agent 升级任务失败")[:500],
+                        "error": str(item.get("message") or "Agent 升级任务失败")[:500],
+                    }
+                    update_upgrade_batch_postcheck_agent(
+                        batch_id,
+                        str(record.get("node_id") or ""),
+                        **{key: value for key, value in record.items() if key != "node_id"},
+                    )
+                    postcheck_agents.append(record)
+                elif str(item.get("node_id") or "") not in nodes_by_id:
+                    record = {
+                        "node_id": str(item.get("node_id") or ""),
+                        "node_name": str(item.get("node_name") or item.get("node_id") or ""),
+                        "state": "missing",
+                        "completed": True,
+                        "message": "升级目标 Agent 已不在当前节点配置中",
+                        "error": "node not found",
+                    }
+                    update_upgrade_batch_postcheck_agent(
+                        batch_id,
+                        str(record.get("node_id") or ""),
+                        **{key: value for key, value in record.items() if key != "node_id"},
+                    )
+                    postcheck_agents.append(record)
+
+            latest = load_upgrade_batch_status()
+            latest_postcheck = latest.get("postcheck") if isinstance(latest.get("postcheck"), dict) else {}
+            final_agents = list(latest_postcheck.get("agents") or postcheck_agents)
+            incomplete = [
+                item for item in final_agents
+                if not bool(item.get("completed"))
+            ]
+            if not incomplete:
+                ok = all(str(item.get("state") or "") in {"healthy", "adjusted", "not_running"} for item in final_agents)
+                final_state = "completed" if ok else "partial"
+                message = "所有 Agent 已完成升级后体检" if ok else "Agent 已完成体检，但存在需要人工关注的状态"
+                update_upgrade_batch_status(
+                    batch_id,
+                    state=final_state,
+                    message=message,
+                )
+                update_upgrade_batch_postcheck(
+                    batch_id,
+                    state=final_state,
+                    completed_at=time.time(),
+                    attempts=int(latest_postcheck.get("attempts") or 0) + 1,
+                    hub={"ok": True, "version": local_git_version(), "message": hub_message},
+                    message=message,
+                    ok=ok,
+                )
+                with suppress(Exception):
+                    youtube_autotune_tick(force=True)
+                return
+            update_upgrade_batch_postcheck(
+                batch_id,
+                state="running",
+                attempts=int(latest_postcheck.get("attempts") or 0) + 1,
+                hub={"ok": True, "version": local_git_version(), "message": hub_message},
+                message=f"仍有 {len(incomplete)} 台 Agent 等待完成升级或体检",
+            )
+            time.sleep(UPGRADE_POSTCHECK_INTERVAL_SECONDS)
+
+        final = load_upgrade_batch_status()
+        postcheck = final.get("postcheck") if isinstance(final.get("postcheck"), dict) else {}
+        agents = list(postcheck.get("agents") or [])
+        for item in agents:
+            if not item.get("completed"):
+                item["state"] = "timeout"
+                item["message"] = "超过体检等待时间，未能确认 Agent 升级或健康状态"
+                item["error"] = item.get("message")
+        update_upgrade_batch_postcheck(
+            batch_id,
+            state="partial",
+            completed_at=time.time(),
+            agents=agents,
+            ok=False,
+            message="升级后体检超时，报告中列出未完成 Agent",
+        )
+        update_upgrade_batch_status(
+            batch_id,
+            state="partial",
+            message="升级后体检超时，报告中列出未完成 Agent",
+        )
+    finally:
+        UPGRADE_POSTCHECK_LOCK.release()
+
+
+def post_upgrade_audit_worker() -> None:
+    """Resume the durable post-upgrade audit after the Hub service restarts."""
+    for _ in range(max(1, UPGRADE_POSTCHECK_TIMEOUT_SECONDS // UPGRADE_POSTCHECK_INTERVAL_SECONDS)):
+        batch = load_upgrade_batch_status()
+        batch_id = str(batch.get("batch_id") or "")
+        postcheck = batch.get("postcheck") if isinstance(batch.get("postcheck"), dict) else {}
+        if not batch_id or str(postcheck.get("state") or "").lower() in {"completed", "partial", "failed"}:
+            return
+        batch_state = str(batch.get("state") or "").lower()
+        if batch_state in {"scheduled", "partial", "postcheck"}:
+            run_upgrade_postcheck(batch_id)
+            return
+        time.sleep(UPGRADE_POSTCHECK_INTERVAL_SECONDS)
+
+
 def upgradeable_agent_nodes(nodes: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Return configured, enabled Agent nodes; Hub-only records are excluded."""
     result: list[dict[str, Any]] = []
@@ -1618,6 +2322,11 @@ def run_hub_agent_upgrade_batch(
                 "message": "Hub 升级任务已提交",
             },
         )
+        update_upgrade_batch_postcheck(
+            batch_id,
+            state="pending",
+            message="等待 Hub 升级完成后开始 Agent 体检",
+        )
     except Exception as exc:
         update_upgrade_batch_status(
             batch_id,
@@ -1629,6 +2338,13 @@ def run_hub_agent_upgrade_batch(
                 "unit": "",
                 "message": str(exc)[:500],
             },
+        )
+        update_upgrade_batch_postcheck(
+            batch_id,
+            state="failed",
+            completed_at=time.time(),
+            ok=False,
+            message=f"Hub 升级任务提交失败，未执行升级后体检：{str(exc)[:500]}",
         )
 
 
@@ -1667,6 +2383,21 @@ def schedule_hub_agent_upgrade_batch(target_version: str = "") -> dict[str, Any]
                 "accepted": False,
                 "unit": "",
                 "message": "等待提交 Hub 升级任务",
+            },
+            "postcheck": {
+                "version": 1,
+                "state": "pending",
+                "message": "等待 Hub 升级完成后开始 Agent 体检",
+                "agents": [
+                    {
+                        "node_id": str(node.get("id") or ""),
+                        "node_name": str(node.get("name") or node.get("id") or ""),
+                        "state": "pending",
+                        "completed": False,
+                        "message": "等待升级完成后体检",
+                    }
+                    for node in agent_nodes
+                ],
             },
             "agents": [
                 {
@@ -3120,6 +3851,13 @@ HTML = r"""
     .operation-progress-step.done { border-color: var(--accent); color: #b7f7dc; }
     .operation-progress-step.fail { border-color: var(--danger); color: #fecdd3; }
     .operation-progress-message { min-height: 42px; margin: 8px 0 0; color: var(--muted); line-height: 1.45; white-space: pre-wrap; }
+    .operation-progress-agents { display: grid; gap: 6px; max-height: 220px; overflow: auto; margin-top: 10px; }
+    .operation-progress-agent { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; background: rgba(7,18,14,.42); }
+    .operation-progress-agent strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .operation-progress-agent small { grid-column: 1 / -1; color: var(--muted); line-height: 1.35; }
+    .operation-progress-agent.ok { border-color: rgba(54,211,153,.55); }
+    .operation-progress-agent.fail { border-color: rgba(251,113,133,.7); }
+    .operation-progress-agent.wait { border-color: rgba(244,190,73,.55); }
     .operation-progress-modal.failed .operation-progress-fill { background: var(--danger); }
     .operation-progress-modal.done .operation-progress-fill { background: var(--accent); }
     .control-transfer-box { display: grid; gap: 8px; margin-top: 10px; padding: 10px; border: 1px dashed var(--line); border-radius: 10px; background: rgba(7,18,14,.42); }
@@ -3896,6 +4634,7 @@ HTML = r"""
       </div>
       <ol class="operation-progress-steps" id="operationProgressSteps"></ol>
       <p class="operation-progress-message" id="operationProgressMessage"></p>
+      <div class="operation-progress-agents" id="operationProgressAgents"></div>
     </div>
   </div>
 
@@ -4125,6 +4864,7 @@ HTML = r"""
       operationProgressStage: document.getElementById("operationProgressStage"),
       operationProgressSteps: document.getElementById("operationProgressSteps"),
       operationProgressMessage: document.getElementById("operationProgressMessage"),
+      operationProgressAgents: document.getElementById("operationProgressAgents"),
       choiceModal: document.getElementById("choiceModal"),
       choiceIcon: document.getElementById("choiceIcon"),
       choiceTitle: document.getElementById("choiceTitle"),
@@ -4260,6 +5000,43 @@ HTML = r"""
     const PROFILE_FILTER_VISIBLE_SLOTS = 6;
     const MONITOR_DISCLOSURE_STORAGE_KEY = "streamHub.monitorSections";
     const AGENT_DISCOVERY_DISCLOSURE_STORAGE_KEY = "streamHub.agentDiscoveryOpen";
+    const ACTIVE_UPGRADE_OPERATION_STORAGE_KEY = "streamHub.activeUpgradeOperation";
+    const UPGRADE_REPORT_PENDING_STORAGE_KEY = "streamHub.upgradeReportPending";
+
+    function readStoredUpgradeOperation() {
+      try {
+        const value = JSON.parse(localStorage.getItem(ACTIVE_UPGRADE_OPERATION_STORAGE_KEY) || "null");
+        return value && typeof value === "object" ? value : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function storeUpgradeOperation(operation) {
+      if (!operation?.batchId) return;
+      try {
+        localStorage.setItem(ACTIVE_UPGRADE_OPERATION_STORAGE_KEY, JSON.stringify({
+          batchId: String(operation.batchId),
+          targetVersion: String(operation.targetVersion || ""),
+          startedAt: Number(operation.startedAt || Date.now()),
+          agentTargets: Array.isArray(operation.agentTargets) ? operation.agentTargets : [],
+        }));
+      } catch (_) {}
+    }
+
+    function markUpgradeReportPending(pending) {
+      try {
+        if (pending) localStorage.setItem(UPGRADE_REPORT_PENDING_STORAGE_KEY, "1");
+        else localStorage.removeItem(UPGRADE_REPORT_PENDING_STORAGE_KEY);
+      } catch (_) {}
+    }
+
+    function clearStoredUpgradeOperation() {
+      try {
+        localStorage.removeItem(ACTIVE_UPGRADE_OPERATION_STORAGE_KEY);
+        localStorage.removeItem(UPGRADE_REPORT_PENDING_STORAGE_KEY);
+      } catch (_) {}
+    }
 
     function monitorDisclosureState() {
       try {
@@ -6588,7 +7365,7 @@ HTML = r"""
     }
 
     function operationProgressSteps(operation) {
-      if (operation.kind === "bulk-upgrade") return ["提交联动任务", "并行更新 Agent", "更新 Hub", "验证全部版本", "完成"];
+      if (operation.kind === "bulk-upgrade") return ["提交联动任务", "并行更新 Agent", "更新 Hub", "升级后体检", "完成"];
       if (operation.kind === "upgrade") return ["提交升级", "拉取代码", "重启服务", "验证版本", "完成"];
       if (operation.action === "deactivate") return ["提交任务", "停止旧角色", "清理元数据", "验证状态", "完成"];
       return ["提交任务", "清理旧角色", "等待新服务", "验证角色", "完成"];
@@ -6609,6 +7386,48 @@ HTML = r"""
       }).join("");
     }
 
+    function renderOperationProgressAgents(items = []) {
+      if (!refs.operationProgressAgents) return;
+      if (!Array.isArray(items) || !items.length) {
+        refs.operationProgressAgents.innerHTML = "";
+        return;
+      }
+      const labels = {
+        healthy: "体检通过",
+        adjusted: "已调整并复核",
+        not_running: "在线，当前未推流",
+        waiting_upgrade: "等待 Agent 升级",
+        offline: "Agent 暂时离线",
+        upgrade_failed: "Agent 升级失败",
+        adjustment_failed: "参数调整失败",
+        manual_mode: "需人工处理",
+        cooldown: "冷却中，暂不重启",
+        deferred: "已延后调整",
+        recommendation_failed: "推荐读取失败",
+        timeout: "体检超时",
+        missing: "节点已不存在",
+      };
+      refs.operationProgressAgents.innerHTML = items.map((item) => {
+        const state = String(item.audit?.state || item.state || "").toLowerCase();
+        const failed = ["upgrade_failed", "adjustment_failed", "timeout", "missing", "failed"].includes(state);
+        const done = Boolean(item.done) || ["healthy", "adjusted", "not_running"].includes(state);
+        const className = failed ? "fail" : done ? "ok" : "wait";
+        const label = labels[state] || (item.done ? "升级完成，等待体检" : "处理中");
+        const audit = item.audit || {};
+        const resolution = audit.stream_source?.width && audit.stream_source?.height
+          ? `${audit.stream_source.width}x${audit.stream_source.height} 源`
+          : "";
+        const output = audit.stream_config?.resolution ? `输出 ${audit.stream_config.resolution}` : "";
+        const load = audit.cpu_percent != null ? `CPU ${Number(audit.cpu_percent).toFixed(0)}%` : "";
+        const detail = [label, resolution, output, load, audit.message || item.message || ""].filter(Boolean).join(" · ");
+        return `<div class="operation-progress-agent ${className}">
+          <strong>${escapeHtml(item.name || item.nodeId || "Agent")}</strong>
+          <span>${escapeHtml(label)}</span>
+          <small>${escapeHtml(detail)}</small>
+        </div>`;
+      }).join("");
+    }
+
     function setOperationProgress(patch = {}) {
       if (!activeOperationProgress) return;
       Object.assign(activeOperationProgress, patch);
@@ -6624,12 +7443,14 @@ HTML = r"""
       refs.operationProgressModal.querySelector(".operation-progress-track")
         ?.setAttribute("aria-valuenow", String(Math.round(percent)));
       renderOperationProgressSteps();
+      renderOperationProgressAgents(operation.agentItems || []);
+      if (operation.kind === "bulk-upgrade") storeUpgradeOperation(operation);
     }
 
     function openOperationProgress(operation) {
       if (!refs.operationProgressModal) return;
       refs.operationProgressTitle.textContent = operation.title || "操作进行中";
-      refs.operationProgressClose.disabled = true;
+      refs.operationProgressClose.disabled = false;
       refs.operationProgressModal.classList.remove("done", "failed");
       refs.operationProgressModal.classList.add("open");
       refs.operationProgressModal.setAttribute("aria-hidden", "false");
@@ -6643,6 +7464,9 @@ HTML = r"""
 
     function finishOperationProgress(ok, message) {
       if (!activeOperationProgress) return;
+      if (activeOperationProgress.kind === "bulk-upgrade" && activeOperationProgress.batchId) {
+        markUpgradeReportPending(true);
+      }
       setOperationProgress({
         percent: ok ? 100 : activeOperationProgress.percent,
         step: ok ? 4 : activeOperationProgress.step,
@@ -6659,15 +7483,17 @@ HTML = r"""
     }
 
     function closeOperationProgress() {
-      if (!refs.operationProgressModal || !activeOperationProgress?.terminal) return;
-      if (operationProgressTimer) {
+      if (!refs.operationProgressModal || !activeOperationProgress) return;
+      if (activeOperationProgress.terminal && operationProgressTimer) {
         window.clearTimeout(operationProgressTimer);
         operationProgressTimer = null;
       }
-      activeOperationProgress = null;
       refs.operationProgressModal.classList.remove("open", "done", "failed");
       refs.operationProgressModal.setAttribute("aria-hidden", "true");
-      refs.operationProgressClose.disabled = true;
+      refs.operationProgressClose.disabled = false;
+      if (activeOperationProgress.terminal && activeOperationProgress.kind !== "bulk-upgrade") {
+        activeOperationProgress = null;
+      }
     }
 
     function beginOperationProgress({ kind, action = "", role = "", nodeId = "", nodeName = "", local = false, targetVersion = "", agentTargets = [] }) {
@@ -6697,6 +7523,9 @@ HTML = r"""
         steps: operationProgressSteps({ kind, action }),
       };
       openOperationProgress(activeOperationProgress);
+      if (kind === "bulk-upgrade" && activeOperationProgress.batchId) {
+        storeUpgradeOperation(activeOperationProgress);
+      }
       return activeOperationProgress;
     }
 
@@ -6724,10 +7553,16 @@ HTML = r"""
     function bulkUpgradeSnapshot(operation, batch, snapshot, localInfo) {
       const targetVersion = operationVersion(operation.targetVersion || batch?.target_version || "");
       const nodesById = new Map((snapshot || []).map((item) => [String(item.id || ""), item]));
+      const postcheck = batch?.postcheck || {};
+      const postcheckState = String(postcheck.state || "").toLowerCase();
+      const hasPostcheck = Boolean(Object.keys(postcheck).length);
+      const postcheckTerminal = ["completed", "partial", "failed"].includes(postcheckState);
+      const postcheckById = new Map((postcheck.agents || []).map((item) => [String(item.node_id || ""), item]));
       const agentItems = (batch?.agents || []).map((item) => {
         const nodeId = String(item.node_id || "");
         const node = nodesById.get(nodeId);
         const info = node?.roles?.agent || {};
+        const audit = postcheckById.get(nodeId) || {};
         const upgradeStatus = info.upgrade_status || {};
         const statusUpdatedAt = Number(upgradeStatus.updated_at || 0) * 1000;
         const submitFailed = String(item.state || "").toLowerCase() === "failed";
@@ -6735,20 +7570,28 @@ HTML = r"""
           && String(upgradeStatus.unit || "") === String(item.unit || "");
         const recentUpgradeFailed = String(upgradeStatus.state || "").toLowerCase() === "failed"
           && (sameUpgrade || (!upgradeStatus.unit && (!statusUpdatedAt || statusUpdatedAt >= operation.startedAt - 5000)));
-        const failed = submitFailed || recentUpgradeFailed;
+        const auditState = String(audit.state || "").toLowerCase();
+        const auditFailed = ["upgrade_failed", "adjustment_failed", "missing", "timeout", "failed"].includes(auditState);
+        const failed = submitFailed || recentUpgradeFailed || auditFailed;
         const actualVersion = operationVersion(info.version);
-        const done = !failed
+        const upgradeDone = !failed
           && Boolean(info.enabled)
           && (!targetVersion || actualVersion === targetVersion);
+        const auditDone = !hasPostcheck
+          || Boolean(audit.completed)
+          || ["healthy", "adjusted", "not_running", "manual_mode", "cooldown", "deferred", "recommendation_failed"].includes(auditState);
+        const done = upgradeDone && auditDone && (!hasPostcheck || postcheckTerminal);
         return {
           nodeId,
           name: item.node_name || node?.name || nodeId,
           done,
           failed,
           pending: !done && !failed,
-          message: recentUpgradeFailed
+          audit,
+          message: audit.message
+            || (recentUpgradeFailed
             ? upgradeStatus.message || "Agent 后台升级失败"
-            : item.message || "",
+            : item.message || ""),
         };
       });
       const hubStatus = localInfo?.upgrade_status || {};
@@ -6760,17 +7603,33 @@ HTML = r"""
       const completedAgents = agentItems.filter((item) => item.done).length;
       const failedAgents = agentItems.filter((item) => item.failed);
       const waitingAgents = agentItems.filter((item) => item.pending);
-      const terminal = (hubFailed || hubDone) && waitingAgents.length === 0;
-      const ok = hubDone && failedAgents.length === 0 && waitingAgents.length === 0;
+      const terminal = (hubFailed || hubDone) && waitingAgents.length === 0
+        && (!hasPostcheck || postcheckTerminal);
+      const postcheckFailed = hasPostcheck && postcheckTerminal && postcheckState !== "completed";
+      const ok = hubDone
+        && failedAgents.length === 0
+        && waitingAgents.length === 0
+        && !postcheckFailed;
       const lines = [
         `Hub：${hubDone ? "更新完成" : hubFailed ? "更新失败" : "等待验证"}`,
-        `Agent：${completedAgents}/${agentItems.length} 更新完成`,
+        `Agent：${completedAgents}/${agentItems.length} 升级及体检完成`,
       ];
+      if (hasPostcheck && !postcheckTerminal) {
+        lines.push(`升级后体检：${postcheck.message || "正在检查所有 Agent 的负载、源分辨率和推流参数"}`);
+      }
+      if (hasPostcheck && postcheckTerminal) {
+        lines.push(`升级后体检：${postcheckState === "completed" ? "全部通过" : "存在未完成或需人工关注的 Agent"}`);
+      }
       if (failedAgents.length) {
         lines.push(
           `未完成 Agent：${failedAgents.map((item) => `${item.name}${item.message ? `（${item.message}）` : ""}`).join("、")}`,
         );
       }
+      const auditSummary = agentItems
+        .filter((item) => item.audit?.message && !item.failed)
+        .map((item) => `${item.name}：${item.audit.message}`)
+        .slice(0, 10);
+      if (auditSummary.length) lines.push(...auditSummary);
       if (waitingAgents.length) {
         lines.push(`等待中：${waitingAgents.map((item) => item.name).join("、")}`);
       }
@@ -6791,6 +7650,7 @@ HTML = r"""
     async function showBulkUpgradeResult(operation, result) {
       if (operation.resultDialogShown) return;
       operation.resultDialogShown = true;
+      markUpgradeReportPending(true);
       await showChoiceDialog({
         title: result.ok ? "Hub 与 Agent 更新完成" : "联动更新未全部完成",
         subtitle: result.ok
@@ -6800,6 +7660,8 @@ HTML = r"""
         message: result.message,
         choices: [{ label: "知道了", value: "ok", className: "primary" }],
       });
+      markUpgradeReportPending(false);
+      clearStoredUpgradeOperation();
     }
 
     async function refreshOperationNodes() {
@@ -6810,6 +7672,32 @@ HTML = r"""
       if (syncAgentOrder(nodes)) saveAgentOrder(agentOrder);
       renderNodes();
       return nodes;
+    }
+
+    async function restoreStoredUpgradeOperation() {
+      const stored = readStoredUpgradeOperation();
+      if (!stored?.batchId) return;
+      const operation = beginOperationProgress({
+        kind: "bulk-upgrade",
+        action: "upgrade",
+        role: "hub",
+        nodeId: "__local_hub__",
+        nodeName: "当前控制 Hub",
+        local: true,
+        targetVersion: operationVersion(stored.targetVersion || ""),
+        agentTargets: Array.isArray(stored.agentTargets) ? stored.agentTargets : [],
+      });
+      operation.batchId = String(stored.batchId);
+      operation.startedAt = Date.now();
+      operation.message = "正在恢复后台升级批次并读取升级报告。";
+      storeUpgradeOperation(operation);
+      setOperationProgress({
+        percent: 18,
+        step: 3,
+        stage: "恢复升级批次",
+        message: "页面已重新打开，正在读取 Hub + Agent 升级后的体检结果。",
+      });
+      startOperationProgressPolling(operation);
     }
 
     async function pollOperationProgress() {
@@ -6845,11 +7733,19 @@ HTML = r"""
           renderNodes();
           info = localRoleStatus?.roles?.hub || {};
           const result = bulkUpgradeSnapshot(operation, batch, snapshot, info);
+          operation.agentItems = result.agentItems;
           operation.targetVersion = result.targetVersion || operation.targetVersion;
           if (result.terminal) {
             finishOperationProgress(result.ok, result.message);
             await showBulkUpgradeResult(operation, result);
             await refreshAll().catch(() => null);
+          } else if (String(batch.postcheck?.state || "").toLowerCase() === "running") {
+            setOperationProgress({
+              percent: 90,
+              step: 3,
+              stage: "升级后体检",
+              message: result.message,
+            });
           } else if (result.failedAgents.length) {
             setOperationProgress({
               percent: 84,
@@ -7633,6 +8529,7 @@ HTML = r"""
         operation.targetVersion = operationVersion(data.result?.target_version || operation.targetVersion);
         operation.batchId = String(data.result?.batch_id || "");
         operation.agentTargets = Array.isArray(data.result?.agent_targets) ? data.result.agent_targets : [];
+        storeUpgradeOperation(operation);
         setOperationProgress({
           percent: 18,
           step: 0,
@@ -10046,7 +10943,12 @@ HTML = r"""
     });
     initializeAgentDiscoveryDisclosure();
     initializeDashboardLayout();
-    loadYouTubeProfiles().catch(() => null).finally(() => refreshAll());
+    loadYouTubeProfiles()
+      .catch(() => null)
+      .finally(async () => {
+        await refreshAll();
+        await restoreStoredUpgradeOperation();
+      });
     checkDailyGithubUpdates();
     window.setInterval(refreshRunningAgentParameters, AGENT_STREAM_REFRESH_MS);
     document.addEventListener("visibilitychange", () => {
@@ -15963,6 +16865,7 @@ def main() -> None:
     threading.Thread(target=youtube_autotune_loop, name="youtube-autotune", daemon=True).start()
     threading.Thread(target=offline_node_retention_loop, name="offline-node-retention", daemon=True).start()
     threading.Thread(target=agent_status_cache_loop, name="agent-status-cache-loop", daemon=True).start()
+    threading.Thread(target=post_upgrade_audit_worker, name="upgrade-postcheck", daemon=True).start()
     host = os.environ.get("STREAM_HUB_HOST", "127.0.0.1")
     try:
         from waitress import serve

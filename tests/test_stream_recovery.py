@@ -318,6 +318,36 @@ class StreamRecoveryTests(unittest.TestCase):
         self.assertNotIn("private-stream-key", response.get_data(as_text=True))
         self.assertNotIn("private-stream-name", response.get_data(as_text=True))
 
+    def test_status_returns_persisted_source_metadata(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self.recovery_paths(headless_agent, tmp)
+            with patches[0], patches[1], patches[2], patches[3], patch.object(
+                headless_agent, "CONTROL_TOKEN", ""
+            ), patch.object(headless_agent, "stream_process_owned", return_value=False), patch.object(
+                headless_agent, "ffmpeg_processes", return_value=[]
+            ), patch.object(headless_agent, "discover_public_origin", return_value=""):
+                headless_agent.save_state({
+                    "stream_config": {"video_path": "video.mp4", "resolution": "1920x1080"},
+                    "stream_source": {
+                        "video_path": "video.mp4",
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30,
+                        "video_codec": "h264",
+                        "audio_codec": "aac",
+                        "available": True,
+                    },
+                })
+                response = headless_agent.APP.test_client().get("/api/status")
+
+        self.assertEqual(response.status_code, 200)
+        source = response.get_json()["stream_source"]
+        self.assertEqual(source["width"], 1920)
+        self.assertEqual(source["height"], 1080)
+        self.assertEqual(source["video_codec"], "h264")
+
     def test_stop_process_refuses_pid_not_owned_by_agent(self):
         from stream_control_hub import headless_agent
 

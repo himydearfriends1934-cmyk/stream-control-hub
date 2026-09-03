@@ -1443,6 +1443,60 @@ def probe_media(video_path: Path) -> dict[str, Any]:
     return metadata
 
 
+def stream_source_metadata(state: dict[str, Any]) -> dict[str, Any]:
+    """Return durable source metadata, refreshing it when the media file changed."""
+    stream_config = state.get("stream_config") or {}
+    raw_video_path = str(stream_config.get("video_path") or "").strip()
+    if not raw_video_path:
+        return {}
+    try:
+        video_path = resolve_media_path(raw_video_path)
+        stat = video_path.stat()
+    except Exception as exc:
+        previous = state.get("stream_source")
+        if isinstance(previous, dict) and previous:
+            return {
+                **previous,
+                "video_path": raw_video_path,
+                "available": False,
+                "error": str(exc)[:500],
+            }
+        return {
+            "video_path": raw_video_path,
+            "available": False,
+            "error": str(exc)[:500],
+        }
+
+    previous = state.get("stream_source")
+    if (
+        isinstance(previous, dict)
+        and str(previous.get("video_path") or "") == str(video_path)
+        and int(previous.get("file_size") or -1) == int(stat.st_size)
+        and float(previous.get("file_mtime") or -1) == float(stat.st_mtime)
+    ):
+        return {**previous, "available": True, "error": ""}
+
+    try:
+        metadata = probe_media(video_path)
+    except Exception as exc:
+        return {
+            "video_path": str(video_path),
+            "file_size": stat.st_size,
+            "file_mtime": stat.st_mtime,
+            "available": False,
+            "error": str(exc)[:500],
+        }
+    return {
+        **metadata,
+        "video_path": str(video_path),
+        "file_size": stat.st_size,
+        "file_mtime": stat.st_mtime,
+        "checked_at": time.time(),
+        "available": True,
+        "error": "",
+    }
+
+
 def _motion_frame_metrics(frames: list[bytes]) -> list[dict[str, Any]]:
     metrics: list[dict[str, Any]] = []
     for previous, current in zip(frames, frames[1:]):
@@ -1649,12 +1703,20 @@ def cached_youtube_ingestion_url(stream_id: str) -> str:
     return value if value.lower().startswith(("rtmp://", "rtmps://")) else ""
 
 
-def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -> list[str]:
+def ffmpeg_command(
+    payload: dict[str, Any],
+    video_path: Path,
+    output_url: str,
+    *,
+    source_out: dict[str, Any] | None = None,
+) -> list[str]:
     if not shutil.which(FFMPEG_BIN):
         raise RuntimeError(f"{FFMPEG_BIN} is not installed")
     payload = normalize_stream_payload(payload, output_url)
     if bool(payload.get("copy_mode")):
         source = probe_media(video_path)
+        if source_out is not None:
+            source_out.update(source)
         if not source_copy_compatible(source):
             raise ValueError("copy mode requires H.264 video with RTMP-compatible AAC/MP3 audio and a supported pixel format")
         return [
@@ -1693,6 +1755,8 @@ def ffmpeg_command(payload: dict[str, Any], video_path: Path, output_url: str) -
     resolution = f"{width}x{height}"
     preset = str(payload.get("preset") or "veryfast").strip() or "veryfast"
     source = probe_media(video_path)
+    if source_out is not None:
+        source_out.update(source)
     has_audio = bool(source.get("has_audio"))
     command = [
         FFMPEG_BIN,
@@ -1790,7 +1854,8 @@ def launch_stream_process(
     output_url = resolved_output_url or stream_output_url(payload)
     payload = normalize_stream_payload(payload, output_url)
     video_path = resolve_media_path(str(payload.get("video_path") or ""))
-    command = ffmpeg_command(payload, video_path, output_url)
+    source_probe: dict[str, Any] = {}
+    command = ffmpeg_command(payload, video_path, output_url, source_out=source_probe)
     if persist_recovery:
         recovery_payload = dict(payload)
         if (
@@ -1837,8 +1902,26 @@ def launch_stream_process(
     finally:
         log_file.close()
 
-    now = time.time()
     state = load_state()
+    now = time.time()
+    source_metadata = dict(source_probe)
+    if source_metadata:
+        source_metadata.update({
+            "video_path": str(video_path),
+            "file_size": video_path.stat().st_size,
+            "file_mtime": video_path.stat().st_mtime,
+            "checked_at": now,
+            "available": True,
+            "error": "",
+        })
+    else:
+        source_metadata = stream_source_metadata(state)
+        if not source_metadata:
+            source_metadata = {
+                "video_path": str(video_path),
+                "available": False,
+                "error": "source metadata unavailable",
+            }
     auto_restart = dict(state.get("auto_restart") or {})
     if reason == "auto-recovery":
         consecutive_failures = int(auto_restart.get("consecutive_failures") or 0) + 1
@@ -1872,6 +1955,7 @@ def launch_stream_process(
     state["stream_config"]["stream_url"] = str(
         payload.get("stream_url") or "rtmps://a.rtmp.youtube.com/live2"
     ).strip().rstrip("/")
+    state["stream_source"] = source_metadata
     state["auto_restart"] = auto_restart
     state["last_started_at"] = auto_restart["last_started_at"]
     save_state(state)
@@ -2122,11 +2206,14 @@ def api_status():
     public_origin = configured_public_origin or discover_public_origin()
     cpu_percent = cpu_percent_sample()
     runtime = ffmpeg_runtime_status(state, processes, net, cpu_percent)
+    source_metadata = stream_source_metadata(state)
     with STREAM_LIFECYCLE_LOCK:
         latest_state = load_state()
         for key in ("last_net_sample", "last_stream_net_sample", "stream_egress_samples_kbps", "stream_egress_capacity_kbps"):
             if key in state:
                 latest_state[key] = state[key]
+        if source_metadata:
+            latest_state["stream_source"] = source_metadata
         save_state(latest_state)
         state = latest_state
     version_status = agent_version_status()
@@ -2196,6 +2283,7 @@ def api_status():
                 if key not in {"stream_key", "youtube_ingestion_url"}
             },
         },
+        "stream_source": source_metadata,
         "preferred_stream_config": stream_preferred_quality_config(
             state.get("preferred_stream_config") or {}
         ),
