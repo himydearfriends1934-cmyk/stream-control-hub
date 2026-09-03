@@ -2,6 +2,7 @@ import json
 import inspect
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -404,6 +405,156 @@ class AgentUpgradeTests(unittest.TestCase):
             nodes[1], "/api/upgrade", {"target_version": "def5678"}, timeout=30
         )
 
+    def test_bulk_upgrade_target_filter_skips_disabled_and_hub_only_nodes(self):
+        from stream_control_hub import app
+
+        nodes = [
+            {"id": "agent-ok", "base_url": "http://100.64.0.10:8787", "enabled": True},
+            {"id": "agent-disabled", "base_url": "http://100.64.0.11:8787", "enabled": False},
+            {"id": "agent-role-disabled", "base_url": "http://100.64.0.12:8787", "enabled": True, "role_hints": {"agent": {"enabled": False}}},
+            {"id": "hub-only", "hub_only": True, "hub_url": "http://100.64.0.13:8788", "enabled": True},
+            {"id": "hub-role-only", "role": "hub-only", "hub_url": "http://100.64.0.14:8788", "enabled": True},
+        ]
+
+        selected = app.upgradeable_agent_nodes(nodes)
+
+        self.assertEqual([node["id"] for node in selected], ["agent-ok"])
+
+    def test_bulk_upgrade_submits_agents_in_parallel_and_records_failure(self):
+        from stream_control_hub import app
+
+        nodes = [
+            {"id": "agent-a", "name": "Agent A", "base_url": "http://100.64.0.10:8787"},
+            {"id": "agent-b", "name": "Agent B", "base_url": "http://100.64.0.11:8787"},
+        ]
+        batch_id = "hub-agent-upgrade-test"
+        started = set()
+        started_lock = threading.Lock()
+        all_started = threading.Event()
+        hub_called = threading.Event()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            status_file = Path(tmp) / "upgrade-batch.json"
+            with patch.object(app, "UPGRADE_BATCH_STATUS_FILE", status_file), patch.object(
+                app, "AGENT_STATUS_REFRESH_MAX_WORKERS", 2
+            ):
+                app.save_upgrade_batch_status({
+                    "version": 1,
+                    "batch_id": batch_id,
+                    "state": "pending",
+                    "target_version": "def5678",
+                    "agents": [
+                        {
+                            "node_id": node["id"],
+                            "node_name": node["name"],
+                            "state": "pending",
+                            "accepted": False,
+                            "unit": "",
+                            "message": "pending",
+                            "status_code": 0,
+                        }
+                        for node in nodes
+                    ],
+                })
+
+                def fake_post(node, path, payload, *, timeout):
+                    self.assertEqual(path, "/api/upgrade")
+                    self.assertEqual(payload, {"target_version": "def5678"})
+                    self.assertEqual(timeout, 30)
+                    with started_lock:
+                        started.add(node["id"])
+                        if len(started) == 2:
+                            all_started.set()
+                    self.assertTrue(all_started.wait(2), "Agent upgrade submissions were not concurrent")
+                    if node["id"] == "agent-b":
+                        return {
+                            "ok": False,
+                            "status_code": 502,
+                            "message": "Agent B 无法连接",
+                        }
+                    return {
+                        "ok": True,
+                        "status_code": 202,
+                        "message": "Agent A 升级任务已提交",
+                        "result": {"unit": "agent-a-upgrade-1"},
+                    }
+
+                def fake_hub_upgrade(target_version):
+                    self.assertEqual(target_version, "def5678")
+                    self.assertTrue(all_started.is_set())
+                    hub_called.set()
+                    return {"unit": "hub-upgrade-1", "role": "hub"}
+
+                with patch.object(app, "post_node_json", side_effect=fake_post), patch.object(
+                    app, "schedule_hub_upgrade", side_effect=fake_hub_upgrade
+                ):
+                    app.run_hub_agent_upgrade_batch(batch_id, "def5678", nodes)
+
+                status = app.load_upgrade_batch_status()
+
+        self.assertEqual(started, {"agent-a", "agent-b"})
+        self.assertTrue(hub_called.is_set())
+        self.assertEqual(status["state"], "partial")
+        self.assertEqual(status["hub"]["state"], "scheduled")
+        by_id = {item["node_id"]: item for item in status["agents"]}
+        self.assertEqual(by_id["agent-a"]["state"], "scheduled")
+        self.assertEqual(by_id["agent-a"]["unit"], "agent-a-upgrade-1")
+        self.assertEqual(by_id["agent-b"]["state"], "failed")
+        self.assertIn("无法连接", by_id["agent-b"]["message"])
+
+    def test_bulk_upgrade_endpoint_returns_persistent_batch_status(self):
+        from stream_control_hub import app
+
+        nodes = [{"id": "agent-a", "name": "Agent A", "base_url": "http://100.64.0.10:8787"}]
+
+        class DeferredThread:
+            instances = []
+
+            def __init__(self, target, args=(), **kwargs):
+                self.target = target
+                self.args = args
+                self.kwargs = kwargs
+                self.started = False
+                self.instances.append(self)
+
+            def start(self):
+                self.started = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".git").mkdir()
+            status_file = Path(tmp) / "upgrade-batch.json"
+            with patch.object(app, "ROOT", Path(tmp)), patch.object(
+                app, "UPGRADE_BATCH_STATUS_FILE", status_file
+            ), patch.object(app, "assert_role", return_value="hub"), patch.object(
+                app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(app, "latest_source_version", return_value="def5678"), patch.object(
+                app, "upgradeable_agent_nodes", return_value=nodes
+            ), patch.object(app.threading, "Thread", DeferredThread):
+                response = app.APP.test_client().post(
+                    "/api/upgrade",
+                    json={"target_version": "def5678"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                )
+                data = response.get_json()
+                batch_id = data["result"]["batch_id"]
+                status_response = app.APP.test_client().get(
+                    f"/api/upgrade/batch-status?batch_id={batch_id}"
+                )
+                missing_response = app.APP.test_client().get(
+                    "/api/upgrade/batch-status?batch_id=missing"
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["result"]["agent_count"], 1)
+        self.assertEqual(data["result"]["agent_targets"][0]["node_id"], "agent-a")
+        self.assertEqual(len(DeferredThread.instances), 1)
+        self.assertTrue(DeferredThread.instances[0].started)
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.get_json()["batch_id"], batch_id)
+        self.assertEqual(status_response.get_json()["agents"][0]["node_id"], "agent-a")
+        self.assertEqual(missing_response.status_code, 404)
+
     def test_ui_remembers_last_agent_and_keeps_role_actions_in_settings(self):
         from stream_control_hub import app
 
@@ -421,6 +572,12 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertIn("function beginOperationProgress", app.HTML)
         self.assertIn("function pollOperationProgress", app.HTML)
         self.assertIn("function operationProgressSteps", app.HTML)
+        self.assertIn('kind === "bulk-upgrade"', app.HTML)
+        self.assertIn("/api/upgrade/batch-status?batch_id=", app.HTML)
+        self.assertIn("function bulkUpgradeSnapshot", app.HTML)
+        self.assertIn("function showBulkUpgradeResult", app.HTML)
+        self.assertIn("未完成 Agent：", app.HTML)
+        self.assertIn("Hub + Agent 联动升级", app.HTML)
         self.assertIn("function latestOperationSourceVersion", app.HTML)
         self.assertIn("startOperationProgressPolling", app.HTML)
         self.assertIn("upgradeStatus.state", app.HTML)

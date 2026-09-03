@@ -74,6 +74,8 @@ Agent updates preserve the existing bind host, port, Agent name, Hub pairing URL
 
 Each Agent row in the Hub shows its current Git revision and has its own `升级 / 安装` action. The action schedules an independent systemd upgrade job on that Agent, pulls GitHub `main`, runs the standard installer, and restarts only that Agent. Older copied deployments without Git metadata are bootstrapped in place while preserving `.agent.env` and `agent_data`. The Hub also remembers the last viewed Agent in browser-local storage and restores it on the next visit.
 
+The local Hub's GitHub upgrade action can submit a background upgrade batch for the Hub and every enabled Agent at once. Hub-only, disabled, and explicitly disabled-Agent records are excluded. The page keeps polling the persisted batch status while the front end remains usable, then opens a result dialog after version verification; any Agent that could not be submitted or did not finish is named with its error. The per-Agent upgrade action remains available for an individual retry.
+
 The enlarged node-management area separates `Agent 节点` and `Hub 节点`. Each Agent row can lock a YouTube Profile, reusable live stream, and video independently; each VPS can still run both roles independently: Agent uses port `8787`, Hub uses `8788`. Enabled roles show their Git version and can be upgraded individually; disabled roles are shown in gray and require an explicit security confirmation before activation. Clicking an enabled Hub switches the browser to that Hub. Background Hub installation suppresses control-token output from systemd logs.
 
 The Agent row's `Profile` and `直播流` labels are persistent lock buttons. Locked selectors reject changes until the corresponding label is clicked again to unlock them.

@@ -270,6 +270,12 @@ NODE_RETENTION_SCAN_INTERVAL_SECONDS = max(
 )
 NODE_RETENTION_STOP = threading.Event()
 NODE_RETENTION_LOCK = threading.RLock()
+UPGRADE_BATCH_STATUS_FILE = DATA_DIR / ".upgrade-batch-status.json"
+UPGRADE_BATCH_LOCK = threading.RLock()
+UPGRADE_BATCH_STALE_SECONDS = max(
+    15 * 60,
+    int(os.environ.get("STREAM_HUB_UPGRADE_BATCH_STALE_SECONDS", str(30 * 60))),
+)
 
 
 def youtube_quota_day() -> str:
@@ -1461,6 +1467,240 @@ def save_upgrade_status(
         },
         mode=0o600,
     )
+
+
+def load_upgrade_batch_status() -> dict[str, Any]:
+    try:
+        payload = json.loads(UPGRADE_BATCH_STATUS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_upgrade_batch_status(payload: dict[str, Any]) -> None:
+    write_json_atomic(UPGRADE_BATCH_STATUS_FILE, payload, mode=0o600)
+
+
+def update_upgrade_batch_status(batch_id: str, **updates: Any) -> dict[str, Any]:
+    with UPGRADE_BATCH_LOCK:
+        payload = load_upgrade_batch_status()
+        if str(payload.get("batch_id") or "") != str(batch_id):
+            return payload
+        payload.update(updates)
+        payload["updated_at"] = time.time()
+        save_upgrade_batch_status(payload)
+        return payload
+
+
+def update_upgrade_batch_agent(
+    batch_id: str,
+    node_id: str,
+    **updates: Any,
+) -> dict[str, Any]:
+    with UPGRADE_BATCH_LOCK:
+        payload = load_upgrade_batch_status()
+        if str(payload.get("batch_id") or "") != str(batch_id):
+            return payload
+        agents = list(payload.get("agents") or [])
+        for item in agents:
+            if str(item.get("node_id") or "") == str(node_id):
+                item.update(updates)
+                break
+        payload["agents"] = agents
+        payload["updated_at"] = time.time()
+        save_upgrade_batch_status(payload)
+        return payload
+
+
+def upgradeable_agent_nodes(nodes: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Return configured, enabled Agent nodes; Hub-only records are excluded."""
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for node in list(load_nodes() if nodes is None else nodes):
+        node_id = str(node.get("id") or "").strip()
+        if (
+            not node_id
+            or node_id in seen
+            or node.get("enabled", True) is False
+            or node.get("hub_only")
+            or str(node.get("role") or "").strip().lower() == "hub-only"
+        ):
+            continue
+        role_hints = node.get("role_hints") if isinstance(node.get("role_hints"), dict) else {}
+        agent_hint = role_hints.get("agent") if isinstance(role_hints.get("agent"), dict) else {}
+        if agent_hint.get("enabled") is False:
+            continue
+        if not node_role_urls(node).get("agent"):
+            continue
+        seen.add(node_id)
+        result.append(node)
+    return result
+
+
+def run_hub_agent_upgrade_batch(
+    batch_id: str,
+    target_version: str,
+    agent_nodes: list[dict[str, Any]],
+) -> None:
+    """Submit Agent upgrades in parallel, then schedule the local Hub upgrade."""
+    update_upgrade_batch_status(batch_id, state="running", message="正在并行提交 Agent 升级任务")
+
+    def submit_agent(node: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        result = post_node_json(
+            node,
+            "/api/upgrade",
+            {"target_version": target_version},
+            timeout=30,
+        )
+        return node, result
+
+    workers = min(AGENT_STATUS_REFRESH_MAX_WORKERS, max(1, len(agent_nodes)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agent-upgrade") as executor:
+        futures = {
+            executor.submit(submit_agent, node): node
+            for node in agent_nodes
+        }
+        for future in as_completed(futures):
+            node = futures[future]
+            try:
+                _, result = future.result()
+            except Exception as exc:
+                update_upgrade_batch_agent(
+                    batch_id,
+                    str(node.get("id") or ""),
+                    state="failed",
+                    accepted=False,
+                    unit="",
+                    message=f"Agent 升级任务提交异常：{str(exc)[:500]}",
+                    status_code=0,
+                )
+                continue
+            node_id = str(node.get("id") or "")
+            accepted = bool(result.get("ok"))
+            result_payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+            update_upgrade_batch_agent(
+                batch_id,
+                node_id,
+                state="scheduled" if accepted else "failed",
+                accepted=accepted,
+                unit=str(result_payload.get("unit") or "")[:160],
+                message=str(
+                    result.get("message")
+                    or ("Agent 升级任务已提交" if accepted else "Agent 升级任务提交失败")
+                )[:500],
+                status_code=int(result.get("status_code") or 0),
+            )
+
+    scheduled_agents = [
+        item
+        for item in (load_upgrade_batch_status().get("agents") or [])
+        if item.get("state") == "scheduled"
+    ]
+    failed_agents = [
+        item
+        for item in (load_upgrade_batch_status().get("agents") or [])
+        if item.get("state") == "failed"
+    ]
+    try:
+        hub_result = schedule_hub_upgrade(target_version)
+        hub_payload = hub_result if isinstance(hub_result, dict) else {}
+        update_upgrade_batch_status(
+            batch_id,
+            state="partial" if failed_agents else "scheduled",
+            message=(
+                f"Hub 升级任务已提交；Agent 已提交 {len(scheduled_agents)}/{len(agent_nodes)}"
+                + (f"，失败 {len(failed_agents)} 台" if failed_agents else "")
+            ),
+            hub={
+                "state": "scheduled",
+                "accepted": True,
+                "unit": str(hub_payload.get("unit") or "")[:160],
+                "message": "Hub 升级任务已提交",
+            },
+        )
+    except Exception as exc:
+        update_upgrade_batch_status(
+            batch_id,
+            state="failed",
+            message=f"Hub 升级任务提交失败：{str(exc)[:500]}",
+            hub={
+                "state": "failed",
+                "accepted": False,
+                "unit": "",
+                "message": str(exc)[:500],
+            },
+        )
+
+
+def schedule_hub_agent_upgrade_batch(target_version: str = "") -> dict[str, Any]:
+    try:
+        assert_role("hub", ROOT)
+    except RoleConflictError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if not shutil.which("systemd-run") or not (ROOT / ".git").exists():
+        raise RuntimeError("Hub must be a Git-managed systemd installation")
+
+    target_version = normalize_target_version(target_version) or latest_source_version()
+    with UPGRADE_BATCH_LOCK:
+        existing = load_upgrade_batch_status()
+        existing_state = str(existing.get("state") or "").lower()
+        try:
+            existing_age = time.time() - float(existing.get("updated_at") or 0)
+        except (TypeError, ValueError):
+            existing_age = UPGRADE_BATCH_STALE_SECONDS
+        if existing_state in {"pending", "running", "scheduled", "partial"} and existing_age < UPGRADE_BATCH_STALE_SECONDS:
+            raise RuntimeError("已有 Hub + Agent 联动升级任务正在执行，请等待当前任务完成后再试。")
+
+        agent_nodes = upgradeable_agent_nodes()
+        batch_id = f"hub-agent-upgrade-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        now = time.time()
+        payload = {
+            "version": 1,
+            "batch_id": batch_id,
+            "state": "pending",
+            "message": "联动升级任务已创建",
+            "target_version": target_version,
+            "created_at": now,
+            "updated_at": now,
+            "hub": {
+                "state": "pending",
+                "accepted": False,
+                "unit": "",
+                "message": "等待提交 Hub 升级任务",
+            },
+            "agents": [
+                {
+                    "node_id": str(node.get("id") or ""),
+                    "node_name": str(node.get("name") or node.get("id") or ""),
+                    "state": "pending",
+                    "accepted": False,
+                    "unit": "",
+                    "message": "等待提交 Agent 升级任务",
+                    "status_code": 0,
+                }
+                for node in agent_nodes
+            ],
+        }
+        save_upgrade_batch_status(payload)
+    worker = threading.Thread(
+        target=run_hub_agent_upgrade_batch,
+        args=(batch_id, target_version, agent_nodes),
+        name="hub-agent-upgrade-batch",
+        daemon=True,
+    )
+    worker.start()
+    return {
+        "batch_id": batch_id,
+        "target_version": target_version,
+        "agent_count": len(agent_nodes),
+        "agent_targets": [
+            {
+                "node_id": str(node.get("id") or ""),
+                "node_name": str(node.get("name") or node.get("id") or ""),
+            }
+            for node in agent_nodes
+        ],
+    }
 
 
 def upgrade_unit_active(unit: str) -> bool:
@@ -6348,6 +6588,7 @@ HTML = r"""
     }
 
     function operationProgressSteps(operation) {
+      if (operation.kind === "bulk-upgrade") return ["提交联动任务", "并行更新 Agent", "更新 Hub", "验证全部版本", "完成"];
       if (operation.kind === "upgrade") return ["提交升级", "拉取代码", "重启服务", "验证版本", "完成"];
       if (operation.action === "deactivate") return ["提交任务", "停止旧角色", "清理元数据", "验证状态", "完成"];
       return ["提交任务", "清理旧角色", "等待新服务", "验证角色", "完成"];
@@ -6429,10 +6670,14 @@ HTML = r"""
       refs.operationProgressClose.disabled = true;
     }
 
-    function beginOperationProgress({ kind, action = "", role = "", nodeId = "", nodeName = "", local = false, targetVersion = "" }) {
+    function beginOperationProgress({ kind, action = "", role = "", nodeId = "", nodeName = "", local = false, targetVersion = "", agentTargets = [] }) {
       if (operationProgressTimer) window.clearTimeout(operationProgressTimer);
       const label = role === "hub" ? "Hub" : "Agent";
-      const title = kind === "upgrade" ? `${label} 系统升级` : `${label} 角色转换`;
+      const title = kind === "bulk-upgrade"
+        ? "Hub + Agent 联动升级"
+        : kind === "upgrade"
+          ? `${label} 系统升级`
+          : `${label} 角色转换`;
       activeOperationProgress = {
         kind,
         action,
@@ -6441,6 +6686,7 @@ HTML = r"""
         nodeName: nodeName || nodeId || "当前节点",
         local: Boolean(local),
         targetVersion: String(targetVersion || ""),
+        agentTargets: Array.isArray(agentTargets) ? agentTargets : [],
         startedAt: Date.now(),
         percent: 5,
         step: 0,
@@ -6475,6 +6721,87 @@ HTML = r"""
       }
     }
 
+    function bulkUpgradeSnapshot(operation, batch, snapshot, localInfo) {
+      const targetVersion = operationVersion(operation.targetVersion || batch?.target_version || "");
+      const nodesById = new Map((snapshot || []).map((item) => [String(item.id || ""), item]));
+      const agentItems = (batch?.agents || []).map((item) => {
+        const nodeId = String(item.node_id || "");
+        const node = nodesById.get(nodeId);
+        const info = node?.roles?.agent || {};
+        const upgradeStatus = info.upgrade_status || {};
+        const statusUpdatedAt = Number(upgradeStatus.updated_at || 0) * 1000;
+        const submitFailed = String(item.state || "").toLowerCase() === "failed";
+        const sameUpgrade = Boolean(item.unit)
+          && String(upgradeStatus.unit || "") === String(item.unit || "");
+        const recentUpgradeFailed = String(upgradeStatus.state || "").toLowerCase() === "failed"
+          && (sameUpgrade || (!upgradeStatus.unit && (!statusUpdatedAt || statusUpdatedAt >= operation.startedAt - 5000)));
+        const failed = submitFailed || recentUpgradeFailed;
+        const actualVersion = operationVersion(info.version);
+        const done = !failed
+          && Boolean(info.enabled)
+          && (!targetVersion || actualVersion === targetVersion);
+        return {
+          nodeId,
+          name: item.node_name || node?.name || nodeId,
+          done,
+          failed,
+          pending: !done && !failed,
+          message: recentUpgradeFailed
+            ? upgradeStatus.message || "Agent 后台升级失败"
+            : item.message || "",
+        };
+      });
+      const hubStatus = localInfo?.upgrade_status || {};
+      const hubFailed = String(batch?.hub?.state || "").toLowerCase() === "failed"
+        || String(hubStatus.state || "").toLowerCase() === "failed";
+      const hubDone = !hubFailed
+        && Boolean(localInfo?.enabled)
+        && (!targetVersion || operationVersion(localInfo.version) === targetVersion);
+      const completedAgents = agentItems.filter((item) => item.done).length;
+      const failedAgents = agentItems.filter((item) => item.failed);
+      const waitingAgents = agentItems.filter((item) => item.pending);
+      const terminal = (hubFailed || hubDone) && waitingAgents.length === 0;
+      const ok = hubDone && failedAgents.length === 0 && waitingAgents.length === 0;
+      const lines = [
+        `Hub：${hubDone ? "更新完成" : hubFailed ? "更新失败" : "等待验证"}`,
+        `Agent：${completedAgents}/${agentItems.length} 更新完成`,
+      ];
+      if (failedAgents.length) {
+        lines.push(
+          `未完成 Agent：${failedAgents.map((item) => `${item.name}${item.message ? `（${item.message}）` : ""}`).join("、")}`,
+        );
+      }
+      if (waitingAgents.length) {
+        lines.push(`等待中：${waitingAgents.map((item) => item.name).join("、")}`);
+      }
+      return {
+        targetVersion,
+        agentItems,
+        completedAgents,
+        failedAgents,
+        waitingAgents,
+        hubDone,
+        hubFailed,
+        terminal,
+        ok,
+        message: lines.join("\n"),
+      };
+    }
+
+    async function showBulkUpgradeResult(operation, result) {
+      if (operation.resultDialogShown) return;
+      operation.resultDialogShown = true;
+      await showChoiceDialog({
+        title: result.ok ? "Hub 与 Agent 更新完成" : "联动更新未全部完成",
+        subtitle: result.ok
+          ? `全部组件已验证为 ${result.targetVersion || "GitHub main"}`
+          : "请根据未完成 Agent 提示单独重试",
+        icon: result.ok ? "✓" : "!",
+        message: result.message,
+        choices: [{ label: "知道了", value: "ok", className: "primary" }],
+      });
+    }
+
     async function refreshOperationNodes() {
       const resp = await fetch(`/api/nodes?_=${Date.now()}`, { cache: "no-store" });
       if (!resp.ok) throw new Error(resp.statusText || "节点状态读取失败");
@@ -6492,10 +6819,61 @@ HTML = r"""
       const elapsed = Date.now() - operation.startedAt;
       try {
         if (elapsed > 15 * 60 * 1000) {
-          finishOperationProgress(false, "操作超过 15 分钟仍未完成。请刷新页面检查目标节点服务和版本，确认无误后再重试。");
+          const pendingNames = (operation.agentTargets || [])
+            .map((item) => item?.nodeName || item?.node_id || "")
+            .filter(Boolean);
+          const pendingHint = pendingNames.length
+            ? `\n\n未能确认完成的 Agent：${pendingNames.join("、")}。`
+            : "";
+          finishOperationProgress(false, `操作超过 15 分钟仍未完成。请刷新页面检查目标节点服务和版本，确认无误后再重试。${pendingHint}`);
           return;
         }
         let info = null;
+        let snapshot = [];
+        let batch = null;
+        if (operation.kind === "bulk-upgrade") {
+          const [roleResp, batchResp, nodesSnapshot] = await Promise.all([
+            fetch(`/api/role-status?_=${Date.now()}`, { cache: "no-store" }),
+            fetch(`/api/upgrade/batch-status?batch_id=${encodeURIComponent(operation.batchId || "")}&_=${Date.now()}`, { cache: "no-store" }),
+            refreshOperationNodes(),
+          ]);
+          if (!roleResp.ok) throw new Error(roleResp.statusText || "Hub 状态暂不可用");
+          if (!batchResp.ok) throw new Error(batchResp.statusText || "联动升级状态暂不可用");
+          localRoleStatus = await roleResp.json();
+          batch = await batchResp.json();
+          snapshot = nodesSnapshot;
+          renderNodes();
+          info = localRoleStatus?.roles?.hub || {};
+          const result = bulkUpgradeSnapshot(operation, batch, snapshot, info);
+          operation.targetVersion = result.targetVersion || operation.targetVersion;
+          if (result.terminal) {
+            finishOperationProgress(result.ok, result.message);
+            await showBulkUpgradeResult(operation, result);
+            await refreshAll().catch(() => null);
+          } else if (result.failedAgents.length) {
+            setOperationProgress({
+              percent: 84,
+              step: 3,
+              stage: "验证全部版本",
+              message: result.message,
+            });
+          } else if (result.hubDone && result.completedAgents < result.agentItems.length) {
+            setOperationProgress({
+              percent: 82,
+              step: 3,
+              stage: "等待 Agent 验证",
+              message: result.message,
+            });
+          } else {
+            setOperationProgress({
+              percent: result.completedAgents > 0 ? 68 : 42,
+              step: result.hubDone ? 3 : 2,
+              stage: result.hubDone ? "验证 Agent 版本" : "联动升级执行中",
+              message: result.message,
+            });
+          }
+          return;
+        }
         if (operation.local) {
           const resp = await fetch(`/api/role-status?_=${Date.now()}`, { cache: "no-store" });
           if (!resp.ok) throw new Error(resp.statusText || "本地角色状态暂不可用");
@@ -7131,7 +7509,7 @@ HTML = r"""
           `最新版本：${data.remote_label || data.remote || "--"}`,
           data.behind_count ? `落后提交：${data.behind_count}` : "",
           "",
-          "是否现在升级当前 Hub？VPS 会在后台从 GitHub main 拉取最新代码并重启 Hub 服务；不需要你登录 VPS。",
+          "是否现在联动升级当前 Hub 和 Hub 内所有已启用 Agent？任务会在后台并行从 GitHub main 更新并重启，不影响前台操作；完成后会弹出结果对话框。",
         ].filter(Boolean).join("\n"),
         choices: [
           { label: "确认升级到最新版", value: "upgrade", className: "primary" },
@@ -7207,9 +7585,9 @@ HTML = r"""
 
     async function upgradeCurrentHubFromPrompt(checkData) {
       refs.updateBox.textContent = "正在提交后台升级任务...";
-      uiMessage("正在让 VPS 后台升级 Hub，请不要重复点击。");
+      uiMessage("正在让 Hub 后台联动升级所有 Agent，请不要重复点击。");
       const operation = beginOperationProgress({
-        kind: "upgrade",
+        kind: "bulk-upgrade",
         action: "upgrade",
         role: "hub",
         nodeId: "__local_hub__",
@@ -7235,28 +7613,31 @@ HTML = r"""
       }
       refs.updateBox.textContent = data.ok
         ? [
-            "升级任务已提交",
+            "Hub + Agent 联动升级任务已提交",
             "",
             `当前版本：${checkData?.local_label || checkData?.local || "--"}`,
             `目标版本：${checkData?.remote_label || checkData?.remote || "--"}`,
-            `后台任务：${data.result?.unit || "--"}`,
+            `目标 Agent：${data.result?.agent_count ?? 0} 台`,
+            `批次：${data.result?.batch_id || "--"}`,
             "",
-            "VPS 会自动从 GitHub main 拉取最新代码并重启 Hub。页面可能会短暂断开，稍后刷新即可。",
+            "Hub 与 Agent 会在后台并行从 GitHub main 更新并重启，前台推流和页面操作不受阻塞；完成后会弹出结果对话框。",
           ].join("\n")
         : [
             "升级任务提交失败",
             "",
             data.message || resp.statusText || "请检查当前 Hub 是否为 systemd + Git 安装。",
           ].join("\n");
-      uiMessage(data.ok ? "升级任务已提交，Hub 重启后刷新页面即可。" : "升级任务提交失败，请查看更新模块详情。");
-      log(data.ok ? "当前 Hub GitHub 升级任务已提交" : `当前 Hub 升级失败：${data.message || resp.statusText}`);
+      uiMessage(data.ok ? "Hub + Agent 联动升级任务已提交，后台执行中。" : "联动升级任务提交失败，请查看更新模块详情。");
+      log(data.ok ? "Hub + Agent 联动升级任务已提交" : `联动升级失败：${data.message || resp.statusText}`);
       if (data.ok) {
         operation.targetVersion = operationVersion(data.result?.target_version || operation.targetVersion);
+        operation.batchId = String(data.result?.batch_id || "");
+        operation.agentTargets = Array.isArray(data.result?.agent_targets) ? data.result.agent_targets : [];
         setOperationProgress({
           percent: 18,
           step: 0,
           stage: "后台升级任务已提交",
-          message: data.message || "Hub 正在从 GitHub main 拉取最新代码并重启。",
+          message: data.message || "Hub 与所有 Agent 正在从 GitHub main 并行升级。",
         });
         startOperationProgressPolling(operation);
       } else {
@@ -8417,7 +8798,7 @@ HTML = r"""
             </span>
           </div>
           <div class="role-settings-item">
-            <span><strong>Hub 升级</strong><small>当前版本：${escapeHtml(hubRole.version || "未识别")}。从 GitHub main 检查并升级当前 Hub。</small></span>
+            <span><strong>Hub + Agent 联动升级</strong><small>当前版本：${escapeHtml(hubRole.version || "未识别")}。从 GitHub main 后台并行升级当前 Hub 和所有已启用 Agent。</small></span>
             <span class="actions">
               <button data-local-role-action="upgrade-hub">升级 Hub</button>
             </span>
@@ -13762,10 +14143,24 @@ def api_deactivate_agent_role_from_hub():
 def api_upgrade_hub():
     payload = request.get_json(silent=True) or {}
     try:
-        result = schedule_hub_upgrade(str(payload.get("target_version") or ""))
+        result = schedule_hub_agent_upgrade_batch(str(payload.get("target_version") or ""))
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 409
-    return jsonify({"ok": True, "accepted": True, "message": "HUB upgrade scheduled; the HUB service and role conflict state will be reconciled", "result": result}), 202
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "message": "Hub 与所有已启用 Agent 的联动升级任务已提交，正在后台并行执行",
+        "result": result,
+    }), 202
+
+
+@APP.get("/api/upgrade/batch-status")
+def api_upgrade_batch_status():
+    batch_id = str(request.args.get("batch_id") or "").strip()
+    status = load_upgrade_batch_status()
+    if not batch_id or str(status.get("batch_id") or "") != batch_id:
+        return jsonify({"ok": False, "message": "升级批次不存在"}), 404
+    return jsonify({"ok": True, **status})
 
 
 @APP.get("/api/media")
