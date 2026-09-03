@@ -2391,7 +2391,13 @@ def schedule_hub_agent_upgrade_batch(target_version: str = "") -> dict[str, Any]
             existing_age = time.time() - float(existing.get("updated_at") or 0)
         except (TypeError, ValueError):
             existing_age = UPGRADE_BATCH_STALE_SECONDS
-        if existing_state in {"pending", "running", "scheduled", "partial"} and existing_age < UPGRADE_BATCH_STALE_SECONDS:
+        existing_postcheck = existing.get("postcheck") if isinstance(existing.get("postcheck"), dict) else {}
+        existing_postcheck_state = str(existing_postcheck.get("state") or "").lower()
+        existing_batch_active = existing_state in {"pending", "running", "scheduled"} or (
+            existing_state == "partial"
+            and existing_postcheck_state not in {"completed", "partial", "failed"}
+        )
+        if existing_batch_active and existing_age < UPGRADE_BATCH_STALE_SECONDS:
             raise RuntimeError("已有 Hub + Agent 联动升级任务正在执行，请等待当前任务完成后再试。")
 
         agent_nodes = upgradeable_agent_nodes()

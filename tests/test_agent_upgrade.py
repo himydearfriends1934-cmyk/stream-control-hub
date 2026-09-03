@@ -555,6 +555,54 @@ class AgentUpgradeTests(unittest.TestCase):
         self.assertEqual(status_response.get_json()["agents"][0]["node_id"], "agent-a")
         self.assertEqual(missing_response.status_code, 404)
 
+    def test_bulk_upgrade_allows_retry_after_terminal_partial_postcheck(self):
+        from stream_control_hub import app
+
+        nodes = [{"id": "agent-a", "name": "Agent A", "base_url": "http://100.64.0.10:8787"}]
+
+        class DeferredThread:
+            instances = []
+
+            def __init__(self, target, args=(), **kwargs):
+                self.target = target
+                self.args = args
+                self.kwargs = kwargs
+                self.started = False
+                self.instances.append(self)
+
+            def start(self):
+                self.started = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            status_file = root / "upgrade-batch.json"
+            with patch.object(app, "ROOT", root), patch.object(
+                app, "UPGRADE_BATCH_STATUS_FILE", status_file
+            ), patch.object(app, "assert_role", return_value="hub"), patch.object(
+                app.shutil, "which", return_value="/usr/bin/systemd-run"
+            ), patch.object(app, "latest_source_version", return_value="def5678"), patch.object(
+                app, "upgradeable_agent_nodes", return_value=nodes
+            ), patch.object(app.threading, "Thread", DeferredThread):
+                app.save_upgrade_batch_status({
+                    "version": 1,
+                    "batch_id": "previous-batch",
+                    "state": "partial",
+                    "updated_at": time.time(),
+                    "postcheck": {
+                        "state": "partial",
+                        "completed_at": time.time(),
+                        "ok": False,
+                    },
+                    "agents": [],
+                })
+                result = app.schedule_hub_agent_upgrade_batch("def5678")
+
+        self.assertEqual(result["target_version"], "def5678")
+        self.assertEqual(result["agent_count"], 1)
+        self.assertEqual(len(DeferredThread.instances), 1)
+        self.assertTrue(DeferredThread.instances[0].started)
+
     def test_upgrade_postcheck_repairs_720p_output_for_1080p_source(self):
         from stream_control_hub import app
 
