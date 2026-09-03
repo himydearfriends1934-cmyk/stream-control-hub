@@ -164,7 +164,7 @@ def initial_stream_recommendation(
     source_fps = max(15.0, min(60.0, float(source.get("fps") or 30)))
     cpu_count = max(1, int(cpu_count or 1))
 
-    if cpu_count <= 2 or memory_available_mb and memory_available_mb < 1200:
+    if cpu_count <= 2 or (memory_available_mb is not None and 0 < memory_available_mb < 1200):
         max_long_side, fps, preset = 7680, min(30, round(source_fps)), "superfast"
     elif cpu_count <= 4:
         max_long_side, fps, preset = 7680, min(30, round(source_fps)), "veryfast"

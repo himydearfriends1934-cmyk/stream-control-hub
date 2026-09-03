@@ -215,6 +215,9 @@ class AgentUpgradeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_dir = root / "agent_data"
+            scripts_dir = root / "scripts"
+            scripts_dir.mkdir()
+            (scripts_dir / "agent-upgrade.sh").write_text("#!/bin/sh\n", encoding="utf-8")
             with patch.object(headless_agent, "ROOT", root), patch.object(
                 headless_agent, "DATA_DIR", data_dir
             ), patch.object(
@@ -230,15 +233,14 @@ class AgentUpgradeTests(unittest.TestCase):
             ) as run:
                 headless_agent.schedule_agent_upgrade("def5678")
 
-        command = run.call_args.args[0][-1]
-        self.assertIn("INSTALL_DIR=", command)
-        self.assertIn(str(root), command)
-        self.assertIn('actual_version="$(git -C', command)
-        self.assertIn('expected def5678', command)
-        self.assertIn(".upgrade-status.json", command)
-        self.assertIn(".upgrade-task.lock", command)
-        self.assertNotIn("exec 9=", command)
-        self.assertIn("Another Agent upgrade is already running", command)
+        argv = run.call_args.args[0]
+        # systemd-run 之后是脚本路径和位置参数，不再是 -c <inline_script>
+        self.assertNotIn("-c", argv)
+        self.assertIn(str(scripts_dir / "agent-upgrade.sh"), argv)
+        # ROOT、DATA_DIR、target_version 以位置参数传入
+        self.assertIn(str(root), argv)
+        self.assertIn(str(data_dir), argv)
+        self.assertIn("def5678", argv)
 
     def test_agent_upgrade_writes_pending_status_and_rejects_duplicate(self):
         from stream_control_hub import headless_agent
@@ -252,6 +254,9 @@ class AgentUpgradeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_dir = root / "agent_data"
+            scripts_dir = root / "scripts"
+            scripts_dir.mkdir()
+            (scripts_dir / "agent-upgrade.sh").write_text("#!/bin/sh\n", encoding="utf-8")
             with patch.object(headless_agent, "ROOT", root), patch.object(
                 headless_agent, "DATA_DIR", data_dir
             ), patch.object(

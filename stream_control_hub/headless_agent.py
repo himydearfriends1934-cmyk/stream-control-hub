@@ -75,7 +75,6 @@ UPLOAD_TICKETS_LOCK = threading.Lock()
 UPLOAD_LOCKS: dict[str, threading.Lock] = {}
 UPLOAD_LOCKS_LOCK = threading.Lock()
 UPLOAD_TICKET_PATHS = {"/api/upload-probe", "/api/upload-chunk", "/api/upload-chunk/cancel"}
-TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 PUBLIC_IP_SERVICES = ("https://api.ipify.org", "https://ifconfig.me/ip")
 PUBLIC_ORIGIN_CACHE: dict[str, Any] = {"value": "", "checked_at": 0.0}
 PUBLIC_ORIGIN_LOCK = threading.Lock()
@@ -237,10 +236,6 @@ def schedule_agent_upgrade(target_version: str = "") -> dict[str, Any]:
     if not service:
         raise RuntimeError("unable to identify the current systemd Agent service")
     unit = f"stream-control-agent-upgrade-{int(time.time())}"
-    root = shlex.quote(str(ROOT))
-    branch = shlex.quote(AGENT_SOURCE_BRANCH)
-    data_dir = shlex.quote(str(DATA_DIR))
-    task_lock_file = shlex.quote(str(DATA_DIR / ".upgrade-task.lock"))
     if not (version["managed_install"] and service == "stream-control-headless-agent.service"):
         raise RuntimeError(
             "Agent upgrade requires the managed stream-control-headless-agent.service installation; "
@@ -256,40 +251,9 @@ def schedule_agent_upgrade(target_version: str = "") -> dict[str, Any]:
         )
         if upgrade_unit_active(existing_unit) or recent_pending:
             raise RuntimeError("已有 Agent 升级任务正在执行，请等待当前任务完成后再试。")
-    script = (
-        "set -eu; "
-        f"mkdir -p {data_dir}; "
-        f"status_file={shlex.quote(str(DATA_DIR / '.upgrade-status.json'))}; "
-        f"task_lock_file={task_lock_file}; "
-        "write_status() { "
-        "tmp=\"$status_file.tmp.$$\"; "
-        "printf 'state=%s\\nunit=%s\\ntarget_version=%s\\nmessage=%s\\nexit_code=%s\\nupdated_at=%s\\n' "
-        f"\"$1\" {shlex.quote(unit)} {shlex.quote(target_version)} \"$2\" \"$3\" \"$(date +%s)\" > \"$tmp\"; "
-        "mv \"$tmp\" \"$status_file\"; "
-        "}; "
-        "cleanup_upgrade_lock() { :; }; "
-        "finish_upgrade() { "
-        "code=\"$?\"; "
-        "if [ \"$code\" -eq 0 ]; then write_status succeeded 'Agent upgrade completed' 0; "
-        "elif [ \"$code\" -eq 75 ]; then write_status failed 'Another Agent upgrade is already running' 75; "
-        "elif [ \"$code\" -eq 78 ]; then write_status failed 'Installed Agent version did not match the target version' 78; "
-        "else write_status failed 'Agent upgrade task failed' \"$code\"; fi; "
-        "cleanup_upgrade_lock; "
-        "exit \"$code\"; "
-        "}; "
-        "trap finish_upgrade EXIT; "
-        "write_status running 'Agent upgrade is running' 0; "
-        f"if command -v flock >/dev/null 2>&1; then exec 8>{task_lock_file}; flock -n 8 || exit 75; "
-        f"else lock_dir={task_lock_file}.d; mkdir \"$lock_dir\" || exit 75; "
-        "cleanup_upgrade_lock() { rmdir \"$lock_dir\" >/dev/null 2>&1 || true; }; fi; "
-        "sleep 2; "
-        f"test -z \"$(git -C {root} status --porcelain --untracked-files=no)\"; "
-        f"env BRANCH={branch} CHOICE=1 INSTALL_DIR={root} "
-        f"sh {root}/scripts/install-agent.sh; "
-        f"actual_version=\"$(git -C {root} rev-parse --short HEAD)\"; "
-        f"if [ -n {shlex.quote(target_version)} ] && [ \"$actual_version\" != {shlex.quote(target_version)} ]; then "
-        f"echo \"Agent upgrade finished at $actual_version, expected {shlex.quote(target_version)}\" >&2; exit 78; fi"
-    )
+    upgrade_script = ROOT / "scripts" / "agent-upgrade.sh"
+    if not upgrade_script.exists():
+        raise RuntimeError(f"upgrade script not found: {upgrade_script}")
     install_mode = "transactional-managed-installer"
     save_upgrade_status(
         state="pending",
@@ -298,7 +262,11 @@ def schedule_agent_upgrade(target_version: str = "") -> dict[str, Any]:
         message="Agent upgrade task scheduled",
     )
     result = subprocess.run(
-        ["systemd-run", "--unit", unit, "--collect", "--no-block", "/bin/sh", "-c", script],
+        [
+            "systemd-run", "--unit", unit, "--collect", "--no-block",
+            "/bin/sh", str(upgrade_script),
+            str(ROOT), str(DATA_DIR), unit, AGENT_SOURCE_BRANCH, target_version,
+        ],
         text=True,
         capture_output=True,
         timeout=15,

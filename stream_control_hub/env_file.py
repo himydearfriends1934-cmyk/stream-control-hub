@@ -46,9 +46,9 @@ def parse_env_assignments(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for raw_line in iter_env_lines(text):
         line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in raw_line:
+        if not line or line.startswith("#") or "=" not in line:
             continue
-        key, value = raw_line.split("=", 1)
+        key, value = line.split("=", 1)
         key = key.strip()
         if key and key not in values:
             values[key] = value.strip().strip('"').strip("'")
