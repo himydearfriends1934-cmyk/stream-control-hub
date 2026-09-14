@@ -16352,6 +16352,160 @@ def api_nodes_restart_stream():
     }), 200 if result.get("ok") else int(result.get("status_code") or 502)
 
 
+@APP.get("/api/nodes/<node_id>/stream-status")
+def api_node_stream_status(node_id: str):
+    node = node_by_id(str(node_id).strip())
+    if not node:
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    if not node.get("enabled", True):
+        return jsonify({"ok": False, "message": "node disabled"}), 409
+
+    status = request_node_json(node, "/api/status", timeout=10)
+    if not status.get("ok"):
+        status_cache = load_agent_status_cache()
+        entry = (status_cache.get("nodes") or {}).get(str(node_id).strip())
+        if isinstance(entry, dict) and isinstance(entry.get("health"), dict):
+            status = entry["health"]
+
+    stream = status.get("stream") or {}
+    stream_config = status.get("stream_config") or {}
+    stream_source = status.get("stream_source") or {}
+    current_video = str(stream_config.get("video_path") or stream_source.get("name") or stream_source.get("video_path") or "")
+
+    return jsonify({
+        "ok": True,
+        "node_id": node_id,
+        "streaming": bool(stream.get("running")),
+        "pid": stream.get("pid"),
+        "current_video": current_video,
+        "current_video_name": Path(current_video).name if current_video else "",
+        "restart_ready": bool(stream_config.get("restart_ready")),
+        "videos": status.get("videos") or [],
+    })
+
+
+@APP.post("/api/nodes/stream/switch-or-start")
+def api_nodes_stream_switch_or_start():
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    video_path_raw = str(payload.get("video_path") or payload.get("video_name") or payload.get("fileName") or "").strip()
+    if not node_id:
+        return jsonify({"ok": False, "message": "node_id is required"}), 400
+    if not video_path_raw:
+        return jsonify({"ok": False, "message": "video_path or video_name is required"}), 400
+
+    node = node_by_id(node_id)
+    if not node:
+        return jsonify({"ok": False, "message": "node not found"}), 404
+    if not node.get("enabled", True):
+        return jsonify({"ok": False, "message": "node disabled"}), 409
+
+    status = request_node_json(node, "/api/status", timeout=10)
+    if not status.get("ok"):
+        return jsonify({"ok": False, "message": status.get("message") or "无法连接到该 Agent 节点"}), 502
+
+    stream = status.get("stream") or {}
+    stream_config = status.get("stream_config") or {}
+    is_streaming = bool(stream.get("running"))
+    restart_ready = bool(stream_config.get("restart_ready"))
+
+    # If Agent is currently streaming or has restart_ready: switch video
+    if is_streaming or restart_ready:
+        result = post_node_json(node, "/api/stream/switch-video", {"video_path": video_path_raw}, timeout=30)
+        if not result.get("ok"):
+            result = post_node_json(node, "/api/restart-stream", {"video_path": video_path_raw}, timeout=30)
+
+        if result.get("ok"):
+            with suppress(Exception):
+                current_lock = node_stream_lock_map().get(node_id, {})
+                set_node_stream_lock(node_id, {
+                    **current_lock,
+                    "video_path": video_path_raw,
+                    "library_media_name": Path(video_path_raw).name,
+                })
+            action_type = "replaced" if is_streaming else "restarted"
+            msg = f"已将 Agent 正在直播的视频替换为 {Path(video_path_raw).name}" if is_streaming else f"已使用 {Path(video_path_raw).name} 恢复开播"
+            return jsonify({
+                "ok": True,
+                "action": action_type,
+                "message": msg,
+                "node_id": node_id,
+                "result": result.get("result") or result,
+            })
+        return jsonify({
+            "ok": False,
+            "message": result.get("message") or "替换直播视频失败",
+            "node_id": node_id,
+            "result": result,
+        }), 502
+
+    # Agent is NOT streaming and has NO restart_ready: attempt to start stream
+    lock = node_stream_lock_map().get(node_id, {})
+    profile_map = node_youtube_profile_map()
+    profile_id = profile_map.get(node_id, active_youtube_profile_id())
+    youtube_stream_id = str(lock.get("youtube_stream_id") or "").strip()
+
+    if not youtube_stream_id:
+        try:
+            client = youtube_client_for_id(profile_id)
+            client_status = client.local_status()
+            if client_status.get("authorized"):
+                streams = client.list_streams()
+                if streams and isinstance(streams, list) and streams[0].get("id"):
+                    youtube_stream_id = str(streams[0]["id"]).strip()
+        except Exception:
+            pass
+
+    if not youtube_stream_id and not lock.get("stream_key"):
+        return jsonify({
+            "ok": False,
+            "message": "Agent 当前未开播且尚未配置直播流（请先在 Hub 为该 Agent 绑定 YouTube 直播流或填写推流码后再开播）。",
+            "node_id": node_id,
+        }), 400
+
+    start_payload = {
+        "node_id": node_id,
+        "video_path": video_path_raw,
+        "library_media_name": Path(video_path_raw).name,
+        "youtube_profile_id": profile_id,
+        "youtube_stream_id": youtube_stream_id,
+        "stream_output_mode": "youtube_api" if youtube_stream_id else "direct",
+        "stream_key": str(lock.get("stream_key") or "").strip(),
+        "adaptive_mode": "auto",
+    }
+    node_payload = stream_payload_for_node(start_payload)
+    if node_payload["stream_output_mode"] == "youtube_api" and not node_payload.get("youtube_ingestion_url"):
+        try:
+            node_payload["youtube_ingestion_url"] = youtube_client_for_id(profile_id).ingestion_target(youtube_stream_id)
+        except Exception as exc:
+            if not youtube_api_error_is_transient(exc):
+                return youtube_error_response(exc)
+
+    node_payload = issue_policy(node_payload, reason="hub-stream-start")
+    start_result = post_node_json(node, "/api/start-stream", node_payload, timeout=60)
+    if start_result.get("ok"):
+        with suppress(Exception):
+            set_node_stream_lock(node_id, {
+                "youtube_stream_id": youtube_stream_id,
+                "video_path": video_path_raw,
+                "library_media_name": Path(video_path_raw).name,
+            })
+        return jsonify({
+            "ok": True,
+            "action": "started",
+            "message": f"检测到 Agent 当前未开播，已使用 {Path(video_path_raw).name} 成功立即开播！",
+            "node_id": node_id,
+            "result": redacted_stream_result(start_result),
+        })
+
+    return jsonify({
+        "ok": False,
+        "message": start_result.get("message") or "启动直播失败",
+        "node_id": node_id,
+        "result": redacted_stream_result(start_result),
+    }), 502
+
+
 def youtube_node_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, tuple[Any, int] | None]:
     node_id = str(payload.get("node_id") or "").strip()
     node = node_by_id(node_id)

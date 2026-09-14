@@ -3163,10 +3163,22 @@ def api_stop_stream():
 
 @APP.post("/api/restart-stream")
 def api_restart_stream():
+    req_payload = request.get_json(silent=True) or {}
+    new_video_raw = str(req_payload.get("video_path") or "").strip()
     with STREAM_LIFECYCLE_LOCK:
         payload = load_stream_restart_payload()
         if not payload:
             return jsonify({"ok": False, "message": "no active stream recovery configuration"}), 409
+        if new_video_raw:
+            try:
+                resolved_video = resolve_media_path(new_video_raw)
+                if not resolved_video.exists():
+                    return jsonify({"ok": False, "message": f"视频文件不存在: {resolved_video.name}"}), 404
+                payload["video_path"] = str(resolved_video)
+                write_private_json(STREAM_RESTART_FILE, payload)
+                mark_media_used(resolved_video)
+            except Exception as exc:
+                return jsonify({"ok": False, "message": str(exc)}), 400
         state = load_state()
         payload = apply_preferred_stream_config(payload, state)
         previous_pid = int(state.get("stream_pid") or 0)
@@ -3176,7 +3188,7 @@ def api_restart_stream():
         if not stop_result.get("ok"):
             return jsonify({"ok": False, "message": "failed to stop current stream", "stop": stop_result}), 500
         try:
-            result = launch_stream_process(payload, reason="manual-restart", persist_recovery=False)
+            result = launch_stream_process(payload, reason="manual-restart", persist_recovery=bool(new_video_raw))
             verification = verify_stream_started(result["pid"], Path(result["log_path"]))
             if not verification.get("ok"):
                 stop_process(result["pid"])
@@ -3191,6 +3203,65 @@ def api_restart_stream():
         "ok": True,
         "message": "stream restarted",
         "result": {"previous_pid": previous_pid, "started_pid": result["pid"], "auto_restart": STREAM_AUTO_RESTART_ENABLED},
+    })
+
+
+@APP.post("/api/stream/switch-video")
+def api_stream_switch_video():
+    payload_in = request.get_json(silent=True) or {}
+    video_path_raw = str(payload_in.get("video_path") or payload_in.get("media") or "").strip()
+    if not video_path_raw:
+        return jsonify({"ok": False, "message": "missing video_path"}), 400
+    try:
+        resolved_video = resolve_media_path(video_path_raw)
+    except Exception as exc:
+        return jsonify({"ok": False, "message": f"视频文件无法解析: {exc}"}), 400
+
+    if not resolved_video.exists():
+        return jsonify({"ok": False, "message": f"视频文件不存在: {resolved_video.name}"}), 404
+
+    with STREAM_LIFECYCLE_LOCK:
+        payload = load_stream_restart_payload()
+        if not payload:
+            return jsonify({"ok": False, "message": "Agent 尚未配置推流参数，无法直接替换"}), 409
+
+        payload["video_path"] = str(resolved_video)
+        write_private_json(STREAM_RESTART_FILE, payload)
+        mark_media_used(resolved_video)
+
+        state = load_state()
+        payload = apply_preferred_stream_config(payload, state)
+        previous_pid = int(state.get("stream_pid") or 0)
+        state["stream_desired"] = True
+        save_state(state)
+
+        stop_result = stop_process(previous_pid)
+        if not stop_result.get("ok"):
+            return jsonify({"ok": False, "message": "failed to stop current stream", "stop": stop_result}), 500
+
+        try:
+            result = launch_stream_process(payload, reason="manual-switch-video", persist_recovery=True)
+            verification = verify_stream_started(result["pid"], Path(result["log_path"]))
+            if not verification.get("ok"):
+                stop_process(result["pid"])
+                return jsonify({
+                    "ok": False,
+                    "message": verification.get("message") or "ffmpeg exited immediately",
+                    "log_tail": verification.get("log_tail") or [],
+                }), 502
+        except Exception as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 500
+
+    return jsonify({
+        "ok": True,
+        "message": f"stream video switched to {resolved_video.name}",
+        "result": {
+            "previous_pid": previous_pid,
+            "started_pid": result["pid"],
+            "video_path": str(resolved_video),
+            "video_name": resolved_video.name,
+            "auto_restart": STREAM_AUTO_RESTART_ENABLED,
+        },
     })
 
 

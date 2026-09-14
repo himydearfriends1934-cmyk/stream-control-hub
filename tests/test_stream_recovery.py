@@ -379,6 +379,81 @@ class StreamRecoveryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         post.assert_called_once_with(node, "/api/restart-stream", {}, timeout=30)
 
+    def test_switch_video_endpoint_swaps_video_and_restarts(self):
+        from stream_control_hub import headless_agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self.recovery_paths(headless_agent, tmp)
+            with patches[0], patches[1], patches[2], patches[3], patch.object(
+                headless_agent, "CONTROL_TOKEN", ""
+            ), patch.object(headless_agent, "ffmpeg_command", return_value=["ffmpeg"]), patch.object(
+                headless_agent, "stream_output_url", return_value="rtmp://example/live/key"
+            ), patch.object(
+                headless_agent.subprocess,
+                "Popen",
+                side_effect=[SimpleNamespace(pid=5001), SimpleNamespace(pid=5002)],
+            ), patch.object(
+                headless_agent, "verify_stream_started", return_value={"ok": True}
+            ), patch.object(
+                headless_agent, "stop_process", return_value={"ok": True, "skipped": True}
+            ):
+                video1 = headless_agent.MEDIA_DIR / "video1.mp4"
+                video1.write_bytes(b"v1")
+                video2 = headless_agent.MEDIA_DIR / "video2.mp4"
+                video2.write_bytes(b"v2")
+                client = headless_agent.APP.test_client()
+                client.post(
+                    "/api/start-stream",
+                    json={
+                        "video_path": str(video1),
+                        "stream_key": "test-key",
+                    },
+                )
+                res = client.post(
+                    "/api/stream/switch-video",
+                    json={"video_path": str(video2)},
+                )
+                self.assertEqual(res.status_code, 200)
+                data = res.get_json()
+                self.assertTrue(data["ok"])
+                self.assertEqual(data["result"]["started_pid"], 5002)
+                saved = json.loads(headless_agent.STREAM_RESTART_FILE.read_text(encoding="utf-8"))
+                self.assertEqual(saved["video_path"], str(video2))
+
+    def test_hub_nodes_stream_switch_or_start(self):
+        from stream_control_hub import app
+
+        node = {"id": "node-live", "base_url": "http://100.64.0.20:8787", "enabled": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_file = Path(tmp) / "nodes.json"
+            nodes_file.write_text(json.dumps([node]), encoding="utf-8")
+            with patch.object(app, "NODES_FILE", nodes_file), patch.object(
+                app,
+                "request_node_json",
+                return_value={
+                    "ok": True,
+                    "stream": {"running": True, "pid": 6001},
+                    "stream_config": {"restart_ready": True, "video_path": "old.mp4"},
+                    "videos": [{"name": "new.mp4"}],
+                },
+            ), patch.object(
+                app,
+                "post_node_json",
+                return_value={"ok": True, "message": "switched", "result": {"started_pid": 6002}},
+            ) as post:
+                client = app.APP.test_client()
+                status_res = client.get("/api/nodes/node-live/stream-status")
+                self.assertEqual(status_res.status_code, 200)
+                self.assertTrue(status_res.get_json()["streaming"])
+
+                switch_res = client.post(
+                    "/api/nodes/stream/switch-or-start",
+                    json={"node_id": "node-live", "video_path": "new.mp4"},
+                )
+                self.assertEqual(switch_res.status_code, 200)
+                self.assertEqual(switch_res.get_json()["action"], "replaced")
+                post.assert_called_once_with(node, "/api/stream/switch-video", {"video_path": "new.mp4"}, timeout=30)
+
 
 if __name__ == "__main__":
     unittest.main()
