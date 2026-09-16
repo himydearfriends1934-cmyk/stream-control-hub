@@ -668,10 +668,27 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
   sh "$INSTALL_DIR/scripts/tailscale-install.sh" connect
 fi
 
+# Ensure Tailscale does not override system DNS regardless of how it was installed.
+# Covers the case where user pre-ran "tailscale up" without --accept-dns=false.
+if command -v tailscale >/dev/null 2>&1; then
+  tailscale set --accept-dns=false 2>/dev/null || true
+fi
+
 write_agent_service_unit
 systemctl enable stream-control-headless-agent.service
 systemctl reset-failed stream-control-headless-agent.service >/dev/null 2>&1 || true
 systemctl restart stream-control-headless-agent.service
+
+# DNS pre-flight: verify public domain resolution before the health check loop.
+# A Tailscale MagicDNS misconfiguration will block FFmpeg → YouTube pushes.
+if command -v python3 >/dev/null 2>&1; then
+  if ! python3 -c "import socket; socket.setdefaulttimeout(3); socket.gethostbyname('dns.google')" >/dev/null 2>&1; then
+    echo "WARNING: 公共 DNS 解析失败 (dns.google)。" >&2
+    echo "         可能原因：Tailscale MagicDNS 覆盖了 /etc/resolv.conf 但未配置上游 DNS。" >&2
+    echo "         修复方法：运行 'tailscale set --accept-dns=false'，或在 Tailscale 管理控制台配置上游 DNS 服务器。" >&2
+    echo "         参考：https://tailscale.com/kb/1054/dns" >&2
+  fi
+fi
 
 case "$STREAM_AGENT_HOST" in
   0.0.0.0) PROBE_HOST="127.0.0.1" ;;
